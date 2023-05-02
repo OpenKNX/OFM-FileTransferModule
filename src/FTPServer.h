@@ -494,7 +494,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
         
         case FtpCommands::DirRemove:
         {
-            logInfoP("Dir create %s", data);
+            logInfoP("Dir remove %s", data);
             if(!openFileSystem())
             {
                 resultLength = 1;
