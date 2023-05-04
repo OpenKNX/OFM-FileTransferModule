@@ -16,16 +16,20 @@ class FtpServer : public OpenKNX::Module
         long _lastAccess = 0;
         File _file;
         Dir _dir;
+        uint8_t _size = 0;
         bool _fileOpen = false;
         bool _dirOpen = false;
         bool _fsOpen = false;
+        uint8_t _lastSequence = 0;
         bool openFileSystem();
         bool checkOpenedFile(uint8_t *resultData, uint8_t &resultLength);
         bool checkOpenedDir(uint8_t *resultData, uint8_t &resultLength);
         bool checkOpenFile(uint8_t *resultData, uint8_t &resultLength);
         bool checkOpenDir(uint8_t *resultData, uint8_t &resultLength);
 		bool processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;
-		//bool processFunctionPropertyState(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;
+		void FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength);
+		void FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength);
+        //bool processFunctionPropertyState(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;
 };
 
 //Give your Module a name
@@ -40,12 +44,14 @@ const std::string FtpServer::name()
 //will be displayed in Command Infos 
 const std::string FtpServer::version()
 {
+    //also update library.json
     return "0.0dev";
 }
 
 void FtpServer::loop()
-{
-    
+{  
+    //check lastAction
+    //close file or directory after 3 seconds    
 }
 
 
@@ -53,20 +59,13 @@ enum class FtpCommands
 {
     Format,     //LittleFS.format()
     Exists,     //LittleFS.exists(path)
-    End,
-    FileOpen = 40,
-    FileWrite,
-    FileRead,
-    FileInfo,
-    FileSize,
-    FileClose,
-    FileRename, //LittleFS.rename(pathFrom, pathTo)
-    FileRemove, //LittleFS.remove(path)
-    DirOpen = 80,    //LittleFS.open(path).next()
-    DirGet,
-    DirClose,
-    DirMake,    //LittleFS.mkdir(path)
-    DirRemove,  //LittleFS.rmdir(path)
+    Rename,
+    FileUpload = 40,
+    FileDownload,
+    FileDelete,
+    DirList = 80,
+    DirCreate,
+    DirDelete
 };
 
 
@@ -125,9 +124,68 @@ bool FtpServer::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
     return false;
 }
 
+void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
+{
+    if(_lastSequence+1 != sequence)
+        _file.seek(sequence * _size);
+
+    resultData[0] = 0x00;
+    resultData[1] = sequence & 0xFF;
+    resultData[2] = (sequence >> 8) & 0xFF;
+    int readed = _file.readBytes((char*)resultData+3, _size);
+
+    FastCRC16 crc16;
+    uint16_t crc = crc16.modbus(resultData+1, readed+2);
+    resultData[readed+3] = crc >> 8;
+    resultData[readed+4] = crc & 0xFF;
+
+    if(readed != _size)
+    {
+        _file.close();
+        _fileOpen = false;
+    }
+    
+    resultLength = readed+5;
+    _lastSequence = sequence;
+}
+
+void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
+{
+    if(_lastSequence+1 != sequence)
+    {
+        if(!_file.seek((sequence-1) * _size))
+        {
+            resultData[0] = 0x46;
+            resultLength = 1;
+            logErrorP("File can't seek position");
+            return;
+        }
+    }
+
+    _file.write((char*)data+2, length-2);
+
+    if(length != _size)
+    {
+        _file.close();
+        _fileOpen = false;
+    }
+
+    FastCRC16 crc16;
+    uint16_t crc = crc16.modbus(data, length);
+    
+    resultData[0] = 0x00;
+    resultData[1] = sequence & 0xFF;
+    resultData[2] = (sequence >> 8) & 0xFF;
+    resultData[3] = crc >> 8;
+    resultData[4] = crc & 0xFF;
+
+    resultLength = 5;
+    _lastSequence = sequence;
+}
+
 bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    if(objectIndex != 164) return false;
+    if(objectIndex != 159) return false;
     _lastAccess = millis();
 
     switch((FtpCommands)propertyId)
@@ -150,7 +208,8 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 logErrorP("LittleFS.format() failed");
                 return true;
             }
-            logInfoP("Format end");
+            resultLength = 1;
+            resultData[0] = 0x00;
             return true;
         }
         
@@ -170,159 +229,10 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             resultLength = 2;
             return true;
         }
-        
-        case FtpCommands::End:
+
+        case FtpCommands::Rename:
         {
-            logInfoP("End");
-            if(!_fsOpen)
-            {
-                resultLength = 1;
-                resultData[0] = 0x03;
-                logErrorP("LittleFS not initialized");
-                return true;
-            }
-            LittleFS.end();
-            resultLength = 1;
-            resultData[0] = 0x00;
-            return true;
-        }
-        
-        case FtpCommands::FileOpen:
-        {
-            logInfoP("File open");
-            if(!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
-
-            if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
-                return true;
-
-            uint8_t accessmode = data[0];
-            char* mode;
-            switch(accessmode)
-            {
-                case 0:
-                    mode = (char*)"r";
-                    break;
-                case 1:
-                    mode = (char*)"r+";
-                    break;
-                case 2:
-                    mode = (char*)"w";
-                    break;
-                case 3:
-                    mode = (char*)"w+";
-                    break;
-                case 4:
-                    mode = (char*)"a";
-                    break;
-                case 5:
-                    mode = (char*)"a+";
-                    break;
-            }
-
-            _file = LittleFS.open((char*)(data+1), mode);
-            if (!_file) {
-                resultLength = 1;
-                resultData[0] = 0x42;
-                logErrorP("File can't be opened");
-                return true;
-            }
-
-            _fileOpen = true;
-            resultLength = 0;
-            resultData[0] = 0x00;
-            return true;
-        }
-        
-        case FtpCommands::FileWrite:
-        {
-            logInfoP("File write");
-            
-            if(checkOpenedFile(resultData, resultLength))
-                return true;
-
-            uint32_t position = data[3] << 24 | data[2] << 16 | data[1] << 8 | data[0];
-            _file.seek(position);
-
-            if(_file.write(data +4, length -4) != length -4)
-            {
-                resultData[0] = 0x46;
-                resultLength = 1;
-                logErrorP("File wrote less than it should");
-                return true;
-            }
-
-            FastCRC16 crc16;
-            uint16_t crc = crc16.modbus(data, length);
-
-            resultData[0] = 0x00;
-            resultData[1] = crc >> 8;
-            resultData[2] = crc & 0xFF;
-            resultLength = 3;
-            return true;
-        }
-        
-        case FtpCommands::FileRead:
-        {
-            logInfoP("File read");
-            
-            if(checkOpenedFile(resultData, resultLength))
-                return true;
-
-            uint32_t position = data[3] << 24 | data[2] << 16 | data[1] << 8 | data[0];
-            uint8_t size = data[4];
-            _file.seek(position);
-
-            uint8_t* buffer = new uint8_t[size + 4];
-            buffer[0] = data[0];
-            buffer[1] = data[1];
-            buffer[2] = data[2];
-            buffer[3] = data[3];
-            int readed = _file.read(buffer + 4, size);
-
-            if(readed == 0)
-            {
-                resultData[0] = 0x47;
-                resultLength = 1;
-                logInfoP("File position reached end");
-                return true;
-            }
-
-            FastCRC16 crc16;
-            uint16_t crc = crc16.modbus(buffer, readed + 4);
-
-            resultData[0] = 0x00;
-            resultData[1] = crc >> 8;
-            resultData[2] = crc & 0xFF;
-
-            memcpy(resultData+3, buffer+4, readed);
-
-            resultLength = size + 3;
-
-            delete[] buffer;
-            return true;
-        }
-        
-        case FtpCommands::FileClose:
-        {
-            logInfoP("File close");
-            
-            if(checkOpenedFile(resultData, resultLength))
-                return true;
-
-            _fileOpen = false;
-            resultLength = 0;
-            resultData[0] = 0x00;
-            return true;
-        }
-        
-        case FtpCommands::FileRename:
-        {
+            logInfoP("Rename");
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -336,8 +246,15 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             
             int offset = 0;
             for(int i = 0; i < length; i++)
+            {
                 if(data[i] == 0)
+                {
                     offset = i + 1;
+                    break;
+                }
+            }
+
+            logInfoP("from %s to %s", data, data+offset);
 
             if(!LittleFS.rename((char*)data, (char*)(data+offset)));
             {
@@ -347,13 +264,97 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 return true;
             }
             
-            resultLength = 0;
+            resultLength = 1;
             resultData[0] = 0x00;
             return true;
         }
         
-        case FtpCommands::FileRemove:
+        case FtpCommands::FileDownload:
         {
+            if(!openFileSystem())
+            {
+                resultLength = 1;
+                resultData[0] = 0x01;
+                logErrorP("LittleFS.begin() failed");
+                return true;
+            }
+
+            if(data[0] == 0x00 && data[1] == 0x00)
+            {
+                logInfoP("File download");
+                if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+                    return true;
+
+                _size = data[2] - 5;
+
+                logInfoP("Path: %s", data+3);
+
+                _file = LittleFS.open((char*)(data+3), "r");
+                if (!_file) {
+                    resultLength = 1;
+                    resultData[0] = 0x42;
+                    logErrorP("File can't be opened");
+                    return true;
+                }
+                _fileOpen = true;
+                
+                _lastSequence = 0;
+                FileRead(0, resultData, resultLength);
+                return true;
+            }
+            if(!checkOpenedFile(resultData, resultLength))
+                return true;
+
+            uint16_t sequence = data[1] << 8 | data[0];
+            FileRead(sequence, resultData, resultLength);
+            _lastSequence = sequence;
+            return true;
+        }
+
+        case FtpCommands::FileUpload:
+        {
+            logInfoP("File upload");
+            if(!openFileSystem())
+            {
+                resultLength = 1;
+                resultData[0] = 0x01;
+                logErrorP("LittleFS.begin() failed");
+                return true;
+            }
+
+            if(data[0] == 0x00 && data[1] == 0x00)
+            {
+                if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+                    return true;
+
+                _size = data[2] - 5;
+
+                logInfoP("Path: %s", data+3);
+
+                _file = LittleFS.open((char*)(data+3), "w");
+                if (!_file) {
+                    resultLength = 1;
+                    resultData[0] = 0x42;
+                    logErrorP("File can't be opened");
+                    return true;
+                }
+                _fileOpen = true;
+                _lastSequence = 0;
+                resultData[0] = 0x00;
+                resultLength = 1;
+                return true;
+            }
+            if(!checkOpenedFile(resultData, resultLength))
+                return true;
+
+            uint16_t sequence = data[1] << 8 | data[0];
+            FileWrite(sequence, data, length, resultData, resultLength);
+            return true;
+        }
+        
+        case FtpCommands::FileDelete:
+        {
+            logInfoP("File delete %s", data);
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -378,94 +379,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::DirOpen:
-        {
-            logInfoP("Dir open %s", data);
-            if(!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
-
-            if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
-                return true;
-
-            _dir = LittleFS.openDir((char*)data);
-            
-            //Todo doesnt work for now
-            /*if(!_dir)
-            {
-                resultLength = 1;
-                resultData[0] = 0x82;
-                logErrorP("Dir can't be opened");
-                return true;
-            }*/
-
-            resultLength = 1;
-            resultData[0] = 0x00;
-            return true;
-        }
-        
-        case FtpCommands::DirGet:
-        {
-            logInfoP("Dir get");
-            if(!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
-
-            if(checkOpenedDir(resultData, resultLength))
-                return true;
-            
-            if(!_dir.next())
-            {
-                resultLength = 1;
-                resultData[0] = 0x86;
-                logErrorP("Dir has no more files");
-                return true;
-            }
-
-            resultData[0] = 0x00;
-            resultData[1] = _dir.isFile() ? 0x01 : 0x02;
-            
-            String fileName = _dir.fileName();
-            int pathlength = fileName.length();
-            const char* name = _dir.fileName().c_str();
-            memcpy(resultData + 2, name, pathlength+1);
-            logInfoP(_dir.fileName().c_str());
-            resultLength = pathlength + 2;
-
-            return true;
-        }
-        
-        case FtpCommands::DirClose:
-        {
-            logInfoP("Dir close %s", data);
-            if(!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
-
-            if(checkOpenedDir(resultData, resultLength))
-                return true;
-            
-            //_dir = nullptr;
-            _dirOpen = false;
-
-            resultLength = 1;
-            resultData[0] = 0x00;
-            return true;
-        }
-        
-        case FtpCommands::DirMake:
+        case FtpCommands::DirCreate:
         {
             logInfoP("Dir create %s", data);
             if(!openFileSystem())
@@ -492,9 +406,9 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::DirRemove:
+        case FtpCommands::DirDelete:
         {
-            logInfoP("Dir remove %s", data);
+            logInfoP("Dir delete %s", data);
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -518,7 +432,49 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             resultData[0] = 0x00;
             return true;
         }
-        
+
+        case FtpCommands::DirList:
+        {
+            logInfoP("Dir list %s", data);
+            if(!openFileSystem())
+            {
+                resultLength = 1;
+                resultData[0] = 0x01;
+                logErrorP("LittleFS.begin() failed");
+                return true;
+            }
+
+            if(!_dirOpen)
+            {
+                _dir = LittleFS.openDir((char*)data);
+                _dirOpen = true;
+            }
+
+            if(checkOpenedDir(resultData, resultLength))
+                return true;
+            
+            if(!_dir.next())
+            {
+                resultLength = 2;
+                resultData[0] = 0x00;
+                resultData[1] = 0x00;
+                logErrorP("Dir has no more files");
+                _dirOpen = false;
+                return true;
+            }
+
+            resultData[0] = 0x00;
+            resultData[1] = _dir.isFile() ? 0x01 : 0x02; //0x00 = no more content
+            
+            String fileName = _dir.fileName();
+            int pathlength = fileName.length();
+            const char* name = _dir.fileName().c_str();
+            memcpy(resultData + 2, name, pathlength+1);
+            logInfoP(_dir.fileName().c_str());
+            resultLength = pathlength + 2;
+
+            return true;
+        }
     }
     return false;
 }

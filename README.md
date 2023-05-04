@@ -44,19 +44,13 @@ The FtpServer uses following FunctionProperties.
 These may not used by any other module.
 |ObjectIndex|PropertyId|Used for|
 |---|---|---|
-|164|0|Format|
-|164|1|Exists|
-|164|2|End|
-|164|40|File Open|
-|164|41|File Write|
-|164|42|File Read|
-|164|43|File Info|
-|164|44|File Size|
-|164|45|File Close|
-|164|46|File Rename|
-|164|47|File Remove|
-|164|80|Dir Open|
-|164|81|Dir Get|
-|164|82|Dir Close|
-|164|83|Dir Make|
-|164|84|Dir Remove|
+|159|0|Format|
+|159|1|Exists|
+|159|2|Rename|
+|159|40|File Upload|
+|159|41|File Download|
+|159|42|File Delete|
+|159|43|File Info|
+|159|80|Dir List|
+|159|81|Dir Create|
+|159|82|Dir Delete|

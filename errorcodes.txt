@@ -7,8 +7,7 @@
 0x43    File not opened
 0x44    File can't be deleted
 0x45    File can't be renamed
-0x46    File wrote less than it should
-0x47    File position reached end
+0x46    File can't seek position
 
 0x81    Dir already open
 0x82    Dir can't be opened
