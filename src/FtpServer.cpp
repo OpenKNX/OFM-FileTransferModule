@@ -210,9 +210,6 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 return true;
             }
             
-            if(!checkOpenedFile(resultData, resultLength))
-                return true;
-            
             int offset = 0;
             for(int i = 0; i < length; i++)
             {
@@ -225,7 +222,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
             logInfoP("from %s to %s", data, data+offset);
 
-            if(!LittleFS.rename((char*)data, (char*)(data+offset)));
+            if(!LittleFS.rename((char*)data, (char*)(data+offset)))
             {
                 resultLength = 1;
                 resultData[0] = 0x45;
@@ -335,7 +332,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
-            if(!LittleFS.remove((char*)data));
+            if(!LittleFS.remove((char*)data))
             {
                 resultLength = 1;
                 resultData[0] = 0x44;
@@ -404,7 +401,6 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
         case FtpCommands::DirList:
         {
-            logInfoP("Dir list %s", data);
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -415,6 +411,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
             if(!_dirOpen)
             {
+                logInfoP("Dir list %s", (char*)data);
                 _dir = LittleFS.openDir((char*)data);
                 _dirOpen = true;
             }
@@ -437,11 +434,17 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             
             String fileName = _dir.fileName();
             int pathlength = fileName.length();
-            const char* name = _dir.fileName().c_str();
-            memcpy(resultData + 2, name, pathlength+1);
+
+            uint8_t *chars = new uint8_t[pathlength+1];
+            for(int i = 0; i < pathlength; i++)
+                chars[i] = fileName[i];
+            chars[pathlength] = 0x00;
+
+            memcpy(resultData + 2, chars, pathlength+1);
             logInfoP(_dir.fileName().c_str());
             resultLength = pathlength + 2;
 
+            delete[] chars;
             return true;
         }
     }
