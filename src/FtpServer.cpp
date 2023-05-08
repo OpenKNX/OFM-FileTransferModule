@@ -96,7 +96,7 @@ bool FtpServer::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
 void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
     if(_lastSequence+1 != sequence)
-        _file.seek(sequence * _size);
+        _file.seek((sequence-1) * _size);
 
     resultData[0] = 0x00;
     resultData[1] = sequence & 0xFF;
@@ -265,7 +265,13 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 _fileOpen = true;
                 
                 _lastSequence = 0;
-                FileRead(0, resultData, resultLength);
+                int fileSize = _file.size();
+                resultData[0] = 0x00;
+                resultData[1] = fileSize & 0xFF;
+                resultData[2] = (fileSize >> 8) & 0xFF;
+                resultData[3] = (fileSize >> 16) & 0xFF;
+                resultData[4] = (fileSize >> 24) & 0xFF;
+                resultLength = 5;
                 return true;
             }
             if(!checkOpenedFile(resultData, resultLength))
