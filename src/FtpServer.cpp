@@ -331,7 +331,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
-                logErrorP("Filesystem begin failed");
+                logErrorP("LittleFS.begin() failed");
                 return true;
             }
             
