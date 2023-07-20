@@ -21,6 +21,19 @@ void FtpServer::loop()
 {  
     //check lastAction
     //close file or directory after 3 seconds    
+
+    if(_fileOpen && millis() - _heartbeat > 3000)
+    {
+        _file.close();
+        _file = nullptr;
+        _fileOpen = false;
+    }
+    
+    if(_dirOpen && millis() - _heartbeat > 3000)
+    {
+        _dir = nullptr;
+        _dirOpen = false;
+    }
 }
 
 
@@ -34,7 +47,8 @@ enum class FtpCommands
     FileDelete,
     DirList = 80,
     DirCreate,
-    DirDelete
+    DirDelete,
+    Cancel = 90;
 };
 
 
@@ -237,6 +251,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
         
         case FtpCommands::FileDownload:
         {
+            _heartbeat = millis();
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -285,6 +300,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
         case FtpCommands::FileUpload:
         {
+            _heartbeat = millis();
             logInfoP("File upload");
             if(!openFileSystem())
             {
@@ -407,6 +423,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
         case FtpCommands::DirList:
         {
+            _heartbeat = millis();
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -451,6 +468,23 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             resultLength = pathlength + 2;
 
             delete[] chars;
+            return true;
+        }
+
+        case FtpCommands::Cancel:
+        {
+            if(_fileOpen)
+            {
+                _file.close();
+                _fileOpen = false;
+            }
+
+            if(_dirOpen)
+            {
+                _dir = nullptr;
+                _dirOpen = false;
+            }
+            resultLength = 0;
             return true;
         }
     }

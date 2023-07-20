@@ -13,6 +13,7 @@ class FtpServer : public OpenKNX::Module
 		void loop() override;
 
 	private:
+        unsigned long _heartbeat = 0;
         long _lastAccess = 0;
         File _file;
         Dir _dir;
