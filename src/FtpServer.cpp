@@ -25,13 +25,11 @@ void FtpServer::loop()
     if(_fileOpen && millis() - _heartbeat > 3000)
     {
         _file.close();
-        _file = nullptr;
         _fileOpen = false;
     }
     
     if(_dirOpen && millis() - _heartbeat > 3000)
     {
-        _dir = nullptr;
         _dirOpen = false;
     }
 }
@@ -48,7 +46,7 @@ enum class FtpCommands
     DirList = 80,
     DirCreate,
     DirDelete,
-    Cancel = 90;
+    Cancel = 90
 };
 
 
@@ -481,7 +479,6 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
             if(_dirOpen)
             {
-                _dir = nullptr;
                 _dirOpen = false;
             }
             resultLength = 0;
