@@ -26,11 +26,13 @@ void FtpServer::loop()
     {
         _file.close();
         _fileOpen = false;
+        logErrorP("File closed due no heartbeat");
     }
     
     if(_dirOpen && millis() - _heartbeat > 3000)
     {
         _dirOpen = false;
+        logErrorP("Dir closed due no heartbeat");
     }
 }
 
@@ -76,9 +78,9 @@ bool FtpServer::checkOpenedFile(uint8_t *resultData, uint8_t &resultLength)
         resultLength = 1;
         resultData[0] = 0x43;
         logErrorP("File not opened");
-        return true;
+        return false;
     }
-    return false;
+    return true;
 }
 
 bool FtpServer::checkOpenDir(uint8_t *resultData, uint8_t &resultLength)
@@ -100,9 +102,9 @@ bool FtpServer::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
         resultLength = 1;
         resultData[0] = 0x83;
         logErrorP("Dir not opened");
-        return true;
+        return false;
     }
-    return false;
+    return true;
 }
 
 void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
@@ -124,6 +126,7 @@ void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &result
     {
         _file.close();
         _fileOpen = false;
+        logInfoP("File closed - Read");
     }
     
     resultLength = readed+5;
@@ -143,12 +146,18 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
         }
     }
 
-    _file.write((char*)data+2, length-2);
+    uint8_t xx = _file.write((char*)data+2, length-2);
+
+    if(xx != length)
+    {
+        logErrorP("nicht so viel geschrieben wie bekommen");
+    }
 
     if(length != _size)
     {
         _file.close();
         _fileOpen = false;
+        logInfoP("File closed - Write");
     }
 
     FastCRC16 crc16;
@@ -328,6 +337,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 _lastSequence = 0;
                 resultData[0] = 0x00;
                 resultLength = 1;
+                logInfoP("File opened");
                 return true;
             }
             if(!checkOpenedFile(resultData, resultLength))
@@ -475,6 +485,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             {
                 _file.close();
                 _fileOpen = false;
+                logInfoP("File closed - Cancel");
             }
 
             if(_dirOpen)
