@@ -14,10 +14,10 @@ const std::string FtpServer::name()
 const std::string FtpServer::version()
 {
     //also update library.json
-    return "0.0dev";
+    return "0.1dev";
 }
 
-void FtpServer::loop()
+void FtpServer::loop(bool conf)
 {  
     //check lastAction
     //close file or directory after 3 seconds    
@@ -115,29 +115,34 @@ void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &result
     resultData[0] = 0x00;
     resultData[1] = sequence & 0xFF;
     resultData[2] = (sequence >> 8) & 0xFF;
-    int readed = _file.readBytes((char*)resultData+3, _size);
+    int readed = _file.readBytes((char*)resultData+4, _size - 6);
+    resultData[3] = readed & 0xFF;
 
-    FastCRC16 crc16;
-    uint16_t crc = crc16.modbus(resultData+1, readed+2);
-    resultData[readed+3] = crc >> 8;
-    resultData[readed+4] = crc & 0xFF;
+    logInfoP("readed %i/%i bytes", readed, _size - 6);
 
-    if(readed != _size)
+    if(readed == 0)
     {
         _file.close();
         _fileOpen = false;
         logInfoP("File closed - Read");
     }
     
-    resultLength = readed+5;
-    _lastSequence = sequence;
+    FastCRC16 crc16;
+    uint16_t crc = crc16.modbus(resultData+1, readed+3);
+    resultData[readed+4] = crc >> 8;
+    resultData[readed+5] = crc & 0xFF;
+    logInfoP("crc: %i", crc);
+
+    resultLength = readed+6;
 }
 
 void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
     if(_lastSequence+1 != sequence)
     {
-        if(!_file.seek((sequence-1) * _size))
+        logErrorP("%i", _lastSequence);
+        logErrorP("seeking to %i", (sequence-1) * (_size-3));
+        if(!_file.seek((sequence-1) * (_size-3)))
         {
             resultData[0] = 0x46;
             resultLength = 1;
@@ -146,18 +151,14 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
         }
     }
 
-    uint8_t xx = _file.write((char*)data+2, length-2);
+    uint8_t xx = _file.write((char*)data+3, data[2]);
 
-    if(xx != length)
-    {
-        logErrorP("nicht so viel geschrieben wie bekommen");
-    }
+    if(sequence % 5 == 0)
+        _file.flush();
 
-    if(length != _size)
+    if(xx != data[2])
     {
-        _file.close();
-        _fileOpen = false;
-        logInfoP("File closed - Write");
+        logErrorP("nicht so viel geschrieben wie bekommen %i - %i", xx, length);
     }
 
     FastCRC16 crc16;
@@ -170,11 +171,11 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
     resultData[4] = crc & 0xFF;
 
     resultLength = 5;
-    _lastSequence = sequence;
 }
 
 bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
+    logInfoP("FP O=%i P=%i", objectIndex, propertyId);
     if(objectIndex != 159) return false;
     _lastAccess = millis();
 
@@ -267,6 +268,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 return true;
             }
 
+                logInfoP("File download x");
             if(data[0] == 0x00 && data[1] == 0x00)
             {
                 logInfoP("File download");
@@ -308,7 +310,6 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
         case FtpCommands::FileUpload:
         {
             _heartbeat = millis();
-            logInfoP("File upload");
             if(!openFileSystem())
             {
                 resultLength = 1;
@@ -319,14 +320,16 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
 
             if(data[0] == 0x00 && data[1] == 0x00)
             {
+                logInfoP("File upload");
                 if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
                 _size = data[2] - 5;
 
-                logInfoP("Path: %s", data+3);
-
+                //logInfoP("Path: %s", data+3);
+                logInfoP("open");
                 _file = LittleFS.open((char*)(data+3), "w");
+                logInfoP("opened");
                 if (!_file) {
                     resultLength = 1;
                     resultData[0] = 0x42;
@@ -338,6 +341,15 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 resultData[0] = 0x00;
                 resultLength = 1;
                 logInfoP("File opened");
+                return true;
+            }
+            if(data[0] == 0xFF && data[1] == 0xFF)
+            {
+                logInfoP("Upload finished");
+                _file.flush();
+                _file.close();
+                _fileOpen = false;
+                resultLength = 0;
                 return true;
             }
             if(!checkOpenedFile(resultData, resultLength))
@@ -370,7 +382,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 return true;
             }
             
-            resultLength = 0;
+            resultLength = 1;
             resultData[0] = 0x00;
             return true;
         }
@@ -447,7 +459,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 _dirOpen = true;
             }
 
-            if(checkOpenedDir(resultData, resultLength))
+            if(!checkOpenedDir(resultData, resultLength))
                 return true;
             
             if(!_dir.next())

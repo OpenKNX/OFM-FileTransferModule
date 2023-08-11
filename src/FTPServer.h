@@ -10,7 +10,7 @@ class FtpServer : public OpenKNX::Module
 	public:
 		const std::string name() override;
 		const std::string version() override;
-		void loop() override;
+		void loop(bool conf) override;
 
 	private:
         unsigned long _heartbeat = 0;
@@ -21,7 +21,7 @@ class FtpServer : public OpenKNX::Module
         bool _fileOpen = false;
         bool _dirOpen = false;
         bool _fsOpen = false;
-        uint8_t _lastSequence = 0;
+        uint16_t _lastSequence = 0;
         bool openFileSystem();
         bool checkOpenedFile(uint8_t *resultData, uint8_t &resultLength);
         bool checkOpenedDir(uint8_t *resultData, uint8_t &resultLength);
