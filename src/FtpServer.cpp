@@ -140,7 +140,6 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
 {
     if(_lastSequence+1 != sequence)
     {
-        logErrorP("%i", _lastSequence);
         logErrorP("seeking to %i", (sequence-1) * (_size-3));
         if(!_file.seek((sequence-1) * (_size-3)))
         {
@@ -153,7 +152,7 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
 
     uint8_t xx = _file.write((char*)data+3, data[2]);
 
-    if(sequence % 5 == 0)
+    if(sequence % 10 == 0)
         _file.flush();
 
     if(xx != data[2])
@@ -171,11 +170,12 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
     resultData[4] = crc & 0xFF;
 
     resultLength = 5;
+
+    _lastSequence = sequence;
 }
 
 bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    logInfoP("FP O=%i P=%i", objectIndex, propertyId);
     if(objectIndex != 159) return false;
     _lastAccess = millis();
 
@@ -324,7 +324,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
                 if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
-                _size = data[2] - 5;
+                _size = data[2];
 
                 //logInfoP("Path: %s", data+3);
                 logInfoP("open");
