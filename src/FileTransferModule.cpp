@@ -13,8 +13,11 @@ const std::string FileTransferModule::name()
 //will be displayed in Command Infos 
 const std::string FileTransferModule::version()
 {
-    //also update library.json
-    return "0.1dev";
+    char buffer [10];
+    int length;
+    length = sprintf (buffer, "%i.%i.%i", _major, _minor, _build);
+    std::string ret(buffer, length);
+    return ret;
 }
 
 void FileTransferModule::loop(bool conf)
@@ -48,7 +51,8 @@ enum class FtmCommands
     DirList = 80,
     DirCreate,
     DirDelete,
-    Cancel = 90
+    Cancel = 90,
+    GetVersion = 100
 };
 
 
@@ -505,6 +509,18 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 _dirOpen = false;
             }
             resultLength = 0;
+            return true;
+        }
+
+        case FtmCommands::GetVersion:
+        {
+            resultLength = 6;
+            resultData[0] = _major >> 8;
+            resultData[1] = _major & 0xFF;
+            resultData[2] = _minor >> 8;
+            resultData[3] = _minor & 0xFF;
+            resultData[4] = _build >> 8;
+            resultData[5] = _build & 0xFF;
             return true;
         }
     }

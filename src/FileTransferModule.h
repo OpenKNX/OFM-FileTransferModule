@@ -10,6 +10,9 @@ class FileTransferModule : public OpenKNX::Module
 	public:
 		const std::string name() override;
 		const std::string version() override;
+        const uint8_t _major = 0; // also update library.json
+        const uint8_t _minor = 0;
+        const uint8_t _build = 3;
 		void loop(bool conf) override;
 
 	private:
