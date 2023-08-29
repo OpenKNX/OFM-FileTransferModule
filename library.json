@@ -1,6 +1,6 @@
 {
-  "name": "OFM-FtpServer",
-  "version": "0.0.0+20230413122917",
+  "name": "OFM-FileTransferModule",
+  "version": "0.0.1",
   "dependencies":
   {
       "frankboesing/FastCRC": "^1.41"

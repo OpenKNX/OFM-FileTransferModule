@@ -5,7 +5,7 @@
 
 #define INFO_INTERVAL 10000
 
-class FtpServer : public OpenKNX::Module
+class FileTransferModule : public OpenKNX::Module
 {
 	public:
 		const std::string name() override;

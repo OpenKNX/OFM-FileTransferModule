@@ -1,23 +1,23 @@
-#include "FtpServer.h"
+#include "FileTransferModule.h"
 
 
 //Give your Module a name
 //it will be displayed when you use the method log("Hello")
 // -> Log     Hello
-const std::string FtpServer::name()
+const std::string FileTransferModule::name()
 {
-    return "FtpServer";
+    return "FileTransferModule";
 }
 
 //You can also give it a version
 //will be displayed in Command Infos 
-const std::string FtpServer::version()
+const std::string FileTransferModule::version()
 {
     //also update library.json
     return "0.1dev";
 }
 
-void FtpServer::loop(bool conf)
+void FileTransferModule::loop(bool conf)
 {  
     //check lastAction
     //close file or directory after 3 seconds    
@@ -37,7 +37,7 @@ void FtpServer::loop(bool conf)
 }
 
 
-enum class FtpCommands
+enum class FtmCommands
 {
     Format,     //LittleFS.format()
     Exists,     //LittleFS.exists(path)
@@ -52,14 +52,14 @@ enum class FtpCommands
 };
 
 
-bool FtpServer::openFileSystem()
+bool FileTransferModule::openFileSystem()
 {
     if(_fsOpen) return true;
 
     return LittleFS.begin();
 }
 
-bool FtpServer::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
+bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
 {
     if(_fileOpen)
     {
@@ -71,7 +71,7 @@ bool FtpServer::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
     return false;
 }
 
-bool FtpServer::checkOpenedFile(uint8_t *resultData, uint8_t &resultLength)
+bool FileTransferModule::checkOpenedFile(uint8_t *resultData, uint8_t &resultLength)
 {
     if(!_fileOpen)
     {
@@ -83,7 +83,7 @@ bool FtpServer::checkOpenedFile(uint8_t *resultData, uint8_t &resultLength)
     return true;
 }
 
-bool FtpServer::checkOpenDir(uint8_t *resultData, uint8_t &resultLength)
+bool FileTransferModule::checkOpenDir(uint8_t *resultData, uint8_t &resultLength)
 {
     if(_dirOpen)
     {
@@ -95,7 +95,7 @@ bool FtpServer::checkOpenDir(uint8_t *resultData, uint8_t &resultLength)
     return false;
 }
 
-bool FtpServer::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
+bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
 {
     if(!_dirOpen)
     {
@@ -107,7 +107,7 @@ bool FtpServer::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
     return true;
 }
 
-void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
+void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
     if(_lastSequence+1 != sequence)
         _file.seek((sequence-1) * _size);
@@ -136,7 +136,7 @@ void FtpServer::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &result
     resultLength = readed+6;
 }
 
-void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
+void FileTransferModule::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
     if(_lastSequence+1 != sequence)
     {
@@ -174,14 +174,14 @@ void FtpServer::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint
     _lastSequence = sequence;
 }
 
-bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     if(objectIndex != 159) return false;
     _lastAccess = millis();
 
-    switch((FtpCommands)propertyId)
+    switch((FtmCommands)propertyId)
     {
-        case FtpCommands::Format:
+        case FtmCommands::Format:
         {
             logInfoP("Format");
             if(!openFileSystem())
@@ -204,7 +204,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::Exists:
+        case FtmCommands::Exists:
         {
             logInfoP("Exists");
             if(!openFileSystem())
@@ -221,7 +221,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
 
-        case FtpCommands::Rename:
+        case FtmCommands::Rename:
         {
             logInfoP("Rename");
             if(!openFileSystem())
@@ -257,7 +257,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::FileDownload:
+        case FtmCommands::FileDownload:
         {
             _heartbeat = millis();
             if(!openFileSystem())
@@ -307,7 +307,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
 
-        case FtpCommands::FileUpload:
+        case FtmCommands::FileUpload:
         {
             _heartbeat = millis();
             if(!openFileSystem())
@@ -360,7 +360,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::FileDelete:
+        case FtmCommands::FileDelete:
         {
             logInfoP("File delete %s", data);
             if(!openFileSystem())
@@ -387,7 +387,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::DirCreate:
+        case FtmCommands::DirCreate:
         {
             logInfoP("Dir create %s", data);
             if(!openFileSystem())
@@ -414,7 +414,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
         
-        case FtpCommands::DirDelete:
+        case FtmCommands::DirDelete:
         {
             logInfoP("Dir delete %s", data);
             if(!openFileSystem())
@@ -441,7 +441,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
 
-        case FtpCommands::DirList:
+        case FtmCommands::DirList:
         {
             _heartbeat = millis();
             if(!openFileSystem())
@@ -491,7 +491,7 @@ bool FtpServer::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId,
             return true;
         }
 
-        case FtpCommands::Cancel:
+        case FtmCommands::Cancel:
         {
             if(_fileOpen)
             {
