@@ -1,4 +1,6 @@
 #include "FileTransferModule.h"
+#include "versions.h"
+#include <PicoOTA.h>
 
 
 //Give your Module a name
@@ -13,11 +15,7 @@ const std::string FileTransferModule::name()
 //will be displayed in Command Infos 
 const std::string FileTransferModule::version()
 {
-    char buffer [10];
-    int length;
-    length = sprintf (buffer, "%i.%i.%i", _major, _minor, _build);
-    std::string ret(buffer, length);
-    return ret;
+    return MODULE_FileTransferModule_Version;
 }
 
 void FileTransferModule::loop(bool conf)
@@ -25,17 +23,23 @@ void FileTransferModule::loop(bool conf)
     //check lastAction
     //close file or directory after 3 seconds    
 
-    if(_fileOpen && millis() - _heartbeat > 3000)
+    if(_fileOpen && millis() - _heartbeat > 7000)
     {
         _file.close();
         _fileOpen = false;
         logErrorP("File closed due no heartbeat");
     }
     
-    if(_dirOpen && millis() - _heartbeat > 3000)
+    if(_dirOpen && millis() - _heartbeat > 7000)
     {
         _dirOpen = false;
         logErrorP("Dir closed due no heartbeat");
+    }
+
+    if(_rebootRequested && millis() - _rebootRequested >= 2000)
+    {
+        logInfoP("Restarting now");
+        rp2040.reboot();
     }
 }
 
@@ -52,7 +56,8 @@ enum class FtmCommands
     DirCreate,
     DirDelete,
     Cancel = 90,
-    GetVersion = 100
+    GetVersion = 100,
+    DoUpdate
 };
 
 
@@ -522,6 +527,18 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             resultData[4] = _build >> 8;
             resultData[5] = _build & 0xFF;
             return true;
+        }
+
+        case FtmCommands::DoUpdate:
+        {
+            logInfoP("Updated initiated");
+            picoOTA.begin();
+            picoOTA.addFile((char*)data);
+            picoOTA.commit();
+            resultLength = 0;
+            _rebootRequested = millis();
+            openknx.flash.save();
+            logInfoP("Device will restart in 2000ms");
         }
     }
     return false;

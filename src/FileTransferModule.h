@@ -16,6 +16,7 @@ class FileTransferModule : public OpenKNX::Module
 		void loop(bool conf) override;
 
 	private:
+        unsigned long _rebootRequested = 0;
         unsigned long _heartbeat = 0;
         long _lastAccess = 0;
         File _file;
