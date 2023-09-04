@@ -2,52 +2,50 @@
 #include "versions.h"
 #include <PicoOTA.h>
 
-
-//Give your Module a name
-//it will be displayed when you use the method log("Hello")
-// -> Log     Hello
+// Give your Module a name
+// it will be displayed when you use the method log("Hello")
+//  -> Log     Hello
 const std::string FileTransferModule::name()
 {
     return "FileTransferModule";
 }
 
-//You can also give it a version
-//will be displayed in Command Infos 
+// You can also give it a version
+// will be displayed in Command Infos
 const std::string FileTransferModule::version()
 {
     return MODULE_FileTransferModule_Version;
 }
 
 void FileTransferModule::loop(bool conf)
-{  
-    //check lastAction
-    //close file or directory after 3 seconds    
+{
+    // check lastAction
+    // close file or directory after 3 seconds
 
-    if(_fileOpen && millis() - _heartbeat > 11000)
+    if (_fileOpen && millis() - _heartbeat > 11000)
     {
         _file.close();
         _fileOpen = false;
         logErrorP("File closed due no heartbeat");
     }
-    
-    if(_dirOpen && millis() - _heartbeat > 11000)
+
+    if (_dirOpen && millis() - _heartbeat > 11000)
     {
         _dirOpen = false;
         logErrorP("Dir closed due no heartbeat");
     }
 
-    if(_rebootRequested && millis() - _rebootRequested >= 2000)
+    if (_rebootRequested && millis() - _rebootRequested >= 2000)
     {
         logInfoP("Restarting now");
         rp2040.reboot();
     }
 }
 
-
 enum class FtmCommands
 {
-    Format,     //LittleFS.format()
-    Exists,     //LittleFS.exists(path)
+    Format, // LittleFS.format()
+    Exists, // LittleFS.exists(path)
     Rename,
     FileUpload = 40,
     FileDownload,
@@ -60,17 +58,16 @@ enum class FtmCommands
     DoUpdate
 };
 
-
 bool FileTransferModule::openFileSystem()
 {
-    if(_fsOpen) return true;
+    if (_fsOpen) return true;
 
     return LittleFS.begin();
 }
 
 bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
 {
-    if(_fileOpen)
+    if (_fileOpen)
     {
         resultLength = 1;
         resultData[0] = 0x41;
@@ -82,7 +79,7 @@ bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLengt
 
 bool FileTransferModule::checkOpenedFile(uint8_t *resultData, uint8_t &resultLength)
 {
-    if(!_fileOpen)
+    if (!_fileOpen)
     {
         resultLength = 1;
         resultData[0] = 0x43;
@@ -94,7 +91,7 @@ bool FileTransferModule::checkOpenedFile(uint8_t *resultData, uint8_t &resultLen
 
 bool FileTransferModule::checkOpenDir(uint8_t *resultData, uint8_t &resultLength)
 {
-    if(_dirOpen)
+    if (_dirOpen)
     {
         resultLength = 1;
         resultData[0] = 0x81;
@@ -106,7 +103,7 @@ bool FileTransferModule::checkOpenDir(uint8_t *resultData, uint8_t &resultLength
 
 bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLength)
 {
-    if(!_dirOpen)
+    if (!_dirOpen)
     {
         resultLength = 1;
         resultData[0] = 0x83;
@@ -118,39 +115,39 @@ bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLeng
 
 void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
-    if(_lastSequence+1 != sequence)
-        _file.seek((sequence-1) * _size);
+    if (_lastSequence + 1 != sequence)
+        _file.seek((sequence - 1) * _size);
 
     resultData[0] = 0x00;
     resultData[1] = sequence & 0xFF;
     resultData[2] = (sequence >> 8) & 0xFF;
-    int readed = _file.readBytes((char*)resultData+4, _size - 6);
+    int readed = _file.readBytes((char *)resultData + 4, _size - 6);
     resultData[3] = readed & 0xFF;
 
     logInfoP("readed %i/%i bytes", readed, _size - 6);
 
-    if(readed == 0)
+    if (readed == 0)
     {
         _file.close();
         _fileOpen = false;
         logInfoP("File closed - Read");
     }
-    
+
     FastCRC16 crc16;
-    uint16_t crc = crc16.modbus(resultData+1, readed+3);
-    resultData[readed+4] = crc >> 8;
-    resultData[readed+5] = crc & 0xFF;
+    uint16_t crc = crc16.modbus(resultData + 1, readed + 3);
+    resultData[readed + 4] = crc >> 8;
+    resultData[readed + 5] = crc & 0xFF;
     logInfoP("crc: %i", crc);
 
-    resultLength = readed+6;
+    resultLength = readed + 6;
 }
 
 void FileTransferModule::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
-    if(_lastSequence+1 != sequence)
+    if (_lastSequence + 1 != sequence)
     {
-        logErrorP("seeking to %i", (sequence-1) * (_size-3));
-        if(!_file.seek((sequence-1) * (_size-3)))
+        logErrorP("seeking to %i", (sequence - 1) * (_size - 3));
+        if (!_file.seek((sequence - 1) * (_size - 3)))
         {
             resultData[0] = 0x46;
             resultLength = 1;
@@ -159,19 +156,19 @@ void FileTransferModule::FileWrite(uint16_t sequence, uint8_t *data, uint8_t len
         }
     }
 
-    uint8_t xx = _file.write((char*)data+3, data[2]);
+    uint8_t xx = _file.write((char *)data + 3, data[2]);
 
-    if(sequence % 10 == 0)
+    if (sequence % 10 == 0)
         _file.flush();
 
-    if(xx != data[2])
+    if (xx != data[2])
     {
         logErrorP("nicht so viel geschrieben wie bekommen %i - %i", xx, length);
     }
 
     FastCRC16 crc16;
     uint16_t crc = crc16.modbus(data, length);
-    
+
     resultData[0] = 0x00;
     resultData[1] = sequence & 0xFF;
     resultData[2] = (sequence >> 8) & 0xFF;
@@ -185,15 +182,15 @@ void FileTransferModule::FileWrite(uint16_t sequence, uint8_t *data, uint8_t len
 
 bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    if(objectIndex != 159) return false;
+    if (objectIndex != 159) return false;
     _lastAccess = millis();
 
-    switch((FtmCommands)propertyId)
+    switch ((FtmCommands)propertyId)
     {
         case FtmCommands::Format:
         {
             logInfoP("Format");
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
@@ -201,7 +198,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 return true;
             }
             logInfoP("Format filesystem");
-            if(!LittleFS.format())
+            if (!LittleFS.format())
             {
                 resultLength = 1;
                 resultData[0] = 0x02;
@@ -212,20 +209,20 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             resultData[0] = 0x00;
             return true;
         }
-        
+
         case FtmCommands::Exists:
         {
             logInfoP("Exists");
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
                 logErrorP("LittleFS.begin() failed");
                 return true;
             }
-            
+
             resultData[0] = 0x00;
-            resultData[1] = LittleFS.exists((char*)data);
+            resultData[1] = LittleFS.exists((char *)data);
             resultLength = 2;
             return true;
         }
@@ -233,43 +230,43 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::Rename:
         {
             logInfoP("Rename");
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
                 logErrorP("Filesystem begin failed");
                 return true;
             }
-            
+
             int offset = 0;
-            for(int i = 0; i < length; i++)
+            for (int i = 0; i < length; i++)
             {
-                if(data[i] == 0)
+                if (data[i] == 0)
                 {
                     offset = i + 1;
                     break;
                 }
             }
 
-            logInfoP("from %s to %s", data, data+offset);
+            logInfoP("from %s to %s", data, data + offset);
 
-            if(!LittleFS.rename((char*)data, (char*)(data+offset)))
+            if (!LittleFS.rename((char *)data, (char *)(data + offset)))
             {
                 resultLength = 1;
                 resultData[0] = 0x45;
                 logErrorP("File can't be renamed");
                 return true;
             }
-            
+
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
         }
-        
+
         case FtmCommands::FileDownload:
         {
             _heartbeat = millis();
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
@@ -277,26 +274,27 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 return true;
             }
 
-                logInfoP("File download x");
-            if(data[0] == 0x00 && data[1] == 0x00)
+            logInfoP("File download x");
+            if (data[0] == 0x00 && data[1] == 0x00)
             {
                 logInfoP("File download");
-                if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+                if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
                 _size = data[2] - 5;
 
-                logInfoP("Path: %s", data+3);
+                logInfoP("Path: %s", data + 3);
 
-                _file = LittleFS.open((char*)(data+3), "r");
-                if (!_file) {
+                _file = LittleFS.open((char *)(data + 3), "r");
+                if (!_file)
+                {
                     resultLength = 1;
                     resultData[0] = 0x42;
                     logErrorP("File can't be opened");
                     return true;
                 }
                 _fileOpen = true;
-                
+
                 _lastSequence = 0;
                 int fileSize = _file.size();
                 resultData[0] = 0x00;
@@ -307,7 +305,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 resultLength = 5;
                 return true;
             }
-            if(!checkOpenedFile(resultData, resultLength))
+            if (!checkOpenedFile(resultData, resultLength))
                 return true;
 
             uint16_t sequence = data[1] << 8 | data[0];
@@ -319,7 +317,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::FileUpload:
         {
             _heartbeat = millis();
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
@@ -327,19 +325,20 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 return true;
             }
 
-            if(data[0] == 0x00 && data[1] == 0x00)
+            if (data[0] == 0x00 && data[1] == 0x00)
             {
                 logInfoP("File upload");
-                if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+                if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
                 _size = data[2];
 
-                //logInfoP("Path: %s", data+3);
+                // logInfoP("Path: %s", data+3);
                 logInfoP("open");
-                _file = LittleFS.open((char*)(data+3), "w");
+                _file = LittleFS.open((char *)(data + 3), "w");
                 logInfoP("opened");
-                if (!_file) {
+                if (!_file)
+                {
                     resultLength = 1;
                     resultData[0] = 0x42;
                     logErrorP("File can't be opened");
@@ -352,7 +351,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 logInfoP("File opened");
                 return true;
             }
-            if(data[0] == 0xFF && data[1] == 0xFF)
+            if (data[0] == 0xFF && data[1] == 0xFF)
             {
                 logInfoP("Upload finished");
                 _file.flush();
@@ -361,45 +360,45 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 resultLength = 0;
                 return true;
             }
-            if(!checkOpenedFile(resultData, resultLength))
+            if (!checkOpenedFile(resultData, resultLength))
                 return true;
 
             uint16_t sequence = data[1] << 8 | data[0];
             FileWrite(sequence, data, length, resultData, resultLength);
             return true;
         }
-        
+
         case FtmCommands::FileDelete:
         {
             logInfoP("File delete %s", data);
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
                 logErrorP("LittleFS.begin() failed");
                 return true;
             }
-            
-            if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+
+            if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
-            if(!LittleFS.remove((char*)data))
+            if (!LittleFS.remove((char *)data))
             {
                 resultLength = 1;
                 resultData[0] = 0x44;
                 logErrorP("File can't be deleted");
                 return true;
             }
-            
+
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
         }
-        
+
         case FtmCommands::DirCreate:
         {
             logInfoP("Dir create %s", data);
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
@@ -407,26 +406,26 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 return true;
             }
 
-            if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+            if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
-            if(!LittleFS.mkdir((char*)data))
+            if (!LittleFS.mkdir((char *)data))
             {
                 resultLength = 1;
                 resultData[0] = 0x85;
                 logErrorP("Dir can't be created");
                 return true;
             }
-            
+
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
         }
-        
+
         case FtmCommands::DirDelete:
         {
             logInfoP("Dir delete %s", data);
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
@@ -434,17 +433,17 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 return true;
             }
 
-            if(checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
+            if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
-            if(!LittleFS.rmdir((char*)data))
+            if (!LittleFS.rmdir((char *)data))
             {
                 resultLength = 1;
                 resultData[0] = 0x84;
                 logErrorP("Dir can't be deleted");
                 return true;
             }
-            
+
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
@@ -453,7 +452,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::DirList:
         {
             _heartbeat = millis();
-            if(!openFileSystem())
+            if (!openFileSystem())
             {
                 resultLength = 1;
                 resultData[0] = 0x01;
@@ -461,17 +460,17 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 return true;
             }
 
-            if(!_dirOpen)
+            if (!_dirOpen)
             {
-                logInfoP("Dir list %s", (char*)data);
-                _dir = LittleFS.openDir((char*)data);
+                logInfoP("Dir list %s", (char *)data);
+                _dir = LittleFS.openDir((char *)data);
                 _dirOpen = true;
             }
 
-            if(!checkOpenedDir(resultData, resultLength))
+            if (!checkOpenedDir(resultData, resultLength))
                 return true;
-            
-            if(!_dir.next())
+
+            if (!_dir.next())
             {
                 resultLength = 2;
                 resultData[0] = 0x00;
@@ -482,17 +481,17 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             }
 
             resultData[0] = 0x00;
-            resultData[1] = _dir.isFile() ? 0x01 : 0x02; //0x00 = no more content
-            
+            resultData[1] = _dir.isFile() ? 0x01 : 0x02; // 0x00 = no more content
+
             String fileName = _dir.fileName();
             int pathlength = fileName.length();
 
-            uint8_t *chars = new uint8_t[pathlength+1];
-            for(int i = 0; i < pathlength; i++)
+            uint8_t *chars = new uint8_t[pathlength + 1];
+            for (int i = 0; i < pathlength; i++)
                 chars[i] = fileName[i];
             chars[pathlength] = 0x00;
 
-            memcpy(resultData + 2, chars, pathlength+1);
+            memcpy(resultData + 2, chars, pathlength + 1);
             logInfoP(_dir.fileName().c_str());
             resultLength = pathlength + 2;
 
@@ -502,14 +501,14 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
         case FtmCommands::Cancel:
         {
-            if(_fileOpen)
+            if (_fileOpen)
             {
                 _file.close();
                 _fileOpen = false;
                 logInfoP("File closed - Cancel");
             }
 
-            if(_dirOpen)
+            if (_dirOpen)
             {
                 _dirOpen = false;
             }
@@ -533,7 +532,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         {
             logInfoP("Updated initiated");
             picoOTA.begin();
-            picoOTA.addFile((char*)data);
+            picoOTA.addFile((char *)data);
             picoOTA.commit();
             resultLength = 0;
             _rebootRequested = millis();
