@@ -24,9 +24,7 @@ class FileTransferModule : public OpenKNX::Module
     uint8_t _size = 0;
     bool _fileOpen = false;
     bool _dirOpen = false;
-    bool _fsOpen = false;
     uint16_t _lastSequence = 0;
-    bool openFileSystem();
     bool checkOpenedFile(uint8_t *resultData, uint8_t &resultLength);
     bool checkOpenedDir(uint8_t *resultData, uint8_t &resultLength);
     bool checkOpenFile(uint8_t *resultData, uint8_t &resultLength);

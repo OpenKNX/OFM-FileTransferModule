@@ -58,13 +58,6 @@ enum class FtmCommands
     DoUpdate
 };
 
-bool FileTransferModule::openFileSystem()
-{
-    if (_fsOpen) return true;
-
-    return LittleFS.begin();
-}
-
 bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
 {
     if (_fileOpen)
@@ -189,14 +182,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
     {
         case FtmCommands::Format:
         {
-            logInfoP("Format");
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
             logInfoP("Format filesystem");
             if (!LittleFS.format())
             {
@@ -213,13 +198,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::Exists:
         {
             logInfoP("Exists");
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             resultData[0] = 0x00;
             resultData[1] = LittleFS.exists((char *)data);
@@ -230,14 +208,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::Rename:
         {
             logInfoP("Rename");
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("Filesystem begin failed");
-                return true;
-            }
-
             int offset = 0;
             for (int i = 0; i < length; i++)
             {
@@ -266,13 +236,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::FileDownload:
         {
             _heartbeat = millis();
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             logInfoP("File download x");
             if (data[0] == 0x00 && data[1] == 0x00)
@@ -317,13 +280,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::FileUpload:
         {
             _heartbeat = millis();
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             if (data[0] == 0x00 && data[1] == 0x00)
             {
@@ -371,13 +327,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::FileDelete:
         {
             logInfoP("File delete %s", data);
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
@@ -398,13 +347,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::DirCreate:
         {
             logInfoP("Dir create %s", data);
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
@@ -425,13 +367,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::DirDelete:
         {
             logInfoP("Dir delete %s", data);
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
@@ -452,13 +387,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::DirList:
         {
             _heartbeat = millis();
-            if (!openFileSystem())
-            {
-                resultLength = 1;
-                resultData[0] = 0x01;
-                logErrorP("LittleFS.begin() failed");
-                return true;
-            }
 
             if (!_dirOpen)
             {
