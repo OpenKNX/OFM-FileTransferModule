@@ -117,13 +117,13 @@ void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_
     int readed = _file.readBytes((char *)resultData + 4, _size - 6);
     resultData[3] = readed & 0xFF;
 
-    logInfoP("readed %i/%i bytes", readed, _size - 6);
-
+    logDebugP("readed %i/%i bytes", readed, _size - 6);
+    logIndentUp();
     if (readed == 0)
     {
         _file.close();
         _fileOpen = false;
-        logInfoP("File closed - Read");
+        logInfoP("file closed");
     }
 
     FastCRC16 crc16;
@@ -131,6 +131,7 @@ void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_
     resultData[readed + 4] = crc >> 8;
     resultData[readed + 5] = crc & 0xFF;
     logInfoP("crc: %i", crc);
+    logIndentDown();
 
     resultLength = readed + 6;
 }
@@ -182,14 +183,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
     {
         case FtmCommands::Format:
         {
-            logInfoP("Format filesystem");
             if (!LittleFS.format())
             {
                 resultLength = 1;
                 resultData[0] = 0x02;
-                logErrorP("LittleFS.format() failed");
+                logErrorP("Formatting of the file system has failed");
                 return true;
             }
+
+            logInfoP("The file system was successfully formatted");
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
@@ -197,17 +199,19 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
         case FtmCommands::Exists:
         {
-            logInfoP("Exists");
-
             resultData[0] = 0x00;
             resultData[1] = LittleFS.exists((char *)data);
+            if (resultData[1])
+                logDebugP("The file or directory \"%s\" exists", data);
+            else
+                logDebugP("The file or directory \"%s\" does not exist", data);
+
             resultLength = 2;
             return true;
         }
 
         case FtmCommands::Rename:
         {
-            logInfoP("Rename");
             int offset = 0;
             for (int i = 0; i < length; i++)
             {
@@ -218,16 +222,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 }
             }
 
-            logInfoP("from %s to %s", data, data + offset);
-
             if (!LittleFS.rename((char *)data, (char *)(data + offset)))
             {
                 resultLength = 1;
                 resultData[0] = 0x45;
-                logErrorP("File can't be renamed");
+                logErrorP("Renaming of the file \"%s\" to \"%s\" failed", data, data + offset);
                 return true;
             }
 
+            logInfoP("Renaming of the file \"%s\" to \"%s\" was successful", data, data + offset);
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
@@ -326,8 +329,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
         case FtmCommands::FileDelete:
         {
-            logInfoP("File delete %s", data);
-
             if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
@@ -335,10 +336,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             {
                 resultLength = 1;
                 resultData[0] = 0x44;
-                logErrorP("File can't be deleted");
+                logErrorP("Deleting of the file \"%s\" failed", data);
                 return true;
             }
 
+            logInfoP("Deleting of the file \"%s\" was successful", data);
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
@@ -346,8 +348,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
         case FtmCommands::DirCreate:
         {
-            logInfoP("Dir create %s", data);
-
             if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
@@ -355,10 +355,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             {
                 resultLength = 1;
                 resultData[0] = 0x85;
-                logErrorP("Dir can't be created");
+                logErrorP("Creation of the folder \"%s\" failed", data);
                 return true;
             }
 
+            logInfoP("Creation of the folder \"%s\" was successful", data);
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
@@ -366,8 +367,6 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
         case FtmCommands::DirDelete:
         {
-            logInfoP("Dir delete %s", data);
-
             if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                 return true;
 
@@ -375,10 +374,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             {
                 resultLength = 1;
                 resultData[0] = 0x84;
-                logErrorP("Dir can't be deleted");
+                logInfoP("Deleting of the folder \"%s\" failed", data);
                 return true;
             }
 
+            logInfoP("Deleting of the folder \"%s\" was successful", data);
             resultLength = 1;
             resultData[0] = 0x00;
             return true;
@@ -390,7 +390,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (!_dirOpen)
             {
-                logInfoP("Dir list %s", (char *)data);
+                logDebugP("List directory \"%s\"", (char *)data);
                 _dir = LittleFS.openDir((char *)data);
                 _dirOpen = true;
             }
@@ -403,7 +403,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 resultLength = 2;
                 resultData[0] = 0x00;
                 resultData[1] = 0x00;
-                logErrorP("Dir has no more files");
+                logDebugP("List directory completed");
                 _dirOpen = false;
                 return true;
             }
@@ -412,18 +412,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             resultData[1] = _dir.isFile() ? 0x01 : 0x02; // 0x00 = no more content
 
             String fileName = _dir.fileName();
-            int pathlength = fileName.length();
+            logDebugP("- %s", fileName.c_str());
 
-            uint8_t *chars = new uint8_t[pathlength + 1];
-            for (int i = 0; i < pathlength; i++)
-                chars[i] = fileName[i];
-            chars[pathlength] = 0x00;
+            memcpy(resultData + 2, fileName.c_str(), fileName.length());
+            resultLength = fileName.length() + 2;
 
-            memcpy(resultData + 2, chars, pathlength + 1);
-            logInfoP(_dir.fileName().c_str());
-            resultLength = pathlength + 2;
-
-            delete[] chars;
             return true;
         }
 
@@ -433,7 +426,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             {
                 _file.close();
                 _fileOpen = false;
-                logInfoP("File closed - Cancel");
+                logDebugP("File closed (Cancel)");
             }
 
             if (_dirOpen)
@@ -459,6 +452,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::DoUpdate:
         {
             logInfoP("Updated initiated");
+            logIndentUp();
             picoOTA.begin();
             picoOTA.addFile((char *)data);
             picoOTA.commit();
@@ -466,6 +460,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             _rebootRequested = millis();
             openknx.flash.save();
             logInfoP("Device will restart in 2000ms");
+            logIndentDown();
         }
     }
     return false;
