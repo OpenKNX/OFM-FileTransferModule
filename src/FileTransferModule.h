@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 
-#define INFO_INTERVAL 10000
+#define HEARTBEAT_INTERVAL 11000
 
 class FileTransferModule : public OpenKNX::Module
 {

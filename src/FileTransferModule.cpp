@@ -20,16 +20,16 @@ const std::string FileTransferModule::version()
 void FileTransferModule::loop(bool conf)
 {
     // check lastAction
-    // close file or directory after 3 seconds
+    // close file or directory after HEARTBEAT_INTERVAL 
 
-    if (_fileOpen && delayCheck(_heartbeat, 11000))
+    if (_fileOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
         _file.close();
         _fileOpen = false;
         logErrorP("File closed due no heartbeat");
     }
 
-    if (_dirOpen && delayCheck(_heartbeat, 11000))
+    if (_dirOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
         _dirOpen = false;
         logErrorP("Directory closed due no heartbeat");
