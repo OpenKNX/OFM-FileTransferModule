@@ -20,7 +20,7 @@ const std::string FileTransferModule::version()
 void FileTransferModule::loop(bool conf)
 {
     // check lastAction
-    // close file or directory after HEARTBEAT_INTERVAL 
+    // close file or directory after HEARTBEAT_INTERVAL
 
     if (_fileOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
@@ -286,33 +286,31 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (data[0] == 0x00 && data[1] == 0x00)
             {
-                logInfoP("File upload");
+                const char *filename = (const char *)(data + 3);
                 if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
                 _size = data[2];
 
-                // logInfoP("Path: %s", data+3);
-                logInfoP("open");
-                _file = LittleFS.open((char *)(data + 3), "w");
-                logInfoP("opened");
+                _file = LittleFS.open(filename, "w");
                 if (!_file)
                 {
                     resultLength = 1;
                     resultData[0] = 0x42;
-                    logErrorP("File can't be opened");
+                    logErrorP("Start file upload to \"%s\" is failed", filename);
                     return true;
                 }
+
+                logInfoP("Start file upload to \"%s\"", filename);
                 _fileOpen = true;
                 _lastSequence = 0;
                 resultData[0] = 0x00;
                 resultLength = 1;
-                logInfoP("File opened");
                 return true;
             }
             if (data[0] == 0xFF && data[1] == 0xFF)
             {
-                logInfoP("Upload finished");
+                logInfoP("The file upload was successfully completed");
                 _file.flush();
                 _file.close();
                 _fileOpen = false;
@@ -422,11 +420,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
         case FtmCommands::Cancel:
         {
+            logDebugP("Cancel");
             if (_fileOpen)
             {
                 _file.close();
                 _fileOpen = false;
-                logDebugP("File closed (Cancel)");
             }
 
             if (_dirOpen)
