@@ -293,9 +293,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
                 _size = data[2];
 
-                if (!LittleFS.exists(filename))
-                    _file = LittleFS.open(filename, "w");
-
+                _file = LittleFS.open(filename, "w");
                 if (!_file)
                 {
                     resultLength = 1;
