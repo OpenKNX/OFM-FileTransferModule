@@ -22,20 +22,20 @@ void FileTransferModule::loop(bool conf)
     // check lastAction
     // close file or directory after 3 seconds
 
-    if (_fileOpen && millis() - _heartbeat > 11000)
+    if (_fileOpen && delayCheck(_heartbeat, 11000))
     {
         _file.close();
         _fileOpen = false;
         logErrorP("File closed due no heartbeat");
     }
 
-    if (_dirOpen && millis() - _heartbeat > 11000)
+    if (_dirOpen && delayCheck(_heartbeat, 11000))
     {
         _dirOpen = false;
-        logErrorP("Dir closed due no heartbeat");
+        logErrorP("Directory closed due no heartbeat");
     }
 
-    if (_rebootRequested && millis() - _rebootRequested >= 2000)
+    if (_rebootRequested && delayCheck(_rebootRequested, 2000))
     {
         logInfoP("Restarting now");
         rp2040.reboot();
