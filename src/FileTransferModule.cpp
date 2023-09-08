@@ -50,6 +50,7 @@ enum class FtmCommands
     FileUpload = 40,
     FileDownload,
     FileDelete,
+    FileInfo,
     DirList = 80,
     DirCreate,
     DirDelete,
@@ -436,6 +437,55 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             resultLength = 0;
             return true;
         }
+
+        case FtmCommands::FileInfo:
+            // case FtmCommands::Exists:
+            {
+                const char *filename = (char *)data;
+                _file = LittleFS.open(filename, "r");
+
+                if (!_file)
+                {
+                    resultLength = 2;
+                    resultData[0] = 0x42;
+                    resultData[1] = 0x00;
+                    logErrorP("File can't be opened");
+                    _dirOpen = false;
+                    return true;
+                }
+
+                size_t filesize = _file.size();
+                // Later used in v2 with clock
+                // time_t cr = _file.getCreationTime();
+                // time_t lw = _file.getLastWrite();
+                FastCRC32 crc32;
+                uint32_t crc = 0;
+                int len = 1000;
+                bool first = true;
+                uint8_t buf[len];
+                while (_file.available())
+                {
+                    int readed = _file.readBytes((char *)buf, len);
+                    if (first)
+                        crc = crc32.cksum((uint8_t *)buf, readed);
+                    else
+                        crc = crc32.cksum_upd((uint8_t *)buf, readed);
+                    first = false;
+                }
+
+                logInfoP("Read file info of \"%s\"", filename);
+                logIndentUp();
+                logInfoP("Filesize: %i bytes", filesize);
+                logInfoP("CRC32: 0x%08X", crc);
+                logIndentDown();
+
+                resultData[0] = 0x00;
+                memcpy(resultData + 1, (uint8_t *)&filesize, 4);
+                memcpy(resultData + 5, (uint8_t *)&crc, 4);
+                resultLength = 1 + 4 + 4;
+                // logHexDebugP(resultData, resultLength);
+                return true;
+            }
 
         case FtmCommands::GetVersion:
         {
