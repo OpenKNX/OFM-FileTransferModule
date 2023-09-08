@@ -8,7 +8,7 @@ Add the Module to your platform.ini and set the fileystem size.
 board_build.filesystem_size = 0.5m
 lib_deps = 
     [...]
-	https://github.com/OpenKnx/OFM-FtpServer
+	https://github.com/OpenKnx/OFM-FileTransferModule
 ```
 
 Make shure you get this output in your build step:
@@ -23,21 +23,21 @@ Add the Module to the OpenKnx Stack
 ```C++
 #include <Arduino.h>
 #include "OpenKNX.h"
-#include "FtpServer.h"
+#include "FileTransferModule.h"
 
 void setup()
 {
 	const uint8_t firmwareRevision = 0;
     openknx.init(firmwareRevision);
     openknx.addModule(1, ...);
-    openknx.addModule(2, new FtpServer());
+    openknx.addModule(2, new FileTransferModule());
     openknx.setup();
 
 }
 ```
 
 ## Step 3
-You can use the [FtpClient] to upload/download files to your device.
+You can use the [KnxFileTransferClient](https://github.com/OpenKNX/KnxFileTransferClient) to upload/download files to your device.
 
 ## Good to know
 The FtpServer uses following FunctionProperties.  
@@ -54,3 +54,6 @@ These may not used by any other module.
 |159|80|Dir List|
 |159|81|Dir Create|
 |159|82|Dir Delete|
+|159|90|Cancel|
+|159|100|Get Version|
+|159|101|Do Update|
