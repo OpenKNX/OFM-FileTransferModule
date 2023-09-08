@@ -291,10 +291,12 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                     return true;
 
                 _size = data[2];
-                _file = LittleFS.open(filename, "w");
-                if (LittleFS.exists(filename) || !_file)
+
+                if (!LittleFS.exists(filename))
+                    _file = LittleFS.open(filename, "w");
+
+                if (!_file)
                 {
-                    if (_file) _file.close();
                     resultLength = 1;
                     resultData[0] = 0x42;
                     logErrorP("Start file upload to \"%s\" is failed", filename);
