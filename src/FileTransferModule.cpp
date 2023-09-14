@@ -110,7 +110,7 @@ bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLeng
 void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
     if (_lastSequence + 1 != sequence)
-        _file.seek((sequence - 1) * _size);
+        _file.seek((sequence - 1) * (_size - 6));
 
     resultData[0] = 0x00;
     resultData[1] = sequence & 0xFF;
@@ -248,7 +248,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
-                _size = data[2] - 5;
+                _size = data[2];
 
                 if(data[2] > resultLength)
                 {
