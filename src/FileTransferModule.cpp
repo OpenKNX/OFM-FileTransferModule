@@ -64,7 +64,7 @@ bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLengt
     if (_fileOpen)
     {
         resultLength = 1;
-        resultData[0] = 0x41;
+        pushByte(0x41, resultData);
         logErrorP("File already open");
         return true;
     }
@@ -76,7 +76,7 @@ bool FileTransferModule::checkOpenedFile(uint8_t *resultData, uint8_t &resultLen
     if (!_fileOpen)
     {
         resultLength = 1;
-        resultData[0] = 0x43;
+        pushByte(0x43, resultData);
         logErrorP("File not opened");
         return false;
     }
@@ -88,7 +88,7 @@ bool FileTransferModule::checkOpenDir(uint8_t *resultData, uint8_t &resultLength
     if (_dirOpen)
     {
         resultLength = 1;
-        resultData[0] = 0x81;
+        pushByte(0x81, resultData);
         logErrorP("Dir already open");
         return true;
     }
@@ -100,7 +100,7 @@ bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLeng
     if (!_dirOpen)
     {
         resultLength = 1;
-        resultData[0] = 0x83;
+        pushByte(0x83, resultData);
         logErrorP("Dir not opened");
         return false;
     }
@@ -109,70 +109,76 @@ bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLeng
 
 void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
+    logIndentUp();
+
     if (_lastSequence + 1 != sequence)
         _file.seek((sequence - 1) * (_size - 6));
 
-    resultData[0] = 0x00;
-    resultData[1] = sequence & 0xFF;
-    resultData[2] = (sequence >> 8) & 0xFF;
-    int readed = _file.readBytes((char *)resultData + 4, _size - 6);
-    resultData[3] = readed & 0xFF;
+    pushByte(0x0, resultData);
+    pushWord(sequence, resultData + 1);
+    uint8_t readed = _file.readBytes((char *)resultData + 4, _size - 6);
+    pushByte(readed, resultData + 3);
 
-    logDebugP("readed %i/%i bytes", readed, _size - 6);
-    logIndentUp();
-    if (readed == 0)
+    logDebugP("Readed sequence %i (%i/%i bytes)", sequence, readed, _size - 6);
+    if (readed == 0 || !_file.available())
     {
         _file.close();
         _fileOpen = false;
-        logInfoP("file closed");
+        logInfoP("The file download was successfully completed");
     }
 
     FastCRC16 crc16;
     uint16_t crc = crc16.modbus(resultData + 1, readed + 3);
-    resultData[readed + 4] = crc >> 8;
-    resultData[readed + 5] = crc & 0xFF;
-    logInfoP("crc: %i", crc);
-    logIndentDown();
+    pushWord(crc, resultData + readed + 4);
+    logTraceP("CRC16 (Modbus): 0x%04X", crc);
 
     resultLength = readed + 6;
+
+    logIndentDown();
 }
 
 void FileTransferModule::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
+    logIndentUp();
+
     if (_lastSequence + 1 != sequence)
     {
-        logErrorP("seeking to %i", (sequence - 1) * (_size - 3));
         if (!_file.seek((sequence - 1) * (_size - 3)))
         {
-            resultData[0] = 0x46;
+            pushByte(0x46, resultData);
             resultLength = 1;
-            logErrorP("File can't seek position");
+            logErrorP("The file can't seek to position");
+            logIndentDown();
             return;
         }
     }
 
-    uint8_t xx = _file.write((char *)data + 3, data[2]);
+    uint8_t written = _file.write((char *)data + 3, data[2]);
 
     if (sequence % 10 == 0)
         _file.flush();
 
-    if (xx != data[2])
+    if (written != data[2])
     {
-        logErrorP("nicht so viel geschrieben wie bekommen %i - %i", xx, length);
+        pushByte(0x47, resultData);
+        resultLength = 1;
+        logErrorP("The file could not be written completely (%i/%i)", written, length);
+        logIndentDown();
+        return;
     }
+
+    logDebugP("Written sequence %i (%i/%i bytes)", sequence, written, data[2]);
 
     FastCRC16 crc16;
     uint16_t crc = crc16.modbus(data, length);
 
-    resultData[0] = 0x00;
-    resultData[1] = sequence & 0xFF;
-    resultData[2] = (sequence >> 8) & 0xFF;
-    resultData[3] = crc >> 8;
-    resultData[4] = crc & 0xFF;
-
+    pushByte(0x0, resultData);
+    pushWord(sequence, resultData + 1);
+    pushWord(crc, resultData + 3);
     resultLength = 5;
-
     _lastSequence = sequence;
+
+    logIndentDown();
 }
 
 bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -186,27 +192,28 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         {
             if (!LittleFS.format())
             {
+                pushByte(0x02, resultData);
                 resultLength = 1;
-                resultData[0] = 0x02;
                 logErrorP("Formatting of the file system has failed");
                 return true;
             }
 
             logInfoP("The file system was successfully formatted");
+            pushByte(0x0, resultData);
             resultLength = 1;
-            resultData[0] = 0x00;
             return true;
         }
 
         case FtmCommands::Exists:
         {
-            resultData[0] = 0x00;
-            resultData[1] = LittleFS.exists((char *)data);
-            if (resultData[1])
+            bool exists = LittleFS.exists((char *)data);
+            if (exists)
                 logDebugP("The file or directory \"%s\" exists", data);
             else
                 logDebugP("The file or directory \"%s\" does not exist", data);
 
+            pushByte(0x0, resultData);
+            pushByte(exists, resultData + 1);
             resultLength = 2;
             return true;
         }
@@ -225,15 +232,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (!LittleFS.rename((char *)data, (char *)(data + offset)))
             {
+                pushByte(0x45, resultData);
                 resultLength = 1;
-                resultData[0] = 0x45;
                 logErrorP("Renaming of the file \"%s\" to \"%s\" failed", data, data + offset);
                 return true;
             }
 
             logInfoP("Renaming of the file \"%s\" to \"%s\" was successful", data, data + offset);
+            pushByte(0x0, resultData);
             resultLength = 1;
-            resultData[0] = 0x00;
             return true;
         }
 
@@ -241,42 +248,41 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         {
             _heartbeat = millis();
 
-            logInfoP("File download x");
             if (data[0] == 0x00 && data[1] == 0x00)
             {
-                logInfoP("File download");
+                logInfoP("Download file \"%s\"", (char *)(data + 3));
                 if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength))
                     return true;
 
                 _size = data[2];
 
-                if(data[2] > resultLength)
+                if (data[2] > resultLength)
                 {
-                    logErrorP("Angeforderte pkg ist größer als max resultLength");
+                    logIndentUp();
+                    logErrorP("Requested pkg is greater than max resultLength");
+                    logIndentDown();
+                    pushByte(0x4, resultData);
                     resultLength = 1;
-                    resultData[0] = 0x04;
                     return true;
                 }
-
-                logInfoP("Path: %s", data + 3);
 
                 _file = LittleFS.open((char *)(data + 3), "r");
                 if (!_file)
                 {
+                    pushByte(0x42, resultData);
                     resultLength = 1;
-                    resultData[0] = 0x42;
+                    logIndentUp();
                     logErrorP("File can't be opened");
+                    logIndentDown();
                     return true;
                 }
                 _fileOpen = true;
 
                 _lastSequence = 0;
                 int fileSize = _file.size();
-                resultData[0] = 0x00;
-                resultData[1] = fileSize & 0xFF;
-                resultData[2] = (fileSize >> 8) & 0xFF;
-                resultData[3] = (fileSize >> 16) & 0xFF;
-                resultData[4] = (fileSize >> 24) & 0xFF;
+                pushByte(0x0, resultData);
+                pushInt(fileSize, resultData + 1);
+                pushByte(0x0, resultData);
                 resultLength = 5;
                 return true;
             }
@@ -304,8 +310,8 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 _file = LittleFS.open(filename, "w");
                 if (!_file)
                 {
+                    pushByte(0x42, resultData);
                     resultLength = 1;
-                    resultData[0] = 0x42;
                     logErrorP("Start file upload to \"%s\" is failed", filename);
                     return true;
                 }
@@ -313,7 +319,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
                 logInfoP("Start file upload to \"%s\"", filename);
                 _fileOpen = true;
                 _lastSequence = 0;
-                resultData[0] = 0x00;
+                pushByte(0x0, resultData);
                 resultLength = 1;
                 return true;
             }
@@ -341,15 +347,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (!LittleFS.remove((char *)data))
             {
+                pushByte(0x44, resultData);
                 resultLength = 1;
-                resultData[0] = 0x44;
                 logErrorP("Deleting of the file \"%s\" failed", data);
                 return true;
             }
 
             logInfoP("Deleting of the file \"%s\" was successful", data);
+            pushByte(0x0, resultData);
             resultLength = 1;
-            resultData[0] = 0x00;
             return true;
         }
 
@@ -360,15 +366,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (!LittleFS.mkdir((char *)data))
             {
+                pushByte(0x85, resultData);
                 resultLength = 1;
-                resultData[0] = 0x85;
                 logErrorP("Creation of the folder \"%s\" failed", data);
                 return true;
             }
 
             logInfoP("Creation of the folder \"%s\" was successful", data);
+            pushByte(0x0, resultData);
             resultLength = 1;
-            resultData[0] = 0x00;
             return true;
         }
 
@@ -379,15 +385,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (!LittleFS.rmdir((char *)data))
             {
+                pushByte(0x84, resultData);
                 resultLength = 1;
-                resultData[0] = 0x84;
                 logInfoP("Deleting of the folder \"%s\" failed", data);
                 return true;
             }
 
             logInfoP("Deleting of the folder \"%s\" was successful", data);
+            pushByte(0x0, resultData);
             resultLength = 1;
-            resultData[0] = 0x00;
             return true;
         }
 
@@ -408,15 +414,15 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             if (!_dir.next())
             {
                 resultLength = 2;
-                resultData[0] = 0x00;
-                resultData[1] = 0x00;
+                pushByte(0x0, resultData);
+                pushByte(0x0, resultData + 1);
                 logDebugP("List directory completed");
                 _dirOpen = false;
                 return true;
             }
 
-            resultData[0] = 0x00;
-            resultData[1] = _dir.isFile() ? 0x01 : 0x02; // 0x00 = no more content
+            pushByte(0x0, resultData);
+            pushByte(_dir.isFile() ? 0x01 : 0x02, resultData + 1); // 0x00 = no more content
 
             String fileName = _dir.fileName();
             logDebugP("- %s", fileName.c_str());
@@ -451,9 +457,8 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
             if (!_file)
             {
-                resultLength = 2;
-                resultData[0] = 0x42;
-                resultData[1] = 0x00;
+                pushByte(0x42, resultData);
+                resultLength = 1;
                 logErrorP("File can't be opened");
                 _dirOpen = false;
                 return true;
@@ -484,10 +489,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             logInfoP("CRC32: 0x%08X", crc);
             logIndentDown();
 
-            resultData[0] = 0x00;
-            memcpy(resultData + 1, (uint8_t *)&filesize, 4);
-            memcpy(resultData + 5, (uint8_t *)&crc, 4);
-            resultLength = 1 + 4 + 4;
+            pushByte(0x0, resultData);
+            pushInt(filesize, resultData + 1);
+            pushInt(crc, resultData + 5);
+            resultLength = 9;
+
             // logHexDebugP(resultData, resultLength);
             return true;
         }
