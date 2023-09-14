@@ -250,6 +250,14 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 
                 _size = data[2] - 5;
 
+                if(data[2] > resultLength)
+                {
+                    logErrorP("Angeforderte pkg ist größer als max resultLength");
+                    resultLength = 1;
+                    resultData[0] = 0x04;
+                    return true;
+                }
+
                 logInfoP("Path: %s", data + 3);
 
                 _file = LittleFS.open((char *)(data + 3), "r");
