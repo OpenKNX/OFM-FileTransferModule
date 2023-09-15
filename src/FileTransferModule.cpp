@@ -185,6 +185,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
 {
     if (objectIndex != 159) return false;
     _lastAccess = millis();
+    openknx.common.skipLooptimeWarning();
 
     switch ((FtmCommands)propertyId)
     {
