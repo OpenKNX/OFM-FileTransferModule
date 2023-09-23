@@ -7,7 +7,7 @@
 //  -> Log     Hello
 const std::string FileTransferModule::name()
 {
-    return "FileTransferModule";
+    return "FileTransfer";
 }
 
 // You can also give it a version
