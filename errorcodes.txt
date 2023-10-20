@@ -14,6 +14,6 @@
 0x81    Dir already open
 0x82    Dir can't be opened
 0x83    Dir not opened
-0x44    Dir can't be deleted
+0x84    Dir can't be deleted
 0x85    Dir can't be created
 0x86    Dir has no more files
