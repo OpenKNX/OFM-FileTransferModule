@@ -56,4 +56,4 @@ These may not used by any other module.
 |159|82|Dir Delete|
 |159|90|Cancel|
 |159|100|Get Version|
-|159|101|Do Update|
+|159|101|Firewamre Update|
