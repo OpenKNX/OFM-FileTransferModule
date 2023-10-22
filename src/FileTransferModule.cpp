@@ -37,10 +37,8 @@ void FileTransferModule::loop(bool configured)
 
     if (_rebootRequested && delayCheck(_rebootRequested, 2000))
     {
-        logInfoP("Restarting now");
-        logIndentUp();
         openknx.flash.save();
-        logIndentDown();
+        logInfoP("Restarting now");
         delay(100);
         rp2040.reboot();
     }
