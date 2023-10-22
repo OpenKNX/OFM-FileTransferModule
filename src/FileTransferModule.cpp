@@ -1,6 +1,5 @@
 #include "FileTransferModule.h"
 #include "versions.h"
-#include <LittleFS.h>
 #include <PicoOTA.h>
 
 // Give your Module a name
@@ -18,7 +17,7 @@ const std::string FileTransferModule::version()
     return MODULE_FileTransferModule_Version;
 }
 
-void FileTransferModule::loop(bool conf)
+void FileTransferModule::loop(bool configured)
 {
     // check lastAction
     // close file or directory after HEARTBEAT_INTERVAL
@@ -112,7 +111,7 @@ bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLeng
     return true;
 }
 
-void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
+void FileTransferModule::readFile(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
     logIndentUp();
 
@@ -142,7 +141,7 @@ void FileTransferModule::FileRead(uint16_t sequence, uint8_t *resultData, uint8_
     logIndentDown();
 }
 
-void FileTransferModule::FileWrite(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
+void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
     logIndentUp();
 
@@ -269,7 +268,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::FwUpdate:
         {
             cmdFwUpdate(length, data, resultData, resultLength);
-            return true;
+            return false; // false is correct
         }
     }
     return false;
@@ -537,7 +536,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
     if (!checkOpenedFile(resultData, resultLength)) return;
 
     uint16_t sequence = data[1] << 8 | data[0];
-    FileWrite(sequence, data, length, resultData, resultLength);
+    writeFile(sequence, data, length, resultData, resultLength);
 }
 
 void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -584,6 +583,6 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
     if (!checkOpenedFile(resultData, resultLength)) return;
 
     uint16_t sequence = data[1] << 8 | data[0];
-    FileRead(sequence, resultData, resultLength);
+    readFile(sequence, resultData, resultLength);
     _lastSequence = sequence;
 }
