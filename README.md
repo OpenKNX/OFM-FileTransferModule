@@ -1,6 +1,7 @@
-# FtpServer over KNX Bus
+# FileTransfer over the KNX Bus
 
 Implement this Module to upload/download files on your device.  
+You can also do a firmware update.  
 
 ## Step 1
 Add the Module to your platform.ini and set the fileystem size.  
@@ -56,4 +57,4 @@ These may not used by any other module.
 |159|82|Dir Delete|
 |159|90|Cancel|
 |159|100|Get Version|
-|159|101|Firewamre Update|
+|159|101|Firmware Update|
