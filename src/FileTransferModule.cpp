@@ -248,7 +248,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::Cancel:
         {
             cmdCancel(length, data, resultData, resultLength);
-            return true;
+            return false;
         }
 
         case FtmCommands::FileInfo:
@@ -421,8 +421,7 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
         _dirOpen = true;
     }
 
-    if (!checkOpenedDir(resultData, resultLength))
-        return;
+    if (!checkOpenedDir(resultData, resultLength)) return;
 
     if (!_dir.next())
     {
@@ -503,12 +502,12 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
 
         _size = data[2];
+        resultLength = 1;
 
         _file = LittleFS.open(filename, "w");
         if (!_file)
         {
             pushByte(0x42, resultData);
-            resultLength = 1;
             logErrorP("Start file upload to \"%s\" is failed", filename);
             return;
         }
@@ -517,7 +516,6 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         _fileOpen = true;
         _lastSequence = 0;
         pushByte(0x0, resultData);
-        resultLength = 1;
         return;
     }
 
@@ -547,6 +545,7 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
         if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
 
         _size = data[2];
+        resultLength = 1;
 
         if (data[2] > resultLength)
         {
@@ -554,7 +553,6 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
             logErrorP("Requested pkg is greater than max resultLength");
             logIndentDown();
             pushByte(0x4, resultData);
-            resultLength = 1;
             return;
         }
 
@@ -562,7 +560,6 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
         if (!_file)
         {
             pushByte(0x42, resultData);
-            resultLength = 1;
             logIndentUp();
             logErrorP("File can't be opened");
             logIndentDown();
