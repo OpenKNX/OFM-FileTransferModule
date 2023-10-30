@@ -581,3 +581,5 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
     readFile(sequence, resultData, resultLength);
     _lastSequence = sequence;
 }
+
+FileTransferModule openknxFileTransferModule;
