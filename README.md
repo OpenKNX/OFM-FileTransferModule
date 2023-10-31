@@ -4,15 +4,8 @@ Implement this Module to upload/download files on your device.
 You can also do a firmware update.  
 
 ## Step 1
-Add the Module to your platform.ini and set the fileystem size.  
-```ini
-board_build.filesystem_size = 0.5m
-lib_deps = 
-    [...]
-	https://github.com/OpenKnx/OFM-FileTransferModule
-```
-
-Make shure you get this output in your build step:
+Make shure you get this output in your build step:  
+Sizes depends on your configuration, but you need the entry "Filesystem size".
 ```
 Flash size: 2.00MB
 Sketch size: 1.50MB
@@ -31,7 +24,7 @@ void setup()
 	const uint8_t firmwareRevision = 0;
     openknx.init(firmwareRevision);
     openknx.addModule(1, ...);
-    openknx.addModule(2, new FileTransferModule());
+    openknx.addModule(2, FileTransferModule);
     openknx.setup();
 
 }
