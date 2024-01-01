@@ -38,7 +38,7 @@ void FileTransferModule::loop(bool configured)
     if (_rebootRequested && delayCheck(_rebootRequested, 2000))
     {
         openknx.flash.save();
-        openknx.common.restart();
+        openknx.restart();
     }
 }
 
