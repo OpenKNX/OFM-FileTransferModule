@@ -1,3 +1,7 @@
+![Issues](https://badgen.net/github/open-issues/OpenKNX/ofm-filetransfermodule)
+![Branches](https://badgen.net/github/branches/OpenKNX/ofm-filetransfermodule)
+[![CodeFactor](https://www.codefactor.io/repository/github/openknx/ofm-filetransfermodule/badge)](https://www.codefactor.io/repository/github/openknx/ofm-filetransfermodule)
+
 # FileTransfer over the KNX Bus
 
 Implement this Module to upload/download files on your device.  
