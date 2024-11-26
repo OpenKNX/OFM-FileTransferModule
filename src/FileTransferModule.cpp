@@ -1,7 +1,9 @@
 #ifndef OPENKNX_FILE_TRANSFER_IGNORE
     #include "FileTransferModule.h"
     #include "versions.h"
-    #include <PicoOTA.h>
+    #ifdef ARDUINO_ARCH_RP2040
+        #include <PicoOTA.h>
+    #endif
 
 // Give your Module a name
 // it will be displayed when you use the method log("Hello")
@@ -154,7 +156,7 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
         }
     }
 
-    uint8_t written = _file.write((char *)data + 3, data[2]);
+    uint8_t written = _file.write((const uint8_t *)data + 3, data[2]);
 
     if (sequence % 10 == 0)
         _file.flush();
@@ -261,12 +263,13 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             cmdModuleVersion(length, data, resultData, resultLength);
             return true;
         }
-
+    #ifdef ARDUINO_ARCH_RP2040
         case FtmCommands::FwUpdate:
         {
             cmdFwUpdate(length, data, resultData, resultLength);
             return false; // false is correct
         }
+    #endif
     }
     return false;
 }
@@ -350,6 +353,7 @@ void FileTransferModule::cmdModuleVersion(uint8_t length, uint8_t *data, uint8_t
     resultData[5] = _build & 0xFF;
 }
 
+    #ifdef ARDUINO_ARCH_RP2040
 void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     logInfoP("Updated initiated");
@@ -361,6 +365,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     logInfoP("Device will restart in 2000ms");
     logIndentDown();
 }
+    #endif
 
 void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -416,13 +421,14 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
     if (!_dirOpen)
     {
         logDebugP("List directory \"%s\"", (char *)data);
-        _dir = LittleFS.openDir((char *)data);
+        _dir = LittleFS.open((char *)data, "r");
         _dirOpen = true;
     }
 
     if (!checkOpenedDir(resultData, resultLength)) return;
 
-    if (!_dir.next())
+    File subDirectory = _dir.openNextFile();
+    if (!subDirectory)
     {
         resultLength = 2;
         pushByte(0x0, resultData);
@@ -433,9 +439,9 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
     }
 
     pushByte(0x0, resultData);
-    pushByte(_dir.isFile() ? 0x01 : 0x02, resultData + 1); // 0x00 = no more content
+    pushByte(!subDirectory.isDirectory() ? 0x01 : 0x02, resultData + 1); // 0x00 = no more content
 
-    String fileName = _dir.fileName();
+    String fileName = subDirectory.name();
     logDebugP("- %s", fileName.c_str());
 
     memcpy(resultData + 2, fileName.c_str(), fileName.length());

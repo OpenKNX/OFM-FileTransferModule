@@ -20,7 +20,7 @@ class FileTransferModule : public OpenKNX::Module
     uint32_t _heartbeat = 0;
     uint32_t _lastAccess = 0;
     File _file;
-    Dir _dir;
+    File _dir;
     uint8_t _size = 0;
     bool _fileOpen = false;
     bool _dirOpen = false;
@@ -38,7 +38,9 @@ class FileTransferModule : public OpenKNX::Module
     void cmdFormat(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdRename(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdExists(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#ifdef ARDUINO_ARCH_RP2040
     void cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#endif
     void cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdCancel(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
