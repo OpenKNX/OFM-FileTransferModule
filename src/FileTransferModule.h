@@ -10,9 +10,9 @@ class FileTransferModule : public OpenKNX::Module
   public:
     const std::string name() override;
     const std::string version() override;
-    const uint8_t _major = 0; // also update library.json
-    const uint8_t _minor = 0;
-    const uint8_t _build = 4;
+    const uint8_t _major = MODULE_FileTransferModule_Version_Major; // also update library.json
+    const uint8_t _minor = MODULE_FileTransferModule_Version_Minor;
+    const uint8_t _revision = MODULE_FileTransferModule_Version_Revision;
     void loop(bool configured) override;
 
   private:
@@ -49,6 +49,7 @@ class FileTransferModule : public OpenKNX::Module
     void cmdFileDelete(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+    void cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
 };
 
 extern FileTransferModule openknxFileTransferModule;

@@ -59,7 +59,8 @@ enum class FtmCommands
     DirDelete,
     Cancel = 90,
     ModuleVersion = 100,
-    FwUpdate
+    FwUpdate,
+    CheckFeatures
 };
 
 bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
@@ -146,7 +147,8 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
 
     if (_lastSequence + 1 != sequence)
     {
-        if (!_file.seek((sequence - 1) * (_size - 3)))
+        uint16_t pos = ((sequence - 1) * (_size - 3));
+        if (!_file.seek(pos))
         {
             pushByte(0x46, resultData);
             resultLength = 1;
@@ -263,6 +265,12 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             cmdModuleVersion(length, data, resultData, resultLength);
             return true;
         }
+
+        case FtmCommands::CheckFeatures:
+        {
+            cmdCheckFeatures(length, data, resultData, resultLength);
+            return true;
+        }
     #ifdef ARDUINO_ARCH_RP2040
         case FtmCommands::FwUpdate:
         {
@@ -349,8 +357,8 @@ void FileTransferModule::cmdModuleVersion(uint8_t length, uint8_t *data, uint8_t
     resultData[1] = _major & 0xFF;
     resultData[2] = _minor >> 8;
     resultData[3] = _minor & 0xFF;
-    resultData[4] = _build >> 8;
-    resultData[5] = _build & 0xFF;
+    resultData[4] = _revision >> 8;
+    resultData[5] = _revision & 0xFF;
 }
 
     #ifdef ARDUINO_ARCH_RP2040
@@ -503,13 +511,29 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
 
     if (data[0] == 0x00 && data[1] == 0x00)
     {
-        const char *filename = (const char *)(data + 3);
+        const char *filename = (const char *)(data + 4);
         if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
+
+        if(data[3] > 1)
+        {
+            pushByte(0x42, resultData);
+            logErrorP("Start file upload to \"%s\" is failed", filename);
+            return;
+        }
 
         _size = data[2];
         resultLength = 1;
 
-        _file = LittleFS.open(filename, "w");
+        // TODO maybe add a byte to truncate the file if it is not the same
+        bool isResume = data[3] == 0x01;
+        if(isResume)
+        {
+            logInfoP("Resume file upload");
+        } else {
+            logInfoP("Truncate file upload");
+        }
+        
+        _file = LittleFS.open(filename, isResume ? "r+" : "w");
         if (!_file)
         {
             pushByte(0x42, resultData);
@@ -586,6 +610,17 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
     uint16_t sequence = data[1] << 8 | data[0];
     readFile(sequence, resultData, resultLength);
     _lastSequence = sequence;
+}
+
+void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    uint8_t result = 0;
+    result |= 0x1; // Resume
+    #ifdef ARDUINO_ARCH_RP2040
+    result |= 0x2; // Update
+    #endif
+    resultData[0] = result;
+    resultLength = 1;
 }
 
 FileTransferModule openknxFileTransferModule;
