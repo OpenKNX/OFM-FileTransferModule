@@ -1,3 +1,4 @@
+#ifndef OPENKNX_FILE_TRANSFER_IGNORE
 #include "FastCRC.h"
 #include "OpenKNX.h"
 #include <Arduino.h>
@@ -53,3 +54,4 @@ class FileTransferModule : public OpenKNX::Module
 };
 
 extern FileTransferModule openknxFileTransferModule;
+#endif
