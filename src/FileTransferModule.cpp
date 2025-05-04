@@ -384,7 +384,7 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
     {
         pushByte(0x42, resultData);
         resultLength = 1;
-        logErrorP("File can't be opened");
+        //logErrorP("File can't be opened"); // pre checks - should not throw this error
         _dirOpen = false;
         return;
     }
