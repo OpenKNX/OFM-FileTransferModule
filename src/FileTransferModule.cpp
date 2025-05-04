@@ -1,9 +1,9 @@
-#ifndef OPENKNX_FILE_TRANSFER_IGNORE
-    #include "FileTransferModule.h"
-    #include "versions.h"
-    #ifdef ARDUINO_ARCH_RP2040
-        #include <PicoOTA.h>
-    #endif
+#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
+#include "FileTransferModule.h"
+#include "versions.h"
+#ifdef ARDUINO_ARCH_RP2040
+#include <PicoOTA.h>
+#endif
 
 // Give your Module a name
 // it will be displayed when you use the method log("Hello")
@@ -271,13 +271,13 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             cmdCheckFeatures(length, data, resultData, resultLength);
             return true;
         }
-    #ifdef ARDUINO_ARCH_RP2040
+#ifdef ARDUINO_ARCH_RP2040
         case FtmCommands::FwUpdate:
         {
             cmdFwUpdate(length, data, resultData, resultLength);
             return false; // false is correct
         }
-    #endif
+#endif
     }
     return false;
 }
@@ -361,7 +361,7 @@ void FileTransferModule::cmdModuleVersion(uint8_t length, uint8_t *data, uint8_t
     resultData[5] = _revision & 0xFF;
 }
 
-    #ifdef ARDUINO_ARCH_RP2040
+#ifdef ARDUINO_ARCH_RP2040
 void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     logInfoP("Updated initiated");
@@ -373,7 +373,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     logInfoP("Device will restart in 2000ms");
     logIndentDown();
 }
-    #endif
+#endif
 
 void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -616,9 +616,9 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
 {
     uint8_t result = 0;
     result |= 0x1; // Resume
-    #ifdef ARDUINO_ARCH_RP2040
+#ifdef ARDUINO_ARCH_RP2040
     result |= 0x2; // Update
-    #endif
+#endif
     resultData[0] = result;
     resultLength = 1;
 }
