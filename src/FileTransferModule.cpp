@@ -25,6 +25,12 @@ void FileTransferModule::loop(bool configured)
     // check lastAction
     // close file or directory after HEARTBEAT_INTERVAL
 
+    if (_fileOpen && delayCheck(_lastAccess, 5000))
+    {
+        _file.flush();
+        logInfoP("File flushed due no activity");
+    }
+
     if (_fileOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
         _file.close();
@@ -147,8 +153,7 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
 
     if (_lastSequence + 1 != sequence)
     {
-        logDebugP("Not continous sequence - seek to position [expected %i, got %i]", _lastSequence + 1, sequence);
-        uint16_t pos = ((sequence - 1) * (_size - 3));
+        uint32_t pos = ((sequence - 1) * (_size - 3));
         logDebugP("Not continous sequence - seek to position %d [expected %i, got %i]", pos, _lastSequence + 1, sequence);
         if (!_file.seek(pos))
         {
@@ -161,15 +166,17 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
         logDebugP("Seeked to position %d", _file.position());
     }
 
+    #ifdef OPENKNX_DEBUG
     size_t filePos = _file.position();
+    #endif
     uint8_t written = _file.write((const uint8_t *)data + 3, data[2]);
     logDebugP("Write sequence %i (%i/%i bytes) %i.%i", sequence, written, data[2], filePos, _file.position());
 
-    if (sequence % 10 == 0)
-    {
-        logDebugP("Flush file");
-        _file.flush();
-    }
+    // if (sequence % 10 == 0)
+    // {
+    //     logDebugP("Flush file");
+    //     _file.flush();
+    // }
 
     if (written != data[2])
     {
@@ -519,7 +526,12 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
     if (data[0] == 0x00 && data[1] == 0x00)
     {
         const char *filename = (const char *)(data + 4);
-        if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
+        if (_fileOpen)
+        {
+            _file.flush();
+            _file.close();
+        }
+        if (checkOpenDir(resultData, resultLength)) return;
 
         if(data[3] > 1)
         {
