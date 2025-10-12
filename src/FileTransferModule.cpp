@@ -24,15 +24,9 @@ void FileTransferModule::loop(bool configured)
 {
     // check lastAction
     // close file or directory after HEARTBEAT_INTERVAL
-
-    if (_fileOpen && delayCheck(_lastAccess, 5000))
-    {
-        _file.flush();
-        logInfoP("File flushed due no activity");
-    }
-
     if (_fileOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
+        _file.flush();
         _file.close();
         _fileOpen = false;
         logErrorP("File closed due no heartbeat");
@@ -528,6 +522,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         const char *filename = (const char *)(data + 4);
         if (_fileOpen)
         {
+            logInfoP("Closed open file");
             _file.flush();
             _file.close();
         }
