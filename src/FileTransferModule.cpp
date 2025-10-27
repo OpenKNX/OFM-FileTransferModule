@@ -386,6 +386,14 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
 void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     const char *filename = (char *)data;
+    if(_fileOpen)
+    {
+        logInfoP("Closed open file");
+        _file.flush();
+        _file.close();
+        _fileOpen = false;
+    }
+
     _file = LittleFS.open(filename, "r");
 
     if (!_file)
@@ -557,6 +565,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
 
         logInfoP("Start file upload to \"%s\"", filename);
         logDebugP("File Size: %d", _file.size());
+        _heartbeat = millis();
         _fileOpen = true;
         _lastSequence = 0;
         pushByte(0x0, resultData);
@@ -611,6 +620,7 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
             pushByte(0x42, resultData);
             return;
         }
+        _heartbeat = millis();
         _fileOpen = true;
 
         _lastSequence = 0;
