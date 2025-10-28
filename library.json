@@ -1,6 +1,6 @@
 {
   "name": "OFM-FileTransferModule",
-  "version": "0.1.5",
+  "version": "0.1.4",
   "dependencies":
   {
       "frankboesing/FastCRC": "^1.41"
