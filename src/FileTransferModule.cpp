@@ -116,14 +116,14 @@ void FileTransferModule::readFile(uint16_t sequence, uint8_t *resultData, uint8_
     logIndentUp();
 
     if (_lastSequence + 1 != sequence)
-        _file.seek((sequence - 1) * (_size - 6));
+        _file.seek((sequence - 1) * (_size));
 
     pushByte(0x0, resultData);
     pushWord(sequence, resultData + 1);
-    uint8_t readed = _file.readBytes((char *)resultData + 4, _size - 6);
+    uint8_t readed = _file.readBytes((char *)resultData + 4, _size);
     pushByte(readed, resultData + 3);
 
-    logDebugP("Readed sequence %i (%i/%i bytes)", sequence, readed, _size - 6);
+    logDebugP("Readed sequence %i (%i/%i bytes)", sequence, readed, _size);
     if (readed == 0 || !_file.available())
     {
         _file.close();
@@ -147,7 +147,7 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
 
     if (_lastSequence + 1 != sequence)
     {
-        uint32_t pos = ((sequence - 1) * (_size - 3));
+        uint32_t pos = ((sequence - 1) * _size);
         logDebugP("Not continous sequence - seek to position %d [expected %i, got %i]", pos, _lastSequence + 1, sequence);
         if (!_file.seek(pos))
         {
@@ -165,12 +165,6 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
     #endif
     uint8_t written = _file.write((const uint8_t *)data + 3, data[2]);
     logDebugP("Write sequence %i (%i/%i bytes) %i.%i", sequence, written, data[2], filePos, _file.position());
-
-    // if (sequence % 10 == 0)
-    // {
-    //     logDebugP("Flush file");
-    //     _file.flush();
-    // }
 
     if (written != data[2])
     {
