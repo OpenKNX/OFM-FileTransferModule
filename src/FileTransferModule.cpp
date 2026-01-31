@@ -164,7 +164,9 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
     size_t filePos = _file.position();
     #endif
     uint8_t written = _file.write((const uint8_t *)data + 3, data[2]);
-    logDebugP("Write sequence %i (%i/%i bytes) %i.%i", sequence, written, data[2], filePos, _file.position());
+    #ifdef OPENKNX_DEBUG
+    logDebugP("Write sequence %i (%i/%i bytes) %i.%i", sequence, written, data[2], filePos, _file.position() - 1);
+    #endif
 
     if (written != data[2])
     {
