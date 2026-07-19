@@ -3,18 +3,17 @@
 #include "versions.h"
 #ifdef ARDUINO_ARCH_RP2040
 #include <PicoOTA.h>
+#elif defined(ARDUINO_ARCH_ESP32)
+#include <Update.h>
 #endif
 
-// Give your Module a name
-// it will be displayed when you use the method log("Hello")
-//  -> Log     Hello
+// Module name, shown in log output.
 const std::string FileTransferModule::name()
 {
     return "FileTransfer";
 }
 
-// You can also give it a version
-// will be displayed in Command Infos
+// Module version, shown in command info.
 const std::string FileTransferModule::version()
 {
     return MODULE_FileTransferModule_Version;
@@ -22,8 +21,7 @@ const std::string FileTransferModule::version()
 
 void FileTransferModule::loop(bool configured)
 {
-    // check lastAction
-    // close file or directory after HEARTBEAT_INTERVAL
+    // Auto-close file/dir after HEARTBEAT_INTERVAL with no heartbeat.
     if (_fileOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
         _file.flush();
@@ -43,6 +41,10 @@ void FileTransferModule::loop(bool configured)
         openknx.flash.save();
         openknx.restart();
     }
+
+#ifdef OPENKNX_FTC_CONSOLE
+    conLoop();
+#endif
 }
 
 enum class FtmCommands
@@ -54,6 +56,9 @@ enum class FtmCommands
     FileDownload,
     FileDelete,
     FileInfo,
+    FileUploadFast = 44, // open(answered) / data(SILENT) / close(answered) -- keeps classic cmd40 untouched
+    FileReport = 45,     // received-bitmap gap query (answered)
+    FilesystemInfo = 46, // LittleFS total + used bytes -> `ftc df` and the pre-upload free-space check
     DirList = 80,
     DirCreate,
     DirDelete,
@@ -141,42 +146,52 @@ void FileTransferModule::readFile(uint16_t sequence, uint8_t *resultData, uint8_
     logIndentDown();
 }
 
+/**
+ * @brief Shared position-write core: seek to (sequence-1)*_size, write n payload bytes; true iff seek AND full write ok.
+ *
+ * Seeks on every call by design: the fast path writes out of order, so a resend of the same seq must
+ * land at its absolute offset, not the current position (an in-order seek is a littlefs no-op = free).
+ */
+bool FileTransferModule::writeChunk(uint16_t sequence, const uint8_t *payload, uint8_t n)
+{
+    if (!_file.seek((uint32_t)(sequence - 1) * _size)) return false;
+    return _file.write(payload, n) == n;
+}
+
 void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
     logIndentUp();
 
+    #ifdef OPENKNX_DEBUG
     if (_lastSequence + 1 != sequence)
+        logDebugP("Not continous sequence - seek to position %d [expected %i, got %i]",
+                  (uint32_t)((sequence - 1) * _size), _lastSequence + 1, sequence);
+    size_t filePos = _file.position();
+    #endif
+
+    // Position-write through the shared core. On failure, re-test the seek so the classic answer
+    // keeps the exact two codes it always had: 0x46 = seek failed, 0x47 = short write (fs full).
+    if (!writeChunk(sequence, (const uint8_t *)data + 3, data[2]))
     {
-        uint32_t pos = ((sequence - 1) * _size);
-        logDebugP("Not continous sequence - seek to position %d [expected %i, got %i]", pos, _lastSequence + 1, sequence);
-        if (!_file.seek(pos))
+        if (!_file.seek((uint32_t)(sequence - 1) * _size))
         {
             pushByte(0x46, resultData);
             resultLength = 1;
             logErrorP("The file can't seek to position");
-            logIndentDown();
-            return;
         }
-        logDebugP("Seeked to position %d", _file.position());
-    }
-
-    #ifdef OPENKNX_DEBUG
-    size_t filePos = _file.position();
-    #endif
-    uint8_t written = _file.write((const uint8_t *)data + 3, data[2]);
-    #ifdef OPENKNX_DEBUG
-    logDebugP("Write sequence %i (%i/%i bytes) %i.%i", sequence, written, data[2], filePos, _file.position() - 1);
-    #endif
-
-    if (written != data[2])
-    {
-        pushByte(0x47, resultData);
-        resultLength = 1;
-        logErrorP("The file could not be written completely (%i/%i)", written, length);
+        else
+        {
+            pushByte(0x47, resultData);
+            resultLength = 1;
+            logErrorP("The file could not be written completely");
+        }
         logIndentDown();
         return;
     }
 
+    #ifdef OPENKNX_DEBUG
+    logDebugP("Write sequence %i (%i bytes) %i.%i", sequence, data[2], filePos, _file.position() - 1);
+    #endif
 
     FastCRC16 crc16;
     uint16_t crc = crc16.modbus(data, length);
@@ -192,6 +207,14 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
 
 bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
+#ifdef OPENKNX_FTC_CONSOLE
+    if (objectIndex == CON_OBJECT_INDEX)
+    {
+        _lastAccess = millis();
+        openknx.common.skipLooptimeWarning();
+        return conFunctionProperty(propertyId, length, data, resultData, resultLength);
+    }
+#endif
     if (objectIndex != 159) return false;
     _lastAccess = millis();
     openknx.common.skipLooptimeWarning();
@@ -264,6 +287,25 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
+        case FtmCommands::FileUploadFast:
+        {
+            // Return is the "handled" flag: open/close true (answered), a DATA frame false so no L7
+            // response is sent -- the silent fast-data path.
+            return cmdFileUploadFast(length, data, resultData, resultLength);
+        }
+
+        case FtmCommands::FileReport:
+        {
+            cmdFileReport(length, data, resultData, resultLength);
+            return true;
+        }
+
+        case FtmCommands::FilesystemInfo:
+        {
+            cmdFilesystemInfo(length, data, resultData, resultLength);
+            return true;
+        }
+
         case FtmCommands::ModuleVersion:
         {
             cmdModuleVersion(length, data, resultData, resultLength);
@@ -275,7 +317,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             cmdCheckFeatures(length, data, resultData, resultLength);
             return true;
         }
-#ifdef ARDUINO_ARCH_RP2040
+#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
         case FtmCommands::FwUpdate:
         {
             cmdFwUpdate(length, data, resultData, resultLength);
@@ -285,6 +327,120 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
     }
     return false;
 }
+
+#ifdef OPENKNX_FTC_CONSOLE
+// Console-tunnel FunctionProperty branch (obj 160). Runs in the KNX stack dispatch, so it only parks a
+// line / copies a bounded ring window (<=247 B) -- the command itself runs later in conLoop().
+bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *data, uint8_t *res, uint8_t &resLen)
+{
+    if (pid == CON_PID_IN)
+    {
+        const uint8_t flags = (len > 0) ? data[0] : 0;
+        if (flags & 0x01) // OPEN
+        {
+            if (_conActive)
+            {
+                res[0] = 0x01; // BUSY: a session is already owned
+                resLen = 1;
+                return true;
+            }
+            _conActive = true;
+            _conCmdPending = false;
+            _conOverflow = false;
+            _conCursor = openknx.logger.ringWritePos(); // start "now"
+            _conOwnerPa = (len >= 3) ? (uint16_t)((data[1] << 8) | data[2]) : 0;
+            _conLastAccess = millis();
+            openknx.console.disableConsole(true); // silence the local console for the duration
+            logInfoP("Console taken over by %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
+            res[0] = 0x00;
+            resLen = 1;
+            return true;
+        }
+        if (flags & 0x02) // CLOSE
+        {
+            _conActive = false;
+            _conCmdPending = false;
+            openknx.console.disableConsole(false);
+            logInfoP("Console released");
+            res[0] = 0x00;
+            resLen = 1;
+            return true;
+        }
+        if (!_conActive) // a line without a session
+        {
+            res[0] = 0x43;
+            resLen = 1;
+            return true;
+        }
+        if (_conCmdPending) // previous command still running
+        {
+            res[0] = 0x01; // BUSY
+            resLen = 1;
+            return true;
+        }
+        const uint8_t n = (len > 1) ? (uint8_t)MIN(len - 1, CONSOLE_INPUT_SIZE) : 0;
+        memcpy(_conLine, data + 1, n);
+        _conLine[n] = 0;
+        _conCmdPending = true;
+        _conLastAccess = millis();
+        res[0] = 0x00; // chunk#0 in the IN answer is a later optimisation
+        resLen = 1;
+        return true;
+    }
+    if (pid == CON_PID_OUT) // bounded ring drain, at most 1 APDU
+    {
+        if (!_conActive)
+        {
+            res[0] = 0x43;
+            resLen = 1;
+            return true;
+        }
+        _conLastAccess = millis();
+        const uint32_t wp = openknx.logger.ringWritePos(); // snapshot once
+        uint32_t pending = wp - _conCursor;
+        if (pending > OpenKNX::Log::Logger::RING_SIZE) // wrapped past the cursor -> resync + flag
+        {
+            _conOverflow = true;
+            _conCursor = wp - OpenKNX::Log::Logger::RING_SIZE;
+            pending = OpenKNX::Log::Logger::RING_SIZE;
+        }
+        const uint8_t n = (uint8_t)MIN(pending, (uint32_t)247);
+        const char *rb = openknx.logger.ringBuf();
+        for (uint8_t i = 0; i < n; i++)
+            res[3 + i] = rb[(_conCursor + i) % OpenKNX::Log::Logger::RING_SIZE];
+        _conCursor += n;
+        res[0] = 0x00;
+        res[1] = (_conCursor != wp) ? 1 : 0; // more
+        res[2] = _conOverflow ? 1 : 0;       // overflow (truncated)
+        _conOverflow = false;
+        resLen = (uint8_t)(3 + n);
+        return true;
+    }
+    return false;
+}
+
+// Run a parked command outside the stack dispatch (same context as the local console) and reap idle
+// sessions. VORGABE non-blocking: the command runs only under a freeLoopTime() budget, exactly like the
+// local USB console (processCommand is skipLooptimeWarning-covered) -- no new stall type.
+void FileTransferModule::conLoop()
+{
+    if (!_conActive) return;
+    if (_conCmdPending && openknx.common.freeLoopTime()) // exec OUTSIDE the dispatch
+    {
+        openknx.console.processCommand(_conLine); // may knx.loop()/flash.save()/restart() -- safe here
+        _conCmdPending = false;
+        _conLine[0] = 0;
+        _conLastAccess = millis();
+    }
+    if (delayCheck(_conLastAccess, CON_IDLE_TMO)) // reap an orphaned session
+    {
+        _conActive = false;
+        _conCmdPending = false;
+        openknx.console.disableConsole(false);
+        logInfoP("Console released (idle timeout)");
+    }
+}
+#endif
 
 void FileTransferModule::cmdFormat(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -368,13 +524,66 @@ void FileTransferModule::cmdModuleVersion(uint8_t length, uint8_t *data, uint8_t
 #ifdef ARDUINO_ARCH_RP2040
 void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    logInfoP("Updated initiated");
+    logInfoP("Update initiated");
     logIndentUp();
     picoOTA.begin();
-    picoOTA.addFile((char *)data);
-    picoOTA.commit();
+    if (!picoOTA.addFile((char *)data)) // false = staged image missing / unreadable
+    {
+        logErrorP("staged image not found or unreadable: %s", (const char *)data);
+        logIndentDown();
+        return;
+    }
+    if (!picoOTA.commit()) // false = OTA command page not written -> do NOT reboot
+    {
+        logErrorP("PicoOTA commit failed -- apply aborted");
+        logIndentDown();
+        return;
+    }
     _rebootRequested = millis();
-    logInfoP("Device will restart in 2000ms");
+    logInfoP("Firmware armed; device will restart in ~2s to apply");
+    logIndentDown();
+}
+#elif defined(ARDUINO_ARCH_ESP32)
+/**
+ * @brief ESP32 self-apply: stream the staged LittleFS image into the OTA (app1) slot, then defer-reboot to boot it.
+ */
+void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    logInfoP("Update initiated");
+    logIndentUp();
+    const char *path = (const char *)data; // NUL-terminated staged remote path from the client
+    if (_fileOpen)                          // release any open transfer file before re-opening it read-only
+    {
+        _file.flush();
+        _file.close();
+        _fileOpen = false;
+    }
+    File img = LittleFS.open(path, "r");
+    if (!img)
+    {
+        logErrorP("staged image not found: %s", path);
+        logIndentDown();
+        return;
+    }
+    size_t sz = img.size();
+    if (!Update.begin(sz)) // fails loud on a non-OTA/single-app partition layout
+    {
+        logErrorP("Update.begin(%u) failed: %s", (unsigned)sz, Update.errorString());
+        img.close();
+        logIndentDown();
+        return;
+    }
+    size_t w = Update.writeStream(img);
+    img.close();
+    if (w != sz || !Update.end(true) || !Update.isFinished())
+    {
+        logErrorP("Update failed: %s", Update.errorString());
+        Update.abort(); // release the OTA engine (frees the ~4KB sector buffer, re-arms begin()); idempotent if a write-fail already reset it
+        logIndentDown();
+        return;
+    }
+    logInfoP("Firmware written to OTA slot; reboot in ~2s to apply");
+    _rebootRequested = millis(); // reuse loop()'s deferred flash.save()+restart()
     logIndentDown();
 }
 #endif
@@ -432,6 +641,29 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
     resultLength = 9;
 
     // logHexDebugP(resultData, resultLength);
+}
+
+/**
+ * @brief LittleFS capacity for `ftc df` and the client's pre-upload check: [00][total:4 BE][used:4 BE].
+ *
+ * Client derives free = total - used. Read-only -- safe any time, never touches an open file/dir.
+ */
+void FileTransferModule::cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    #ifdef ARDUINO_ARCH_RP2040
+    FSInfo fsinfo = {0};
+    LittleFS.info(fsinfo);
+    const uint32_t total = (uint32_t)fsinfo.totalBytes;
+    const uint32_t used = (uint32_t)fsinfo.usedBytes;
+    #else
+    const uint32_t total = (uint32_t)LittleFS.totalBytes();
+    const uint32_t used = (uint32_t)LittleFS.usedBytes();
+    #endif
+    pushByte(0x0, resultData);
+    pushInt(total, resultData + 1);
+    pushInt(used, resultData + 5);
+    resultLength = 9;
+    logInfoP("Filesystem: total %u B, used %u B, free %u B", (unsigned)total, (unsigned)used, (unsigned)(total >= used ? total - used : 0));
 }
 
 void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -585,6 +817,147 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
     writeFile(sequence, data, length, resultData, resultLength);
 }
 
+/**
+ * @brief FAST upload (cmd44): open(00 00)/close(FF FF) answered, DATA silent (returns false => no L7 answer).
+ *
+ * DATA frames are still AckRequested on the wire, so TP1 L2 keeps doing L_ACK/BUSY/retransmit --
+ * the only remaining flow-control backstop for the silent stream.
+ */
+bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    // Refresh on EVERY frame: silent DATA never hits the classic dispatch that touches _heartbeat, so
+    // without this the 30 s no-heartbeat auto-close (loop()) fires mid-stream and drops the file.
+    _heartbeat = millis();
+
+    if (length < 2) return false; // even the OPEN/DATA/CLOSE discriminator needs data[0..1]; runt -> silent drop
+
+    // OPEN: [00][00][payloadSize][flags][expectedChunks:2 LE][name NUL-terminated]
+    if (data[0] == 0x00 && data[1] == 0x00)
+    {
+        if (length < 7) // need [00][00][sz][flags][chunks:2] + at least a 1-byte (NUL) name -> else malformed
+        {
+            pushByte(0x42, resultData);
+            resultLength = 1;
+            logErrorP("Fast open: short frame (%u B)", (unsigned)length);
+            return true;
+        }
+        const char *filename = (const char *)(data + 6);
+        if (_fileOpen)
+        {
+            _file.flush();
+            _file.close();
+            _fileOpen = false;
+        }
+        if (checkOpenDir(resultData, resultLength)) return true;
+
+        resultLength = 1;
+        const uint16_t exp = (uint16_t)(data[4] | (data[5] << 8));
+        if (exp > FTM_FAST_MAX_CHUNKS) // more chunks than the static bitmap holds -> tell the client to go classic
+        {
+            pushByte(0x4A, resultData);
+            logErrorP("Fast upload refused: %u chunks exceed cap %u", exp, (unsigned)FTM_FAST_MAX_CHUNKS);
+            return true;
+        }
+
+        _size = data[2];               // payload B/chunk -> seek stride ((seq-1)*_size)
+        const uint8_t flags = data[3]; // bit0 resume (r+ vs w), bit1 keepBitmap (recovery re-open)
+        _file = LittleFS.open(filename, (flags & 0x01) ? "r+" : "w");
+        if (!_file)
+        {
+            pushByte(0x42, resultData);
+            logErrorP("Start fast upload to \"%s\" failed", filename);
+            return true;
+        }
+        _fileOpen = true;
+        _lastSequence = 0;
+        _fastExpectedChunks = exp;
+        if (!(flags & 0x02)) memset(_fastBitmap, 0, sizeof(_fastBitmap)); // clear unless keepBitmap (fixes S2)
+        logInfoP("Start fast upload to \"%s\" (%s, %u chunks, %u B/chunk)", filename,
+                 (flags & 0x01) ? "resume" : "truncate", exp, _size);
+        pushByte(0x00, resultData);
+        return true;
+    }
+
+    // CLOSE: [FF][FF] -- flush + close, answer a deterministic 1-byte 0x00.
+    if (data[0] == 0xFF && data[1] == 0xFF)
+    {
+        if (_fileOpen)
+        {
+            _file.flush();
+            _file.close();
+            _fileOpen = false;
+        }
+        logInfoP("Fast upload completed");
+        pushByte(0x00, resultData);
+        resultLength = 1;
+        return true;
+    }
+
+    // DATA (SILENT): [seq:2 LE][n][payload:n][crc16:2 BE over data[0 .. 2+n]]. return false => no answer.
+    if (!_fileOpen) return false;
+    if (length < 3) return false;                            // need [seq:2][n] present before reading n
+    const uint16_t seq = (uint16_t)(data[1] << 8 | data[0]); // LE, matches writeFile's parse
+    const uint8_t n = data[2];
+    if ((uint16_t)length < (uint16_t)(3u + n + 2u)) return false;       // malformed -> silent gap (never hash past length, S6)
+    const uint16_t rx = (uint16_t)(data[3 + n] << 8 | data[3 + n + 1]); // trailing CRC16, big-endian
+    FastCRC16 crc16;
+    if (crc16.modbus(data, 3 + n) != rx) return false; // corrupt -> leave bit CLEAR -> recoverable gap (C5)
+    // Bounds-check the seq BEFORE writeChunk (short-circuit &&) so a bad/forged seq can never seek+write
+    // wild nor index the bitmap out of bounds. Bit set <=> the correct bytes are on disk.
+    if (seq >= 1 && seq <= _fastExpectedChunks && n <= _size && (uint32_t)(seq - 1) / 8 < sizeof(_fastBitmap) &&
+        writeChunk(seq, data + 3, n)) // n <= _size: a chunk never overruns its ((seq-1)*_size) slot into the next
+        _fastBitmap[(seq - 1) >> 3] |= (uint8_t)(1u << ((seq - 1) & 7));
+    return false; // SILENT (no L7 answer). L2 still ACKs -- the client sends fast DATA AckRequested.
+}
+
+/**
+ * @brief FAST gap report (cmd45): request [base:2 LE][count:2 LE][nonce:1], response
+ *        [00][base:2 BE][count:2 BE][nonce:1][bitmap ceil(count/8) B]; bit i (LSB-first) <=> seq base+i received.
+ *
+ * count is clamped so the answer stays <= 247 B (one frame). 0x42 = no file open.
+ */
+void FileTransferModule::cmdFileReport(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    _heartbeat = millis();
+    if (!_fileOpen) // the bitmap only means anything for the currently-open transfer file
+    {
+        pushByte(0x42, resultData);
+        resultLength = 1;
+        return;
+    }
+    if (length < 5) // need [base:2][count:2][nonce] before indexing data[0..4] -> malformed
+    {
+        pushByte(0x42, resultData);
+        resultLength = 1;
+        return;
+    }
+
+    uint16_t base = (uint16_t)(data[0] | (data[1] << 8));
+    uint16_t count = (uint16_t)(data[2] | (data[3] << 8));
+    const uint8_t nonce = data[4];
+
+    // Clamp count so resultLength = 6 + ceil(count/8) <= 247 -> ceil(count/8) <= 241 -> count <= 1928.
+    const uint16_t maxBmp = 247 - 6; // 241 bitmap bytes
+    if ((uint32_t)(count + 7) / 8 > maxBmp) count = (uint16_t)(maxBmp * 8);
+
+    resultData[0] = 0x00;
+    resultData[1] = (uint8_t)(base >> 8); // base, big-endian echo
+    resultData[2] = (uint8_t)(base & 0xFF);
+    resultData[3] = (uint8_t)(count >> 8); // count, big-endian echo
+    resultData[4] = (uint8_t)(count & 0xFF);
+    resultData[5] = nonce; // echoed for the client's staleness / dup rejection (fixes C4)
+    const uint16_t bmp = (uint16_t)((count + 7) / 8);
+    memset(resultData + 6, 0, bmp);
+    for (uint16_t i = 0; i < count; i++)
+    {
+        const uint32_t s = (uint32_t)base + i; // 1-based seq for response bit i
+        if (s >= 1 && s <= _fastExpectedChunks && (s - 1) / 8 < sizeof(_fastBitmap) &&
+            (_fastBitmap[(s - 1) >> 3] & (1u << ((s - 1) & 7))))
+            resultData[6 + (i >> 3)] |= (uint8_t)(1u << (i & 7));
+    }
+    resultLength = (uint8_t)(6 + bmp);
+}
+
 void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
@@ -638,8 +1011,12 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
 {
     uint8_t result = 0;
     result |= 0x1; // Resume
-#ifdef ARDUINO_ARCH_RP2040
+#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
     result |= 0x2; // Update
+#endif
+    result |= 0x4; // FAST: server understands cmd44/cmd45; one bit covers both windowed & forget.
+#ifdef OPENKNX_FTC_CONSOLE
+    result |= 0x8; // Console: obj-160 console tunnel available (ftc <pa> console)
 #endif
     resultData[0] = result;
     resultLength = 1;
