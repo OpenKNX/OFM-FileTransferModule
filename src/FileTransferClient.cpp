@@ -261,6 +261,9 @@ static constexpr uint32_t FTC_FAST_STALL_MS = 30000; // no forward progress for 
 static constexpr uint32_t FTC_SCAN_SPACING_MS = 40;
 static constexpr uint32_t FTC_SCAN_DRAIN_MS = 2500; // quiet time after the LAST answer, not the last probe
 static constexpr uint16_t FTC_SCAN_MAX_LIST = 128;
+// Console-drain buffer (_ftcOut): keep this many FtcOutLine slots (~132 B each) as steady state so frequent
+// 1-line output (upload progress) does not realloc; a bigger burst (ll/ls/help ~12 lines) is released on drain.
+static constexpr size_t FTC_OUT_KEEP = 4;
 // CO scan (`ets`) per-address deadlines. Both exceed the TP 3-retry window (~300 ms), so a present device
 // is never mis-timed as absent. Serial, so these bound the worst-case time-per-address, not a burst.
 static constexpr uint32_t FTC_CO_CONNECT_TMO = 600; // no T_Connect ack in this window -> ABSENT
@@ -269,8 +272,9 @@ static constexpr uint32_t FTC_CO_SETTLE_MS = 40;    // quiet gap after a disconn
 static constexpr uint32_t FTC_CO_BUSY_TMO = 4000;   // phase-0 CO scan: abort if the TP link stays owned (ETS/mgmt) this long
 
 // --- Variant-D two-line progress + result panel -------------------------------------------------
-static constexpr uint32_t FTC_VERBOSE_MS = 1000; // verbose progress cadence (1 Hz) when _ftcVerbose is on
-static constexpr uint8_t FTC_PROG_BAR_W = 20;    // progress-bar inner width ('#' fill / '-' track)
+static constexpr uint32_t FTC_VERBOSE_MS = 1000;   // verbose progress cadence (1 Hz) when _ftcVerbose is on
+static constexpr uint32_t FTC_PROGRESS_MS = 10000; // non-verbose progress cadence (one compact line every 10 s)
+static constexpr uint8_t FTC_PROG_BAR_W = 20;      // progress-bar inner width ('#' fill / '-' track)
 static constexpr uint8_t FTC_BOX_IW = 54;        // result-panel inner width (between the '|' borders)
 
 void FileTransferClient::ftcCloseSource()
@@ -472,6 +476,7 @@ void FileTransferClient::scanReport()
     _status.ok = true;
     _status.done = _scanProbed;
     ftcStatusMsg(_scanFound ? "scan complete" : "scan complete -- nothing answered");
+    // _ftcListing is released centrally in ftcFinish() (the terminal all scan/ll/ls paths reach).
 }
 
 void FileTransferClient::requestScan(uint16_t startPa, uint16_t endPa, const char *label, uint8_t sweeps, bool co,
@@ -583,7 +588,7 @@ void FileTransferClient::ftcScanSaveOpen()
         return;
     }
     // Normalise to an absolute path (LittleFS + SD want a leading '/'), into a bounded local buffer.
-    char path[84];
+    char path[FTC_PATH_MAX + 1]; // +1 for the prepended '/' on a full-length stripped path
     if (stripped[0] == '/') { strncpy(path, stripped, sizeof(path) - 1); path[sizeof(path) - 1] = 0; }
     else snprintf(path, sizeof(path), "/%s", stripped);
     if (!be->sink.open(path))
@@ -1227,6 +1232,7 @@ void FileTransferClient::ftcSendFastData(uint16_t seq)
  */
 void FileTransferClient::ftcSendReport(uint16_t base, uint16_t count)
 {
+    if (_ftcReportRetries == 0) _ftcRepWaitStart = millis(); // [dbg] first query of this round -> start the answer-latency clock (a retry send keeps it)
     _ftcReportNonce++;
     _ftcTx[0] = (uint8_t)(base & 0xFF); // little-endian
     _ftcTx[1] = (uint8_t)(base >> 8);
@@ -1277,44 +1283,47 @@ void FileTransferClient::ftcLogRate(const char *what, uint32_t elapsedMs)
 }
 
 /**
- * @brief Gate a progress update (per decile, or per second when verbose) and compute cur/avg/peak.
+ * @brief Compute cur/avg/peak on EVERY call (keeps ftc status .bps live) and gate a progress line.
  *
  * Shared by the fast/classic upload and the download emit sites. `up` picks the arrow + resume base and
- * seeds the interval baseline (_ftcLastProgMs = startMs) on the first call; then it calls ftcProgress.
+ * seeds the interval baseline (_ftcLastProgMs = startMs) on the first call. Emits the initial line, then
+ * one line per FTC_VERBOSE_MS when verbose (1 Hz) or per FTC_PROGRESS_MS otherwise (10 s) -- not per decile.
  */
 void FileTransferClient::ftcMaybeProgress(bool up, uint16_t seq, uint16_t chunks, uint32_t done, uint32_t size, uint32_t startMs)
 {
     const uint32_t now = millis();
-    if (_ftcLastProgMs == 0) _ftcLastProgMs = startMs ? startMs : now; // interval baseline = the (re-)open
-    const uint8_t pct = size ? (uint8_t)(((uint64_t)done * 100ULL) / size) : 0;
-    const bool decile = (pct >= _ftcNextPct);
-    const bool verbose = (_ftcVerbose && (now - _ftcLastProgMs) >= FTC_VERBOSE_MS);
-    if (!decile && !verbose) return;
+    const bool first = (_ftcLastProgMs == 0);            // captured BEFORE seeding -> first call gets the initial line
+    if (first) _ftcLastProgMs = startMs ? startMs : now; // interval baseline = the (re-)open
 
+    // Cheap per-chunk arithmetic on EVERY call so _status.bps (ftc status) always reflects the live rate.
     const uint32_t el = now - startMs;
     const uint32_t base = up ? _ftcResumeBase : 0; // resumed bytes are not this run's throughput
     const uint32_t net = (done > base) ? (done - base) : 0;
     const uint32_t avg = (uint32_t)(((uint64_t)net * 1000ULL) / (el ? el : 1));
-    // cur = interval rate between consecutive SHOWN lines; the first line has no interval -> fall back to avg.
+    // cur = interval rate since the last SHOWN line; the first line has no interval -> fall back to avg.
     uint32_t cur = avg;
     if (_ftcLastProgDone != 0 && done > _ftcLastProgDone && now > _ftcLastProgMs)
         cur = (uint32_t)(((uint64_t)(done - _ftcLastProgDone) * 1000ULL) / (now - _ftcLastProgMs));
     if (cur > _ftcPeakBps) _ftcPeakBps = cur;
     _status.bps = (uint16_t)(cur > 0xFFFF ? 0xFFFF : cur);
 
-    ftcProgress(up, _ftcTarget, seq, chunks, done, size, cur, avg);
-    _ftcLastProgMs = now;
+    // Emit gate: initial line always; then 1 Hz when verbose, else one compact line every FTC_PROGRESS_MS.
+    const uint32_t due = _ftcVerbose ? FTC_VERBOSE_MS : FTC_PROGRESS_MS;
+    if (!first && (now - _ftcLastProgMs) < due) return;
+
+    ftcProgress(up, _ftcTarget, seq, chunks, done, size, cur, avg, _ftcVerbose);
+    _ftcLastProgMs = now;   // last-SHOWN baseline (pairs with _ftcLastProgDone for the next interval rate)
     _ftcLastProgDone = done;
-    while (_ftcNextPct <= pct && _ftcNextPct <= 90) _ftcNextPct += 10;
 }
 
 /**
- * @brief Emit the two aligned progress lines via ftcOut, owning the "FTC:" prefix column.
+ * @brief Emit a progress line: verbose = two aligned lines (owning the "FTC:" column), else one compact line.
  *
- * Line1 "FTC: -> a.l.d  [####----]  ppp%  seq s/c"; line2 reuses line1's measured prefix width so its
- * columns sit under the bar regardless of the PA width or the timestamp the logger later prepends.
+ * Verbose keeps the historical layout unchanged (arrow + bar/pct/seq, then KB/Bps/avg/ETA under the bar,
+ * with a trailing blank line). Non-verbose prints ONE dense line, no trailing blank -- the quiet default:
+ * "FTC: Upload/Download -> a.l.d  [bar]  pct%  seq s/c  di.dd/ti.td KB  cur B/s (avg a)  ETA Mm SSs".
  */
-void FileTransferClient::ftcProgress(bool up, uint16_t pa, uint16_t seq, uint16_t chunks, uint32_t done, uint32_t size, uint32_t cur, uint32_t avg)
+void FileTransferClient::ftcProgress(bool up, uint16_t pa, uint16_t seq, uint16_t chunks, uint32_t done, uint32_t size, uint32_t cur, uint32_t avg, bool verbose)
 {
     const uint8_t pct = size ? (uint8_t)(((uint64_t)done * 100ULL) / size) : 0;
     // Bar: FTC_PROG_BAR_W cells, '#' up to done/size, '-' track for the rest.
@@ -1327,7 +1336,27 @@ void FileTransferClient::ftcProgress(bool up, uint16_t pa, uint16_t seq, uint16_
     bar[1 + FTC_PROG_BAR_W] = ']';
     bar[2 + FTC_PROG_BAR_W] = 0;
 
-    // Line 1: build the prefix "FTC: -> a.l.d  " first and capture its width (pfx) for line 2's indent.
+    // KB with 1 decimal, no float (int = bytes>>10, dec = ((bytes&1023)*10)>>10); ETA = remaining / max(avg,1) s.
+    const uint32_t di = done >> 10, dd = ((done & 1023) * 10) >> 10;
+    const uint32_t ti = size >> 10, td = ((size & 1023) * 10) >> 10;
+    const uint32_t rem = (size > done) ? (size - done) : 0;
+    const uint32_t eta = rem / (avg ? avg : 1);
+
+    if (!verbose)
+    {
+        // One dense line, no trailing blank. Direction is the WORD; the arrow stays "->" for both ways.
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "FTC: %s -> %u.%u.%u  %s  %u%%  seq %u/%u  %u.%u/%u.%u KB  %u B/s (avg %u)  ETA %um%02us",
+                 up ? "Upload" : "Download", (pa >> 12) & 0x0F, (pa >> 8) & 0x0F, pa & 0xFF, bar,
+                 (unsigned)pct, (unsigned)seq, (unsigned)chunks, (unsigned)di, (unsigned)dd,
+                 (unsigned)ti, (unsigned)td, (unsigned)cur, (unsigned)avg,
+                 (unsigned)(eta / 60), (unsigned)(eta % 60));
+        ftcOut(0, "%s", line);
+        return;
+    }
+
+    // Verbose (unchanged). Line 1: build the prefix "FTC: -> a.l.d  " first, capture its width (pfx) for line 2.
     char l1[112];
     int pfx = snprintf(l1, sizeof(l1), "FTC: %s %u.%u.%u  ", up ? "->" : "<-",
                        (pa >> 12) & 0x0F, (pa >> 8) & 0x0F, pa & 0xFF);
@@ -1336,12 +1365,7 @@ void FileTransferClient::ftcProgress(bool up, uint16_t pa, uint16_t seq, uint16_
     snprintf(l1 + pfx, sizeof(l1) - (size_t)pfx, "%s  %3u%%  seq %u/%u", bar,
              (unsigned)pct, (unsigned)seq, (unsigned)chunks);
 
-    // Line 2: "FTC:" + (pfx-4) spaces lands the content under line1's bar. KB with 1 decimal, no float
-    // (int = bytes>>10, dec = ((bytes&1023)*10)>>10); ETA = remaining / max(avg,1) seconds.
-    const uint32_t di = done >> 10, dd = ((done & 1023) * 10) >> 10;
-    const uint32_t ti = size >> 10, td = ((size & 1023) * 10) >> 10;
-    const uint32_t rem = (size > done) ? (size - done) : 0;
-    const uint32_t eta = rem / (avg ? avg : 1);
+    // Line 2: "FTC:" + (pfx-4) spaces lands the content under line1's bar.
     int ind = pfx - 4;
     if (ind < 0) ind = 0;
     char l2[128];
@@ -1636,7 +1660,8 @@ void FileTransferClient::ftcListAdvance()
     snprintf(foot, sizeof(foot), "%-40.40s | %12u | %-10s | total", left, (unsigned)_ftcListBytes, "");
     ftcOut(CONSOLE_HEADLINE_COLOR, "%s", foot);
     ftcOut(CONSOLE_HEADLINE_COLOR, "------------------------------------------------------------------------------");
-    // _ftcListing is kept (not cleared) so a UI can read the result after the fact via listing().
+    // _ftcListing stays valid through the operation; ftcFinish() releases it at the terminal (ll continues
+    // into the FtcFsInfo bar first, so the free happens after that, not here).
     _status.ok = true;
     if (_ftcListDetailed)
     {
@@ -1746,6 +1771,11 @@ void FileTransferClient::ftcFinish()
     _ftcRetryPending = false; // never carry a pending-retry across the end of a transfer
     _ftcStartMs = 0;
     _ftcState = FtcIdle;
+    // The operation is over -> the scan/ll/ls result is not read again. RELEASE the buffer (swap with an
+    // empty vector, NOT .clear(): clear keeps the grown capacity, up to FTC_SCAN_MAX_LIST*sizeof(FtcEntry)
+    // ~9.5 KiB). Deferred scan-post already bailed at the guard above, so this only runs at the true end.
+    // The next scan/ll/ls re-grows it from empty; listing() is not preserved past a completed operation.
+    if (!_ftcListing.empty()) std::vector<FtcEntry>().swap(_ftcListing);
     if (_status.phase != FtcPhase::Failed) _status.phase = FtcPhase::Done;
 }
 
@@ -1913,7 +1943,8 @@ void FileTransferClient::conOpen()
     uint8_t f[3] = {0x01, (uint8_t)(myPa >> 8), (uint8_t)(myPa & 0xFF)}; // OPEN + our PA
     conSend(CON_PID_IN, f, 3);
     _ftcState = FtcConsole;
-    _conSub = 1; // await the OPEN ack
+    _conStartMs = millis(); // stamp the session start -> duration reported on close
+    _conSub = 1;            // await the OPEN ack
     openknx.console.setLineSink(&consoleFeedLineStatic);
     ftcOut(CONSOLE_HEADLINE_COLOR, "-- console %u.%u.%u -- 'quit'/'exit' to leave, 'ftc cancel' to escape --",
            (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF);
@@ -1963,7 +1994,15 @@ void FileTransferClient::conClose(const char *reason, bool sendClose)
         conSend(CON_PID_IN, f, 1);
     }
     _conSub = 0;
-    ftcOut(CONSOLE_HEADLINE_COLOR, "-- %s --", reason);
+    if (_conStartMs) // opened -> append the session duration HH:MM:SS
+    {
+        const uint32_t secs = (millis() - _conStartMs) / 1000;
+        ftcOut(CONSOLE_HEADLINE_COLOR, "-- %s (session time %02u:%02u:%02u) --", reason,
+               (unsigned)(secs / 3600), (unsigned)((secs / 60) % 60), (unsigned)(secs % 60));
+    }
+    else
+        ftcOut(CONSOLE_HEADLINE_COLOR, "-- %s --", reason);
+    _conStartMs = 0; // don't carry a stale start into a later close without an open
     ftcFinish();
 }
 #endif
@@ -2104,7 +2143,12 @@ bool FileTransferClient::ftcDrainOut()
     {
         if (!_ftcOut.empty())
         {
-            _ftcOut.clear();
+            // Fully drained (runs once per burst, not every loop). Release the buffer if it grew for a big
+            // burst (ll/ls/help/scan); keep a small steady-state buffer for 1-line output to avoid realloc.
+            if (_ftcOut.capacity() > FTC_OUT_KEEP)
+                std::vector<FtcOutLine>().swap(_ftcOut);
+            else
+                _ftcOut.clear();
             _ftcOutPos = 0;
         }
         return false;
@@ -2278,23 +2322,31 @@ const char *FileTransferClient::ftcLoadName(uint8_t state)
 
 void FileTransferClient::ftcDevReport()
 {
-    auto &l = openknx.logger;
+    // Emit the whole ~18-line fingerprint through ftcOut (the cooperative drain), NOT straight to the logger:
+    // 18 log lines in one pass flush to USB-CDC in a single burst (~110 ms) -> a "loop took longer" warning.
+    // ftcDrainOut() spreads them across loop() per openknx.freeLoopTime(), so the report never stalls the loop.
+    // Per-line color replaces the color()/color(0) bracketing: section headers keep CONSOLE_HEADLINE_COLOR.
     char title[32];
     snprintf(title, sizeof(title), "Device %u.%u.%u", (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F,
              _ftcTarget & 0xFF);
-    l.color(CONSOLE_HEADLINE_COLOR);
-    l.logHeader(title);
-    l.color(0);
+    // Replicate Logger::logHeader: "========================" (24) + " title " + '='-fill to width 55.
+    char hdr[96];
+    int hn = 0;
+    while (hn < 24) hdr[hn++] = '=';
+    hn += snprintf(hdr + hn, sizeof(hdr) - hn, " %s ", title);
+    for (int tail = 54 - (int)strlen(title); tail > 0 && hn < (int)sizeof(hdr) - 1; tail--) hdr[hn++] = '=';
+    hdr[hn] = '\0';
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", hdr);
 
     // --- Device section: identity read from the standard Device Object (index 0), ETS-panel order ---
-    l.log("Device");
+    ftcOut(CONSOLE_HEADLINE_COLOR, "Device");
     if (_devHasMask)
-        l.logWithValues("  Mask version:   0x%04X  (%s)", _devMask, ftcMaskName(_devMask));
+        ftcOut(0, "  Mask version:   0x%04X  (%s)", _devMask, ftcMaskName(_devMask));
     if (_devHasSerial)
     {
-        l.logWithValues("  Manufacturer:   0x%04X", _devMfr);
-        l.logWithValues("  Serial number:  %02X%02X:%02X%02X%02X%02X", _devSerial[0], _devSerial[1], _devSerial[2],
-                        _devSerial[3], _devSerial[4], _devSerial[5]);
+        ftcOut(0, "  Manufacturer:   0x%04X", _devMfr);
+        ftcOut(0, "  Serial number:  %02X%02X:%02X%02X%02X%02X", _devSerial[0], _devSerial[1], _devSerial[2],
+               _devSerial[3], _devSerial[4], _devSerial[5]);
     }
     if (_devHasOrder)
     {
@@ -2302,43 +2354,43 @@ void FileTransferClient::ftcDevReport()
         char txt[11] = {0};
         for (uint8_t i = 0; i < 10; i++)
             txt[i] = (_devOrder[i] >= 0x20 && _devOrder[i] < 0x7F) ? (char)_devOrder[i] : '.';
-        l.logWithValues("  Order number:   \"%s\"", txt);
+        ftcOut(0, "  Order number:   \"%s\"", txt);
     }
     if (_devHasHw)
     {
         // Hardware type is 0000 + application number (2) + version (2). The app number is the numeric
         // model id (ETS resolves it to a catalog name); e.g. 0xAD00 = NeoPixel, 0xAC0D = StateEngine.
         const uint16_t appNum = (uint16_t)((_devHw[2] << 8) | _devHw[3]);
-        l.logWithValues("  Hardware type:  %02X %02X %02X %02X %02X %02X  (app 0x%04X)", _devHw[0], _devHw[1],
-                        _devHw[2], _devHw[3], _devHw[4], _devHw[5], appNum);
+        ftcOut(0, "  Hardware type:  %02X %02X %02X %02X %02X %02X  (app 0x%04X)", _devHw[0], _devHw[1],
+               _devHw[2], _devHw[3], _devHw[4], _devHw[5], appNum);
     }
     if (_devHasFw && _devFwLen >= 2)
     {
         // PDT_VERSION: [magic:5][version:5][revision:6] -- ETS prints "[magic] version.revision".
         const uint16_t v = (uint16_t)((_devFw[0] << 8) | _devFw[1]);
-        l.logWithValues("  Version:        [%u] %u.%u", (v >> 11) & 0x1F, (v >> 6) & 0x1F, v & 0x3F);
+        ftcOut(0, "  Version:        [%u] %u.%u", (v >> 11) & 0x1F, (v >> 6) & 0x1F, v & 0x3F);
     }
     if (_devHasProg)
-        l.logWithValues("  Prog mode:      %s", _devProgMode ? "ON" : "off");
+        ftcOut(0, "  Prog mode:      %s", _devProgMode ? "ON" : "off");
 
     // --- Application program (ETS "Applikationsprogramm") ---
     if (_devHasApp || _devLoadHas[2])
     {
-        l.log("Application program");
+        ftcOut(CONSOLE_HEADLINE_COLOR, "Application program");
         if (_devHasApp)
-            l.logWithValues("  App / version:  mfr 0x%04X  app 0x%04X  v%u.%u", _devAppMfr, _devAppNum,
-                            _devAppVer >> 4, _devAppVer & 0x0F);
+            ftcOut(0, "  App / version:  mfr 0x%04X  app 0x%04X  v%u.%u", _devAppMfr, _devAppNum,
+                   _devAppVer >> 4, _devAppVer & 0x0F);
         if (_devLoadHas[2])
-            l.logWithValues("  Load state:     %s", ftcLoadName(_devLoad[2]));
+            ftcOut(0, "  Load state:     %s", ftcLoadName(_devLoad[2]));
     }
 
     // --- Group communication (ETS "Gruppenkommunikation"): the table load states ---
     if (_devLoadHas[0] || _devLoadHas[1] || _devLoadHas[3])
     {
-        l.log("Group communication");
-        if (_devLoadHas[0]) l.logWithValues("  Address table:  %s", ftcLoadName(_devLoad[0]));
-        if (_devLoadHas[1]) l.logWithValues("  Assoc. table:   %s", ftcLoadName(_devLoad[1]));
-        if (_devLoadHas[3]) l.logWithValues("  Object table:   %s", ftcLoadName(_devLoad[3]));
+        ftcOut(CONSOLE_HEADLINE_COLOR, "Group communication");
+        if (_devLoadHas[0]) ftcOut(0, "  Address table:  %s", ftcLoadName(_devLoad[0]));
+        if (_devLoadHas[1]) ftcOut(0, "  Assoc. table:   %s", ftcLoadName(_devLoad[1]));
+        if (_devLoadHas[3]) ftcOut(0, "  Object table:   %s", ftcLoadName(_devLoad[3]));
     }
 
     // --- File-Transfer section: is there a KnxFileTransfer server, and what can it do ---
@@ -2350,15 +2402,15 @@ void FileTransferClient::ftcDevReport()
         if (_devFeat & 0x4) strcat(feat, "Fast ");
         if (_devFeat & 0x8) strcat(feat, "Console ");
         if (!feat[0]) strcpy(feat, "(none)");
-        l.log("File-Transfer");
-        l.logWithValues("  Module version: %u.%u.%u", _devVerMaj, _devVerMin, _devVerRev);
-        l.logWithValues("  Features:       %s", feat);
+        ftcOut(CONSOLE_HEADLINE_COLOR, "File-Transfer");
+        ftcOut(0, "  Module version: %u.%u.%u", _devVerMaj, _devVerMin, _devVerRev);
+        ftcOut(0, "  Features:       %s", feat);
     }
     else
     {
-        l.log("File-Transfer:    no answer (not a KnxFileTransfer device)");
+        ftcOut(0, "File-Transfer:    no answer (not a KnxFileTransfer device)");
     }
-    l.logDividingLine();
+    ftcOut(0, "--------------------------------------------------------------------------------");
 
     _status.ok = _devHasMask || _devHasVer || _devHasSerial;
     ftcStatusMsg(_devHasVer ? "device info complete" : "device info (partial)");
@@ -2967,6 +3019,8 @@ void FileTransferClient::loop(bool configured)
                 if (ftcDropDup()) return;                                       // late IP-mirror of THIS report
                 // A valid matching answer proves the query channel works -> only CONSECUTIVE unanswered
                 // reports may reach the "unanswered" abort.
+                const uint16_t dbgRetr = _ftcReportRetries;                                             // [dbg] timeouts before this answer (0 = answered on the first query)
+                const uint32_t dbgWait = _ftcRepWaitStart ? (millis() - _ftcRepWaitStart) : 0;          // [dbg] first-query -> answer latency for this window/round
                 _ftcReportRetries = 0;
                 const uint16_t bmpBytes = (uint16_t)((count + 7) / 8);
                 if ((uint16_t)(6 + bmpBytes) > _ftcRespLen) return; // truncated bitmap
@@ -2984,6 +3038,15 @@ void FileTransferClient::loop(bool configured)
                 uint16_t missing = 0;
                 for (uint16_t s = _ftcReportBase; s < _ftcWndEnd; s++)
                     if (!(_ftcRecvBmp[(s - 1) >> 3] & (1u << ((s - 1) & 7)))) missing++;
+
+                // [dbg] per-window report-gap breakdown: how long the target took to answer + how many 4 s
+                // report timeouts elapsed first. A ~13 s gap = dbgWait ~13000 with dbgRetr ~3 (query kept
+                // timing out) vs dbgRetr 0 (one slow answer). Verbose only -> off the quiet default fast path.
+                if (_ftcVerbose)
+                    openknx.logger.logWithPrefixAndValues("FTC", "[dbg] report ans %ums  retr %u/%u  missing %u  wnd %u [%u..%u)",
+                                                          (unsigned)dbgWait, (unsigned)dbgRetr, (unsigned)FTC_REPORT_RETRIES,
+                                                          (unsigned)missing, (unsigned)(_ftcWndEnd - _ftcReportBase),
+                                                          (unsigned)_ftcReportBase, (unsigned)_ftcWndEnd);
 
                 if (missing == 0)
                 {
@@ -3039,6 +3102,11 @@ void FileTransferClient::loop(bool configured)
                     ftcAbort("fast: report query unanswered");
                     return;
                 }
+                if (_ftcVerbose) // [dbg] report-query timeout/retry -- verbose only (off the quiet default path)
+                    openknx.logger.logWithPrefixAndValues("FTC", "[dbg] report timeout %u/%u after %ums -> retry (wnd [%u..%u))",
+                                                          (unsigned)_ftcReportRetries, (unsigned)FTC_REPORT_RETRIES,
+                                                          (unsigned)(_ftcRepWaitStart ? millis() - _ftcRepWaitStart : 0),
+                                                          (unsigned)_ftcReportBase, (unsigned)_ftcWndEnd);
                 ftcSendReport(_ftcReportBase, (uint16_t)(_ftcWndEnd - _ftcReportBase)); // retry (fresh nonce)
             }
             return;
@@ -3488,7 +3556,7 @@ void FileTransferClient::loop(bool configured)
                     snprintf(lsfoot, sizeof(lsfoot), "%-40.40s | total", lsleft); // aligns with "Name | Type"
                     ftcOut(CONSOLE_HEADLINE_COLOR, "%s", lsfoot);
                     ftcOut(CONSOLE_HEADLINE_COLOR, "------------------------------------------------------------------------------");
-                    // ls done -- _ftcListing kept for listing(); size/crc are 0 (hasInfo=false).
+                    // ls done -- ftcFinish() releases _ftcListing (size/crc are 0 here anyway, hasInfo=false).
                     _status.ok = true;
                     ftcFinish();
                     return;

@@ -35,54 +35,66 @@ void FileTransferClientConsole::showUsage()
     const uint8_t H = CONSOLE_HEADLINE_COLOR;
     static const char RULE[] = "================================================================================";
     auto &c = _client;
-    c.ftcOut(H, "FileTransferClient - ftc commands");
+    c.ftcOut(H, "%s", RULE);
+    c.ftcOut(H, "OpenKNX Embedded FileTransferClient - ftc commands");
     c.ftcOut(H, "%s", RULE);
     c.ftcOut(H, "Per-target:  ftc <pa> <cmd> [args]");
     c.ftcOut(0, "");
 
-    c.ftcOut(H, "  Presence & info");
-    c.ftcOut(0, "    %-33s  %s", "ping", "Is the target there? (module-version round trip)");
-    c.ftcOut(0, "    %-33s  %s", "info | i", "Device fingerprint: mask/class, FTM version, features");
-    c.ftcOut(0, "    %-33s  %s", "info ga", "Group communication: GA table + com-object links");
-    c.ftcOut(0, "    %-33s  %s", "info <file>", "Size + CRC32 of one file");
-    c.ftcOut(0, "    %-33s  %s", "df", "Filesystem: total / used / free + usage bar");
-    c.ftcOut(0, "    %-33s  %s", "ll [dir]", "List a directory: name, size, CRC32 (+ usage bar)");
-    c.ftcOut(0, "    %-33s  %s", "ls [dir]", "List a directory: names only");
+    c.ftcOut(H, "Presence & info");
+    c.ftcOut(0, "  %-33s  %s", "ping", "Is the target there? (module-version round trip)");
+    c.ftcOut(0, "  %-33s  %s", "info | i", "Device fingerprint: mask/class, FTM version, features");
+    c.ftcOut(0, "  %-33s  %s", "info ga", "Group communication: GA table + com-object links (not on BCU1 / mask 0x0012)");
+    c.ftcOut(0, "  %-33s  %s", "info <file>", "Size + CRC32 of one file");
+    c.ftcOut(0, "  %-33s  %s", "df", "Filesystem: total / used / free + usage bar");
+    c.ftcOut(0, "  %-33s  %s", "ll [dir]", "List a directory: name, size, CRC32 (+ usage bar)");
+    c.ftcOut(0, "  %-33s  %s", "ls [dir]", "List a directory: names only");
     c.ftcOut(0, "");
 
-    c.ftcOut(H, "  File & folder");
-    c.ftcOut(0, "    %-33s  %s", "rm <file>", "Delete a file");
-    c.ftcOut(0, "    %-33s  %s", "mkdir <dir>", "Create a directory");
-    c.ftcOut(0, "    %-33s  %s", "rmdir <dir>", "Remove a directory");
-    c.ftcOut(0, "    %-33s  %s", "mv <old> <new>", "Rename / move a file or directory");
-    c.ftcOut(0, "    %-33s  %s", "format yes", "Erase the WHOLE filesystem (gated)");
+    c.ftcOut(H, "File & folder");
+    c.ftcOut(0, "  %-33s  %s", "rm <file>", "Delete a file");
+    c.ftcOut(0, "  %-33s  %s", "mkdir <dir>", "Create a directory");
+    c.ftcOut(0, "  %-33s  %s", "rmdir <dir>", "Remove a directory");
+    c.ftcOut(0, "  %-33s  %s", "mv <old> <new>", "Rename / move a file or directory");
+    c.ftcOut(0, "  %-33s  %s", "format yes", "Erase the WHOLE filesystem (gated)");
     c.ftcOut(0, "");
 
-    c.ftcOut(H, "  Transfer");
-    c.ftcOut(0, "    %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; flags below");
-    c.ftcOut(0, "    %-33s  %s", "receive | download <rem> [local] [flags]", "Download a file (always fresh)");
-    c.ftcOut(0, "    %-33s  %s", "perf [kb] [pkg] [mode] [flags]", "Speed test: push a pattern, report B/s");
+    c.ftcOut(H, "Transfer");
+    c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; flags below");
+    c.ftcOut(0, "  %-33s  %s", "receive | download <rem> [local] [flags]", "Download a file (always fresh)");
+    c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [flags]", "Speed test: push a pattern, report B/s");
     c.ftcOut(0, "");
 
-    c.ftcOut(H, "  Locate & firmware");
-    c.ftcOut(0, "    %-33s  %s", "led on|off|blink", "Drive the target's prog-mode LED (locate)");
-    c.ftcOut(0, "    %-33s  %s", "fwupdate <file>", "Trigger the target to apply an uploaded firmware (reboots it)");
+    c.ftcOut(H, "Locate & firmware");
+    c.ftcOut(0, "  %-33s  %s", "led on|off|blink", "Drive the target's prog-mode LED (locate)");
+    c.ftcOut(0, "  %-33s  %s", "fwupdate <file>", "Trigger the target to apply an uploaded firmware (reboots it)");
 #ifdef OPENKNX_FTC_CONSOLE
-    c.ftcOut(0, "    %-33s  %s", "console | con", "Interactive console tunnel to the target ('quit'/'exit' to leave)");
+    c.ftcOut(0, "  %-33s  %s", "console | con", "Interactive console tunnel to the target ('quit'/'exit' to leave)");
 #endif
     c.ftcOut(0, "");
 
     c.ftcOut(H, "Global:  ftc <cmd>");
-    c.ftcOut(0, "    %-33s  %s", "scan [a.l | a b] [deep] [ets]", "Discover devices (ets = connection-oriented, finds more)");
-    c.ftcOut(0, "    %-33s  %s", "     [openknx | info] [save <path>]", "openknx=flag OpenKNX (mfr 0x00FA)  info=full per-device info  save=write CSV to /|sd/|efc/");
-    c.ftcOut(0, "    %-33s  %s", "retry [max|transfer|backoff [v]]", "Show / set retry tuning");
-    c.ftcOut(0, "    %-33s  %s", "s | c", "Status / cancel of the running job");
-    c.ftcOut(0, "    %-33s  %s", "?", "This help");
+    c.ftcOut(0, "  %-33s  %s", "scan [a.l | a b] [deep] [ets]", "Discover devices (ets = connection-oriented, finds more)");
+    c.ftcOut(0, "  %-33s  %s", "     [openknx | info] [save <path>]", "openknx=flag OpenKNX (mfr 0x00FA)  info=full per-device info  save=write CSV to /|sd/|efc/");
+    c.ftcOut(0, "  %-33s  %s", "retry [max|transfer|backoff [v]]", "Show / set retry tuning");
+    c.ftcOut(0, "  %-33s  %s", "s | status, c | cancel", "Status / cancel of the running job");
+    c.ftcOut(0, "  %-33s  %s", "?", "This help");
     c.ftcOut(0, "");
 
-    c.ftcOut(0, "  [mode]  = safe (default) . fast . forget       [pkg] = auto (default, starts 253 + degrades) or 16..253");
-    c.ftcOut(0, "  [flags] = apply . verbose . no-resume (send)    keep . verbose (perf)    verbose (receive)");
-    c.ftcOut(0, "  local path: /=LittleFS  sd/=SD  efc/=ExtFlash");
+    c.ftcOut(0, "  [mode]  = safe (default) | fast | faf (experimental)       [pkg] = auto (default, starts 253 + degrades) or 16..253");
+    c.ftcOut(0, "  [flags] = apply . verbose . no-resume (send) . keep (default) . verbose (perf | receive)");
+    c.ftcOut(0, "  local path: / (LittleFS) | sd/ (SD) | efc/ (ExtFlash)");
+    c.ftcOut(0, "");
+    c.ftcOut(H, "Examples:");
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 send sd/app.bin.gz apply", "Upload from SD + auto-apply (RP target)");
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 upload /fw.bin auto fast verbose", "Upload from LittleFS, fast, log 1s progress");
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 receive /cfg.json sd/cfg.json", "Download a target file to SD");
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 perf 50 fast", "50 KB speed test, fast mode (no file needed)");
+#ifdef OPENKNX_FTC_CONSOLE
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 console", "Interactive console tunnel over KNX");
+#endif
+    c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets openknx", "Scan and discover OpenKNX devices on line 1.1 (connection-oriented)");
+    c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets save /scan.csv", "Discover devices on line 1.1 and write CSV to LittleFS");
     c.ftcOut(H, "%s", RULE);
 }
 
