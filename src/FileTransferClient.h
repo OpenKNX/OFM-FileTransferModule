@@ -222,6 +222,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcDevProp,          // device info: reading Device-Object properties (serial/order/hardware)
         FtcDevEnum,          // device info: probing object indices for their type (find app/tables)
         FtcDevLoad,          // device info: reading load states + app version from the found objects
+        FtcGaConnect,        // group comm: T_Connect opening -- wait for the CO link before the memory walk (ETS reads memory connection-oriented)
         FtcGaRef,            // group comm: PropertyValue_Read PID_TABLE_REFERENCE of the current table
         FtcGaMem,            // group comm: A_Memory_Read walking the current table's blob
         FtcDownloadOpen,     // download: FileDownload open sent, waiting for the file size
@@ -482,9 +483,11 @@ class FileTransferClient : public OpenKNX::Module
     void ftcDevInfoBegin(uint16_t pa, bool fromScan);
     void ftcDevReport(); // print the assembled device-info block
     // --- group communication (ftc <pa> info ga): reuse the device-info discovery, then A_Memory_Read walk ---
-    void ftcGaAdvance(); // send the next present table's PID_TABLE_REFERENCE read, or emit the report + finish
-    void ftcGaParse();   // extract the just-walked table from _memBuf (address -> _gaList; assoc stays in _memBuf)
-    void ftcGaReport();  // header + resolved GA list + com-object links, via ftcOut (cooperative)
+    void ftcGaBeginWalk(); // open a T_Connect for the walk (ETS reads memory CO); connectionless fallback if it can't
+    void ftcGaAdvance();   // send the next present table's PID_TABLE_REFERENCE read, or emit the report + finish
+    void ftcGaParse();     // extract the just-walked table from _memBuf (address -> _gaList; assoc stays in _memBuf)
+    void ftcGaReport();    // header + resolved GA list + com-object links, via ftcOut (cooperative)
+    bool _gaConnected = false; // we opened a T_Connect for the memory walk -> ftcFinish() closes it (ours only, never an ETS session)
 
     // Device-Object (index 0) properties, read one after another in FtcDevProp:
     uint8_t _devPropStep = 0;    // which property in the read sequence we are on

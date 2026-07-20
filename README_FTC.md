@@ -858,6 +858,7 @@ target changes less often than the command.
 | `ll [dir]` | list a directory: name, size, CRC32 (detailed lists also append the `df` usage bar) |
 | `ls [dir]` | list a directory: names only (no bar) |
 | `info` / `i` | device fingerprint: mask/class, FTM version, features (+ identity, app/table load states) |
+| `info ga` | group communication: resolved GA list + com-object (KO) links, read ETS-style over a T_Connect. **Not supported on BCU1 (mask 0x0012)** — BCU1 has no property/interface-object layer, so the table locations cannot be discovered (BCU1 uses a fixed, mask-specific memory map instead). Works on BCU2, System B and BIM M112. |
 | `info <file>` | size + CRC32 of one file |
 | `rm <file>` | delete a file |
 | `format yes` | erase the **whole** filesystem (gated by `yes`) |

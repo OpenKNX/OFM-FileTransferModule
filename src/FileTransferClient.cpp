@@ -1730,8 +1730,16 @@ void FileTransferClient::ftcFinish()
     // FtcScanPost really completes it sets _scanPostDone and calls scanReport()+ftcFinish() again.
     if (_ftcState == FtcScanPost && !_scanPostDone) return;
 
-    // No disconnect: we are connectionless, so none of ours to close. _connectedTsap is GLOBAL stack
-    // state -- disconnect would tear down whatever connection is open (e.g. someone else's ETS session).
+    // Close the T_Connect the info-ga memory walk opened, if any. Only OURS: ftcScanConnect self-guards
+    // against an existing connection, so _gaConnected is never set for someone else's ETS session.
+    if (_gaConnected)
+    {
+        knx.bau().ftcScanDisconnect();
+        _gaConnected = false;
+    }
+
+    // No disconnect otherwise: the transfer paths are connectionless, so none of theirs to close. _connectedTsap
+    // is GLOBAL stack state -- a blind disconnect would tear down whatever connection is open (e.g. an ETS session).
     ftcCloseSource();
     ftcCloseSink(); // a download aborted mid-flight must not leave the SD file handle open
     _ftcRespPending = false;
@@ -2366,10 +2374,33 @@ void FileTransferClient::requestGroupComm(uint16_t pa)
     _gaN = 0;
     _gaRef = _gaGot = _gaExpect = 0;
     _gaAssocValid = false;
+    _gaConnected = false; // no CO link yet -- ftcGaBeginWalk opens one once the enumeration finishes
     _memPending = false;
     _memLen = 0;
     _ftcRespT = 0; // arm the memory-answer duplicate guard (ftcDropDup) fresh for this walk
     ftcStatusMsg("querying group communication...");
+}
+
+/**
+ * @brief Open a point-to-point T_Connect for the memory walk, then start it. ETS-parity path.
+ *
+ * ETS reads the GA/association tables over a CONNECTION-ORIENTED transport. Foreign System B devices
+ * (e.g. Jung/Gira) answer PropertyValue_Read connectionless but IGNORE a connectionless A_Memory_Read, so
+ * the old connectionless walk timed out on them (it only worked against the permissive OpenKNX stack).
+ * With a T_Connect open, individualSend() auto-routes every subsequent read on the connection (CO) -- no
+ * per-read change needed. ftcScanConnect self-guards (no-op if a connection is already up, e.g. an ETS
+ * session); if it cannot open one we fall back to the connectionless walk (still fine for OpenKNX targets).
+ */
+void FileTransferClient::ftcGaBeginWalk()
+{
+    _gaConnected = false;
+    if (knx.bau().ftcScanConnect(_ftcTarget))
+    {
+        _ftcSince = millis();
+        _ftcState = FtcGaConnect; // wait for the link, then walk connection-oriented
+        return;
+    }
+    ftcGaAdvance(); // a connection is already open (not ours to reuse) -> connectionless fallback walk
 }
 
 void FileTransferClient::ftcGaAdvance()
@@ -2383,6 +2414,7 @@ void FileTransferClient::ftcGaAdvance()
         _propPending = false;
         _ftcSince = millis();
         SecurityControl sec{false, None};
+        // Connection-oriented: the walk opened a T_Connect first, so this read routes over it (ETS path).
         knx.bau().ftcSendPropertyValueRead(_ftcTarget, sec, (uint8_t)idx, FTC_PID_TABLE_REFERENCE, 1, 1);
         _ftcState = FtcGaRef;
         return;
@@ -4224,8 +4256,9 @@ void FileTransferClient::loop(bool configured)
                 if (_gaMode)
                 {
                     // `info ga`: skip the load-state reads; walk the GA + association tables (_devIdxAddr/_devIdxAssoc).
+                    // The walk goes connection-oriented (ETS-style) -- ftcGaBeginWalk opens the T_Connect first.
                     _gaWhich = 0;
-                    ftcGaAdvance();
+                    ftcGaBeginWalk();
                     return;
                 }
                 ftcDevBuildLoadQueue();
@@ -4307,6 +4340,23 @@ void FileTransferClient::loop(bool configured)
             return;
         }
 
+        case FtcGaConnect:
+        {
+            // T_Connect opening for the (ETS-style) connection-oriented memory walk. Once up, individualSend()
+            // routes every read on the connection; on no-ack we clear the half-open state and walk connectionless.
+            if (knx.bau().ftcScanConnected())
+            {
+                _gaConnected = true; // ours to close -> ftcFinish() disconnects (never an existing ETS session)
+                ftcGaAdvance();
+            }
+            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
+            {
+                knx.bau().ftcScanDisconnect(); // unwedge a stuck Connecting state, then fall back
+                ftcGaAdvance();
+            }
+            return;
+        }
+
         case FtcGaRef:
         {
             // PID_TABLE_REFERENCE answer -> the current table's memory base; then start the A_Memory_Read walk.
@@ -4324,7 +4374,7 @@ void FileTransferClient::loop(bool configured)
                     _gaExpect = 0;
                     _ftcSince = millis();
                     SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef);
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef); // CO over the open T_Connect
                     _ftcState = FtcGaMem;
                 }
                 else
@@ -4363,7 +4413,7 @@ void FileTransferClient::loop(bool configured)
                     if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
                     _ftcSince = millis();
                     SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot));
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot)); // CO over the open T_Connect
                     return;
                 }
                 // table complete -> parse it, then advance to the next table (or emit the report).
