@@ -246,7 +246,7 @@ class FileTransferClient : public OpenKNX::Module
 
     // Fires in the KNX stack's dispatch context, so it only parks the bytes and lets loop() act -- a
     // send or file I/O from here would re-enter the application layer from inside its own dispatch.
-    static void ftcOnResponse(uint8_t objectIndex, uint8_t propertyId, uint8_t *data, uint8_t length);
+    static void ftcOnResponse(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, uint8_t *data, uint8_t length);
     // Same rule for a DeviceDescriptor_Response (scan): park the responder's PA + mask, act in loop().
     static void ftcOnDeviceDescriptor(uint16_t pa, uint8_t descriptorType, const uint8_t *data);
     // Same rule for a PropertyValue_Response (device info): park it, act in loop().
