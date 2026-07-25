@@ -8,6 +8,11 @@ throughput, and — most importantly — *why* it runs at the speed it does.
 
 > Audience: a firmware engineer who has never seen this code. Everything below is cited against
 > the real source (`file:line`); every measured number is from a real hardware run and is kept exact.
+>
+> **\* Throughput numbers are measured examples, not guarantees.** *All* B/s figures in this document (the
+> `*` marks the tables) come from specific hardware; real-world speed varies with the TP1 line, the interface
+> (host UART baud / SPI) and the setup — it can be **faster or slower** on any given system (the TP1 bus is
+> the ~650 B/s host-side ceiling).
 
 - **Client:** `src/FileTransferClient.{h,cpp}` (+ `FileTransferClientConsole.{h,cpp}` for the `ftc` console) — behind `-D OPENKNX_FTC`.
 - **Server:** `src/FileTransferModule.{h,cpp}` — compiled on any RP2040/ESP32 target (writes to LittleFS).
@@ -135,12 +140,12 @@ between two `loop()` ticks and a single slot would drop one.
 `FtcState` (`FileTransferClient.h`) has ~30 states. Grouped by job:
 
 ```
-                         ┌──────────────────────────────────────────────────────────┐
+                         ┌───────────────────────────────────────────────────────────┐
                          │                        FtcIdle                            │
                          └───┬───────────┬──────────┬──────────┬─────────┬───────────┘
-     ping ──────────────────┘           │          │          │         │
-       FtcSent                          │          │          │         │
-                                        │          │          │         │
+      ping ──────────────────┘           │          │          │         │
+        FtcSent                          │          │          │         │
+                                         │          │          │         │
      upload/perf (mode 1|2) ── FtcFeatureProbe ──┐  │          │         │
      upload/perf (all modes) ─────────── FtcResumeInfo (pre-upload FileInfo -> resume decision)
                                               │
@@ -181,7 +186,7 @@ The upload command takes a **mode** (`ftc <pa> send <src> [pkg] [mode]`), 0/1/2:
 | Pacing | implicit (waits for each answer) | TP-FIFO high/low water (`FTC_TX_HIGH=30`, `FTC_TX_LOW=1`) | `FTC_FORGET_BURST=4` / `FTC_FORGET_PACE_MS=25` + FIFO |
 | Recovery | per-chunk retry (`_cfgMaxRetries`, default 3) | resend the window's missing seqs | escalate: report-recovery → classic full resend → abort |
 | When to use | always correct; the safe default | reliable link, want fewer round trips | fastest over a **paced** path; best over TP; needs recovery net |
-| Measured @19200 (50 KB) | **349 B/s** | **366 B/s** | **368 B/s** |
+| Measured @19200 (50 KB) \* | **349 B/s** | **366 B/s** | **368 B/s** |
 
 **Negotiation.** A non-zero mode is not blind. The client first sends `CheckFeatures` (102) with a
 short **800 ms** window (`FTC_FEATURE_TIMEOUT`, *not* the 6 s `FTC_TIMEOUT`, so an old server that
@@ -332,7 +337,7 @@ the source into `_ftcSrcCrc` as it sends (fold-once via a watermark so resends d
 at the end compares `_ftcSrcCrc ^ 0xFFFFFFFF` against the target's `FileInfo` CRC. "Bytes arrived" is
 not "the *right* bytes arrived" — the verify is the only honest proof.
 
-### 4.5 Result codes (`errorcodes.txt` + server)
+### 4.5 Result codes (`doc/errorcodes.txt` + server)
 
 | Code | Meaning | | Code | Meaning |
 |---|---|---|---|---|
@@ -523,7 +528,7 @@ a 50 KB `/ftcperf.bin` ramp, verified `CRC32/POSIX = 0x6F8129C7`.
 
 ### 6.1 Sustained TP throughput (over the 9600-baud KNX TP1 bus)
 
-| Mode | File | Host baud | Throughput | Notes |
+| Mode | File | Host baud | Throughput \* | Notes |
 |---|---|---:|---:|---|
 | classic (mode 0, stop-and-wait, per-chunk answer) | 50 KB | 19200 | **349 B/s** | 146.4 s, payload 247, 208 chunks |
 | fast (mode 1, AIMD 8..64 + cmd45 gap reports) | 50 KB | 19200 | **366 B/s** | 139.8 s, payload 245, 209 chunks |
@@ -1029,5 +1034,5 @@ Design & verified anchors: `doc/concepts/ftc-console-tunnel.md` (concept) and
 
 *Sources: `FileTransferClient.{h,cpp}`, `FileTransferModule.{h,cpp}`, `FileTransferClientConsole.cpp`,
 `bau_systemB.cpp`, `bau091A.cpp`, `tpuart_data_link_layer.cpp`, `Transmitter.cpp`, `DataLinkLayer.cpp`,
-`errorcodes.txt`, `platformio.custom.ini`. Measurements: KNeoPix @ PA 5.0.3, 50 KB ramp,
+`doc/errorcodes.txt`, `platformio.custom.ini`. Measurements: KNeoPix @ PA 5.0.3, 50 KB ramp,
 CRC32/POSIX 0x6F8129C7. Concept docs: `doc/concepts/ftc*.md`.*

@@ -36,7 +36,7 @@ void setup()
 ```
 
 ## Step 3 — talk to it from a PC
-Use the built-in **`ftc`** host CLI (in [`hostcli/`](hostcli/), cross-built for Windows / macOS / Linux). It
+Use the built-in **`ftc`** host CLI (in [`ftc-cli/`](ftc-cli/), cross-built for Windows / macOS / Linux). It
 speaks KNXnet/IP tunnelling directly — also through third-party certified interfaces — for upload, download,
 firmware update and the interactive console:
 ```

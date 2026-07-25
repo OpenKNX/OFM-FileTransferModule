@@ -1,0 +1,4 @@
+# PlatformIO native build tree
+.pio/
+# internal analysis notes (the README-linked specs stay tracked)
+doc/INTERFACE-INFOGA-CO-ANALYSIS.md
