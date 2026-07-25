@@ -198,9 +198,6 @@ uint32_t FileTransferClient::ftcCrc32Posix(uint32_t crc, const uint8_t *data, si
 
 // Chunk overhead = 6 B: request [seq:2][len:1] + answer [seq:2][crc:2] -> payload = pkg - 6.
 static constexpr uint8_t FTC_PKG_OVERHEAD = 6;
-// Conservative default; the safe pkg is bounded by the smaller max-APDU of both devices, which we
-// cannot read here. Raise it per transfer with `ftc send ... <pkg>` once the link is proven.
-static constexpr uint8_t FTC_PKG_DEFAULT = 64;
 static constexpr uint8_t FTC_PKG_MIN = 16;
 // 253 not 254: at 254 NPDU::length() (npdu.cpp) overflows uint8 (256 -> 0), valid() then drops the
 // frame with a bare "invalid frame". Measured: 253 ok, 254 aborts. See doc/concepts/ftc.md.
@@ -244,10 +241,6 @@ static constexpr uint16_t FTC_TX_LOW = 1;
 // a bigger burst is fine. Keeps the FTC pump off the "loop took >50 ms" list.
 static constexpr uint8_t FTC_FAST_BURST_SD = 4;
 static constexpr uint8_t FTC_FAST_BURST_RAM = 16;
-// Progress interval-rate guard: _ftcDone counts bytes QUEUED into the TX-FIFO, not drained onto the wire.
-// Two deciles inside one queuing burst spike the rate -> only trust an interval >= this (else fall back
-// to the cumulative average, which over IP already is the true rate).
-static constexpr uint32_t FTC_RATE_MIN_MS = 3000;
 // forget (mode 2) pacing: no per-chunk report and, over IP, no TP-FIFO backpressure -> it would blast
 // ~94 KB/s and the target drops most chunks. Pace small bursts (BURST*~245B < the ~2 KB RX socket) via a
 // millis() gate; rate ~= BURST/PACE.
