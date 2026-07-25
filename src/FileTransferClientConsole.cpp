@@ -61,7 +61,7 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Transfer");
     c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; flags below");
-    c.ftcOut(0, "  %-33s  %s", "receive | download <rem> [local] [flags]", "Download a file (always fresh)");
+    c.ftcOut(0, "  %-33s  %s", "receive | download <rem> [local] [pkg] [flags]", "Download a file (always fresh)");
     c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [flags]", "Speed test: push a pattern, report B/s");
     c.ftcOut(0, "");
 
@@ -69,7 +69,7 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "  %-33s  %s", "led on|off|blink", "Drive the target's prog-mode LED (locate)");
     c.ftcOut(0, "  %-33s  %s", "fwupdate <file>", "Trigger the target to apply an uploaded firmware (reboots it)");
 #ifdef OPENKNX_FTC_CONSOLE
-    c.ftcOut(0, "  %-33s  %s", "console | con", "Interactive console tunnel to the target ('quit'/'exit' to leave)");
+    c.ftcOut(0, "  %-33s  %s", "console | con [maxbytes]", "Interactive console tunnel ('quit'/'exit' to leave; maxbytes caps per-drain output for small tunnels)");
 #endif
     c.ftcOut(0, "");
 
@@ -130,7 +130,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
 {
     if (_client.isBusy())
     {
-        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/scan is already running (ftc cancel to stop)");
+        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/console/scan is already running (ftc cancel to stop)");
         return;
     }
 
@@ -321,7 +321,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
 
     if (_client.isBusy())
     {
-        openknx.logger.logWithPrefix("FTC", "busy -- a transfer is already running (ftc cancel to stop)");
+        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/console/scan is already running (ftc cancel to stop)");
         return true;
     }
 
@@ -340,7 +340,11 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
 #ifdef OPENKNX_FTC_CONSOLE
     if (strcmp(sub, "console") == 0 || strcmp(sub, "con") == 0) // interactive console tunnel (obj 160)
     {
-        _client.requestConsole(pa);
+        // Optional [maxbytes]: cap the per-drain output so the answer fits a constrained tunnel's max frame
+        // (e.g. 16 for a small IP interface). Omitted/0 -> the full window; requestConsole() range-checks it.
+        unsigned mb = 0;
+        sscanf(cmd.c_str(), "ftc %*s %*s %u", &mb);
+        _client.requestConsole(pa, (uint8_t)mb);
         return true;
     }
 #endif
@@ -384,26 +388,33 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
     if (strcmp(sub, "receive") == 0 || strcmp(sub, "download") == 0)
     {
-        // ftc <pa> receive|download <remote> [local] [verbose]  -- pull a file onto the local sink (SD).
-        char rem[80] = {0}, a2[80] = {0}, a3[80] = {0};
-        const int n = sscanf(cmd.c_str(), "ftc %*s %*s %79s %79s %79s", rem, a2, a3);
+        // ftc <pa> receive|download <remote> [local] [pkg] [verbose]  -- pull a file onto the local sink (SD).
+        char rem[80] = {0}, a2[80] = {0}, a3[80] = {0}, a4[80] = {0};
+        const int n = sscanf(cmd.c_str(), "ftc %*s %*s %79s %79s %79s %79s", rem, a2, a3, a4);
         if (n < 1)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> receive <remotepath> [localpath] [verbose]   e.g. ftc 5.0.3 receive fw.bin sd/fw.bin");
+            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> receive <remotepath> [localpath] [pkg] [verbose]   e.g. ftc 5.0.3 receive fw.bin sd/fw.bin 16");
             return true;
         }
-        // Order-tolerant trailing tokens: verbose/v is a flag anywhere; the first non-flag is the local dest
-        // (default = same path as remote), so `receive f v l`, `receive f l v` and `receive f l` all work.
+        // Order-tolerant trailing tokens: verbose/v is a flag anywhere; a pure number 16..240 is the download
+        // chunk size (pkg, helps constrained tunnels); the first remaining non-flag is the local dest (default
+        // = same path as remote). So `receive f l 16 v`, `receive f 16 l` and `receive f l` all work.
         bool verbose = false;
+        uint8_t pkg = 0;
         const char *local = rem;
-        const char *toks[2] = {a2, a3};
+        const char *toks[3] = {a2, a3, a4};
         for (int i = 0; i < n - 1; i++)
         {
-            if (strcmp(toks[i], "verbose") == 0 || strcmp(toks[i], "v") == 0) verbose = true;
-            else if (local == rem) local = toks[i];
+            const char *t = toks[i];
+            if (strcmp(t, "verbose") == 0 || strcmp(t, "v") == 0) { verbose = true; continue; }
+            bool num = t[0] != 0;
+            for (const char *p = t; *p; p++)
+                if (!isdigit((unsigned char)*p)) num = false;
+            if (num) { const int v = atoi(t); if (v >= 16 && v <= 240) pkg = (uint8_t)v; continue; } // [pkg]
+            if (local == rem) local = t;
         }
         _client.setVerbose(verbose);
-        _client.requestDownload(pa, rem, local);
+        _client.requestDownload(pa, rem, local, pkg);
         return true;
     }
     if (strcmp(sub, "format") == 0)

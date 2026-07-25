@@ -137,7 +137,7 @@ class FileTransferClient : public OpenKNX::Module
     void requestGroupComm(uint16_t pa);                                        // `ftc <pa> info ga`: GA table + com-object links (ETS-style), via A_Memory_Read
     void requestLed(uint16_t pa, uint8_t mode);                                // `ftc <pa> led on|off|blink`: locate via the prog-mode LED (0=off 1=on 2=blink)
 #ifdef OPENKNX_FTC_CONSOLE
-    void requestConsole(uint16_t pa); // `ftc <pa> console`: open the interactive console tunnel (obj 160)
+    void requestConsole(uint16_t pa, uint8_t maxDrain = 0); // `ftc <pa> console [maxbytes]`: open the console tunnel (obj 160); maxDrain 0 = default 247
 #endif
     void requestDelete(uint16_t pa, const char *remotePath);                   // rm  (file)
     void requestFormat(uint16_t pa);                                           // format: wipe the whole filesystem
@@ -150,7 +150,7 @@ class FileTransferClient : public OpenKNX::Module
     // (fwupdate -> reboot). Forced false for the perf/test sources so /ftctest.bin is never flashed.
     void requestUpload(uint16_t pa, const char *src, unsigned pkg, bool noResume, uint8_t mode = 0, bool apply = false);
     void requestPerf(uint16_t pa, uint32_t sizeBytes, unsigned pkg, uint8_t mode = 0, bool keep = false); // upload a test pattern, report B/s (keep = leave it as /ftcperf_<crc>.bin)
-    void requestDownload(uint16_t pa, const char *remotePath, const char *localPath);  // pull to a local backend
+    void requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg = 0);  // pull to a local backend; pkg 0 = default chunk size
     // `ftc <pa> fwupdate <remote>`: trigger the target to apply an already-uploaded firmware (reboots it).
     // FileInfo existence pre-check first, so a mistyped path cannot reboot a live coupler.
     void requestFwUpdate(uint16_t pa, const char *remotePath);
@@ -421,8 +421,11 @@ class FileTransferClient : public OpenKNX::Module
     static constexpr uint8_t CON_OBJECT_INDEX = 160;
     static constexpr uint8_t CON_PID_IN = 1;         // input / control (OPEN/CLOSE/line)
     static constexpr uint8_t CON_PID_OUT = 2;        // output drain (poll the target's log ring)
+    static constexpr uint8_t CON_DRAIN_MIN = 8;      // smallest sensible drain cap to request
+    static constexpr uint8_t CON_DRAIN_MAX = 247;    // max console text per PID_OUT answer (one APDU minus the 7 B header)
     static constexpr uint32_t CON_KEEP_MS = 3000;    // idle: poll OUT to fetch async logs + keep the session fresh
     uint8_t _conSub = 0;                             // 0 = idle in-session, 1 = await IN ack, 2 = draining OUT
+    uint8_t _conMaxDrain = CON_DRAIN_MAX;            // cap on PID_OUT drain bytes/answer (small = fits constrained tunnels)
     uint32_t _conKeepNext = 0;                       // millis() of the next idle keepalive poll
     uint32_t _conStartMs = 0;                        // millis() at conOpen() -> session duration on close (0 = never opened)
     void consoleFeedLine(const char *line);          // a finished local line -> remote; quit/exit/`ftc cancel` end the session
@@ -590,6 +593,7 @@ class FileTransferClient : public OpenKNX::Module
     void ftcDownloadPanel(bool ok, bool statOk, uint32_t tcrc); // framed DOWNLOAD result box + Verify line (FtcDownloadVerify)
     uint32_t _dlSize = 0;    // remote file size (from the open answer)
     uint16_t _dlChunks = 0;  // total chunks
+    uint8_t _dlPayload = 240; // data bytes/chunk requested on download (FTC_DL_PAYLOAD default; settable via [pkg])
     uint16_t _dlSeq = 0;     // current chunk (1-based)
     uint32_t _dlWritten = 0; // bytes written to the sink so far
     uint32_t _dlStartMs = 0; // for throughput

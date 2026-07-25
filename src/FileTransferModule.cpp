@@ -404,7 +404,11 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
             _conCursor = wp - OpenKNX::Log::Logger::RING_SIZE;
             pending = OpenKNX::Log::Logger::RING_SIZE;
         }
-        const uint8_t n = (uint8_t)MIN(pending, (uint32_t)247);
+        // A request byte (data[0], 8..246) lets the client cap the drain so the answer fits a constrained
+        // tunnel's max frame (e.g. a standard-frames-only IP interface); absent/0 (old client) = full window.
+        uint32_t cap = CON_DRAIN_MAX;
+        if (len >= 1 && data[0] >= CON_DRAIN_MIN && data[0] < CON_DRAIN_MAX) cap = data[0];
+        const uint8_t n = (uint8_t)MIN(pending, cap);
         const char *rb = openknx.logger.ringBuf();
         for (uint8_t i = 0; i < n; i++)
             res[3 + i] = rb[(_conCursor + i) % OpenKNX::Log::Logger::RING_SIZE];

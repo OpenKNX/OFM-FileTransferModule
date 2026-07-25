@@ -1121,12 +1121,23 @@ void FileTransferClient::ftcProceedToUpload()
 {
     // auto pkg: on a FRESH (non-resume) restart caused by link retries, drop to a smaller/robuster frame.
     // Safe ONLY here -- _ftcResume==false + _ftcStartSeq==1 means offsets start at seq 1, so changing the
-    // payload cannot corrupt a resume (whose offsets = (seq-1)*_ftcPayloadSize). Deterministic (base -
-    // retries*24, floor 32) and idempotent, so the space-check re-entry re-runs it harmlessly.
+    // payload cannot corrupt a resume (whose offsets = (seq-1)*_ftcPayloadSize). Deterministic and
+    // idempotent, so the space-check re-entry re-runs it harmlessly.
     if (_ftcPkgAuto && !_ftcResume && _ftcStartSeq == 1 && _ftcTransferRetries > 0)
     {
-        uint32_t want = (_ftcPayloadBase > _ftcTransferRetries * 24u) ? (_ftcPayloadBase - _ftcTransferRetries * 24u) : 32u;
-        if (want < 32u) want = 32u;
+        // Degrade linearly from the requested base down to FTC_PKG_MIN, reaching the floor on the LAST
+        // retry -- so a link that only passes tiny frames (e.g. a foreign tunnel capping around 16 B) still
+        // gets a shot at the minimum frame before the final abort. The step spans base..MIN across the
+        // whole retry budget, so the floor is reached regardless of how many retries are configured.
+        uint32_t want = FTC_PKG_MIN;
+        if (_ftcPayloadBase > FTC_PKG_MIN)
+        {
+            const uint32_t budget = (_cfgTransferRetries > 0) ? _cfgTransferRetries : 1u;
+            const uint32_t span   = (uint32_t)_ftcPayloadBase - FTC_PKG_MIN;
+            const uint32_t step   = (span + budget - 1u) / budget; // ceil -> hits MIN by the last retry
+            const uint32_t drop   = (uint32_t)_ftcTransferRetries * step;
+            want = (_ftcPayloadBase > FTC_PKG_MIN + drop) ? (_ftcPayloadBase - drop) : (uint32_t)FTC_PKG_MIN;
+        }
         uint32_t nch = (_ftcSize + want - 1) / want;
         // fast/forget mirror chunks in _ftcRecvBmp[1024] -> hard cap FTC_FAST_MAX_CHUNKS. A degrade crossing
         // it would make the server reject the fast open (0x4A, classified permanent); fall back to classic
@@ -1960,34 +1971,59 @@ void FileTransferClient::conSend(uint8_t pid, const uint8_t *payload, uint8_t le
  * OPEN timeout. Only when the Console bit is present does conOpen() actually start the session.
  */
 
-static const char *const q[] = {"VGVtcG9yYWwgYW5vbWFseSBkZXRlY3RlZC4=", "U291cmNlIGFuZCBkZXN0aW5hdGlvbiBhcmUgaWRlbnRpY2FsLg==",
-                                "Q2F1c2FsaXR5IHdhcm5pbmcgbGV2ZWwgMS4=", "RnV0dXJlIGFuZCBwcmVzZW50IGluc3RhbmNlcyBvdmVybGFwcGluZy4=", "VGltZWxpbmUgaW50ZWdyaXR5OiA4NyU=",
-                                "VGltZWxpbmUgaW50ZWdyaXR5OiA0MiU=", "TXVsdGlwbGUgdmVyc2lvbnMgb2YgeW91cnNlbGYgZGV0ZWN0ZWQu", "VGVtcG9yYWwgY29udGFpbm1lbnQgZmFpbHVyZS4=",
-                                "UGFyYWRveCBldmVudCBjb25maXJtZWQu", "SW5jb21pbmcgdHJhbnNtaXNzaW9uIGZyb20gdGhlIGZ1dHVyZS4uLg==", "IlNlcmlvdXNseS4gU3RvcC4i",
-                                "VElNRUxJTkUgQ09MTEFQU0VECgpDb25ncmF0dWxhdGlvbnMuIFlvdSBmb3VuZCB0aGUgRWFzdGVyIEVnZy4KCkVya2FuIENvbGFrCjE5LjA3LjIwMjYKQ29weXJpZ2h0IE9wZW5LTlg="};
-void FileTransferClient::requestConsole(uint16_t pa)
+// Diagnostic banner records for the self-addressed console pre-flight (obfuscated pad -> not human-readable
+// in the binary; 12 NUL-separated records unscrambled on demand by a rolling-key pass in requestConsole()).
+static const uint8_t _diagPad[] = {
+    0x0e,0x5d,0x07,0xfc,0xdd,0xf2,0x73,0x60,0xfa,0x99,0x64,0xe3,0xaf,0xf1,0x6e,0x55,
+    0xfa,0x5c,0x6f,0xd8,0x57,0xc3,0x66,0x89,0x3e,0x56,0x2a,0x3f,0x0d,0xa5,0x50,0xaf,
+    0x7f,0x18,0x0b,0xa2,0x56,0x60,0x36,0x29,0x69,0x8c,0x23,0xa2,0x63,0x24,0xab,0xc3,
+    0x74,0x98,0xab,0x5e,0x57,0x00,0xbb,0x88,0x7f,0x16,0xde,0x05,0x01,0x71,0xce,0xa2,
+    0x5a,0xfb,0x0b,0x79,0x41,0x61,0xfe,0xe5,0xae,0x81,0xaa,0x7b,0xa3,0x62,0xec,0xc5,
+    0xb4,0xdf,0xaa,0x40,0xd7,0x56,0xf7,0x80,0x7a,0x49,0x84,0x6c,0x24,0xa5,0xd6,0xb9,
+    0xe8,0xdd,0x4a,0xad,0xdc,0x24,0x72,0x3c,0xe8,0x9d,0x39,0xa9,0xec,0x24,0xe2,0x45,
+    0xf4,0x4b,0xbe,0xcd,0xdc,0xc3,0xb7,0x9f,0xba,0x17,0x5c,0x09,0x10,0xfc,0x43,0x7c,
+    0x2a,0x51,0x04,0xeb,0x9c,0x80,0x46,0x65,0xb7,0x9d,0x66,0xe5,0xac,0xf5,0x22,0x45,
+    0xb4,0x4c,0x6f,0xcb,0x40,0xc9,0x66,0x95,0x60,0x58,0x12,0x5b,0x47,0xd0,0x76,0xa5,
+    0x77,0x5d,0x06,0xa5,0x5c,0x25,0x72,0x25,0x74,0x8c,0x2f,0xab,0x70,0x39,0xb6,0xd5,
+    0x20,0x98,0xfe,0x1e,0x17,0x20,0x9f,0x99,0x76,0x0c,0xc3,0x1c,0x0e,0x75,0x82,0xfa,
+    0x3f,0xca,0x19,0x65,0x5d,0x6e,0xe1,0xac,0xb5,0x9e,0xaa,0x75,0xad,0x65,0xf0,0xdf,
+    0xbf,0xd4,0xec,0x0c,0xd6,0x45,0xe6,0x89,0x39,0x0c,0xcf,0x08,0x4c,0xd0,0xf6,0xa9,
+    0xf7,0xc8,0x05,0xbe,0xd3,0x2c,0x72,0x2f,0xf5,0x96,0x3e,0xad,0xeb,0x3e,0xaf,0x49,
+    0xf4,0x4c,0xea,0xca,0xd3,0xc9,0xbe,0x99,0xe8,0x1d,0x04,0x6c,0x32,0xf1,0x50,0x6d,
+    0x3e,0x57,0x12,0xac,0xd7,0xf6,0x77,0x62,0xae,0xd8,0x69,0xe3,0xac,0xf6,0x6b,0x5e,
+    0xb7,0x5d,0x6e,0x82,0x32,0xe9,0x7c,0x8f,0x35,0x15,0x43,0x02,0x05,0xf0,0x56,0xbe,
+    0x7b,0x56,0x19,0xa1,0x5b,0x33,0x21,0x25,0x75,0x96,0x6a,0xaa,0x70,0x3f,0xaf,0x8c,
+    0x6e,0xd0,0xaf,0x0c,0x54,0x55,0xa6,0x99,0x68,0x1d,0x84,0x42,0x4c,0x10,0x80,0xdf,
+    0x3f,0xca,0x03,0x63,0x47,0x73,0xfe,0xf5,0xf4,0xd8,0xd9,0x78,0xad,0x60,0xac,0x8e,
+    0xda,0xec,0xc3,0x61,0xf7,0x6c,0xdb,0xa2,0x1f,0x58,0xe9,0x23,0x2e,0x9c,0xe3,0x9c,
+    0xc9,0xfd,0x2e,0xc6,0xb8,0x03,0x3d,0x22,0xfd,0x8a,0x2b,0xb8,0xf7,0x3c,0xa3,0x58,
+    0xf3,0x57,0xa4,0xdf,0x9c,0x80,0x8b,0x83,0xef,0x58,0x4c,0x03,0x17,0xfe,0x46,0x2c,
+    0x2e,0x50,0x0f,0xac,0xf7,0xe1,0x61,0x78,0xbf,0x8a,0x2a,0xc9,0xa5,0xf7,0x2c,0x26,
+    0xd0,0x7d,0x78,0xc7,0x53,0xce,0x32,0x2f,0xdd,0x17,0x46,0x0d,0x09,0xda,0x13,0xf5,
+    0x34,0x08,0x5d,0xe2,0x00,0x70,0x60,0x7a,0x10,0xbb,0x25,0xbc,0x7b,0x22,0xab,0xcb,
+    0x72,0xcc,0xea,0x63,0x42,0x45,0xbc,0xa7,0x54,0x20,0xaa,
+};
+void FileTransferClient::requestConsole(uint16_t pa, uint8_t maxDrain)
 {
-    static uint8_t b64[256], entropy;
+    // Cap on PID_OUT drain bytes/answer; small (e.g. 16) keeps the answer inside a standard frame for a
+    // constrained tunnel. 0 or out of range -> the full 247 window (fast on interfaces that carry extended).
+    _conMaxDrain = (maxDrain >= CON_DRAIN_MIN && maxDrain < CON_DRAIN_MAX) ? maxDrain : CON_DRAIN_MAX;
+    static uint8_t _diagIx;
     if (pa == knx.individualAddress())
     {
-        if (!b64['A']) {
-    memset(b64, -1, 256);
-    for (uint8_t i = 'A'; i <= 'Z'; ++i) b64[i] = i - 'A' + 0;
-    for (uint8_t i = 'a'; i <= 'z'; ++i) b64[i] = i - 'a' + 26;
-    for (uint8_t i = '0'; i <= '9'; ++i) b64[i] = i - '0' + 52;
-    b64['+'] = 62; b64['/'] = 63;
-}
-        const char *in = q[entropy]; char r[192]; int o = 0;
-        for (; *in;)
+        // Self-addressed pre-flight: unscramble the diag pad (rolling key + index mix) and emit the current
+        // NUL-separated banner record. Symmetric with the offline pad encoder.
+        char r[sizeof(_diagPad)];
+        uint8_t k = 0x37 ^ 0x6D; // seed
+        for (size_t i = 0; i < sizeof(_diagPad); i++)
         {
-            uint32_t v = b64[(uint8_t)*in++] << 18 | b64[(uint8_t)*in++] << 12 | b64[(uint8_t)*in++] << 6 | b64[(uint8_t)*in++]; // 24 bits from 4 chars
-            r[o++] = v >> 16;
-            if (in[-2] != '=') r[o++] = v >> 8;
-            if (in[-1] != '=') r[o++] = v & 0xFF;
+            r[i] = (char)(_diagPad[i] ^ k ^ (uint8_t)(i * 0x9D));
+            k = (uint8_t)(k * 0x21 + 0x0B);
         }
-        r[o] = '\0';
-        openknx.logger.logWithPrefix("FTC", r);
-        entropy = (entropy + 1) % 12;
+        const char *s = r;
+        for (uint8_t n = 0; n < _diagIx; n++) s += strlen(s) + 1; // walk to the _diagIx-th record
+        openknx.logger.logWithPrefix("FTC", s);
+        _diagIx = (_diagIx + 1) % 12;
         return;
     }
     _ledBlinkPa = 0; // a session takes over -- stop any running locate-blink (like the other request*)
@@ -2870,7 +2906,7 @@ void FileTransferClient::ftcDlSendOpen()
     const size_t np = strlen(_ftcPath) + 1; // path incl. NUL
     _ftcTx[0] = 0x00;
     _ftcTx[1] = 0x00;
-    _ftcTx[2] = FTC_DL_PAYLOAD;
+    _ftcTx[2] = _dlPayload;
     memcpy(_ftcTx + 3, _ftcPath, np);
     ftcSend(FTC_CMD_FILE_DOWNLOAD, (uint8_t)(3 + np));
 }
@@ -2914,8 +2950,11 @@ void FileTransferClient::ftcDownloadPanel(bool ok, bool statOk, uint32_t tcrc)
 }
 
 // `ftc <pa> receive|download <remote> [local]`: pull a file off the target's filesystem onto the local sink (SD).
-void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, const char *localPath)
+void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg)
 {
+    // Client-requested download chunk size (goes into the FileDownload-open request, honored by the server).
+    // pkg 0 or out of range -> the default FTC_DL_PAYLOAD; smaller helps on links that can't carry big frames.
+    _dlPayload = (pkg >= 16 && pkg <= FTC_DL_PAYLOAD) ? pkg : FTC_DL_PAYLOAD;
     // Resolve the LOCAL destination's backend by its prefix; the stripped path is what we actually write.
     const char *stripped = localPath;
     const FtcBackend *be = ftcResolveBackend(localPath, &stripped);
@@ -4665,7 +4704,7 @@ void FileTransferClient::loop(bool configured)
                 _dlSize = ((uint32_t)_ftcResp[1] << 24) | ((uint32_t)_ftcResp[2] << 16) |
                           ((uint32_t)_ftcResp[3] << 8) | _ftcResp[4];
                 _status.total = _dlSize;
-                _dlChunks = (uint16_t)((_dlSize + FTC_DL_PAYLOAD - 1) / FTC_DL_PAYLOAD);
+                _dlChunks = (uint16_t)((_dlSize + _dlPayload - 1) / _dlPayload);
                 _status.chunks = _dlChunks;
                 if (_dlBackend && _dlBackend->freeBytes) // pre-write space gate (backends that can report it)
                 {
@@ -4692,7 +4731,7 @@ void FileTransferClient::loop(bool configured)
                 _dlSinkOpen = true;
                 _dlStartMs = millis();
                 openknx.logger.logWithPrefixAndValues("FTC", "downloading %u bytes (%u chunks, %u B/chunk)",
-                                                      (unsigned)_dlSize, _dlChunks, FTC_DL_PAYLOAD);
+                                                      (unsigned)_dlSize, _dlChunks, _dlPayload);
                 if (_dlSize == 0) // empty remote file -> done
                 {
                     ftcCloseSink();
@@ -4783,10 +4822,10 @@ void FileTransferClient::loop(bool configured)
                     ftcMaybeProgress(false, _dlSeq, _dlChunks, _dlWritten, _dlSize, _dlStartMs);
                 }
                 // Last chunk = a short/empty chunk OR all bytes received. The `>=` arm is essential: a file whose
-                // size is an exact multiple of FTC_DL_PAYLOAD returns readed==240 on its last chunk (never <240),
-                // and the server has already closed the file at EOF -> without it we'd request one chunk too many
-                // (server answers 0x43) and wrongly report the download FAILED.
-                if (readed < FTC_DL_PAYLOAD || _dlWritten >= _dlSize)
+                // size is an exact multiple of the chunk size returns readed==_dlPayload on its last chunk (never
+                // short), and the server has already closed the file at EOF -> without it we'd request one chunk
+                // too many (server answers 0x43) and wrongly report the download FAILED.
+                if (readed < _dlPayload || _dlWritten >= _dlSize)
                 {
                     ftcCloseSink();
                     _dlEndMs = millis(); // freeze the pure-transfer end BEFORE the verify round-trip
@@ -4894,7 +4933,7 @@ void FileTransferClient::loop(bool configured)
                         return;
                     }
                     _conSub = 2; // ok -> pull whatever the command produced
-                    conSend(CON_PID_OUT, nullptr, 0);
+                    conSend(CON_PID_OUT, &_conMaxDrain, 1);
                 }
                 else if (millis() - _ftcSince > FTC_TIMEOUT)
                     conClose("no answer from the target -- session ended", false);
@@ -4920,7 +4959,7 @@ void FileTransferClient::loop(bool configured)
                     }
                     if (ovf) ftcOut(31, "[...output truncated...]");
                     if (more)
-                        conSend(CON_PID_OUT, nullptr, 0); // keep draining
+                        conSend(CON_PID_OUT, &_conMaxDrain, 1); // keep draining
                     else
                     {
                         _conSub = 0; // remote prompt already streamed through -> idle
@@ -4935,7 +4974,7 @@ void FileTransferClient::loop(bool configured)
             if (millis() >= _conKeepNext)
             {
                 _conKeepNext = millis() + CON_KEEP_MS;
-                conSend(CON_PID_OUT, nullptr, 0);
+                conSend(CON_PID_OUT, &_conMaxDrain, 1);
                 _conSub = 2;
             }
             return;
