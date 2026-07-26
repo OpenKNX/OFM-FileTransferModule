@@ -45,7 +45,7 @@ FTC is two halves of the same OFM:
 
 | Role | Class | Runs on | Responsibility |
 |---|---|---|---|
-| **Client** | `FileTransferClient` | the IP-Router (this device) | Drives the transfer: opens, streams chunks, reports progress, verifies, resumes, retries. Reads the source locally (SD via a callback, or a built-in RAM test pattern). |
+| **Client** | `FileTransferClient` | the IP-Router / IP-Interface | Drives the transfer: opens, streams chunks, reports progress, verifies, resumes, retries. Reads the source locally (SD via a callback, or a built-in RAM test pattern). |
 | **Server** | `FileTransferModule` | the target (e.g. a KNeoPix) | Receives the frames, writes them to **its own** LittleFS, answers CRCs, gap reports and filesystem capacity. The client never touches the target's filesystem directly. |
 
 The client speaks a **connectionless** dialect of the KNX *FunctionProperty* command
@@ -69,7 +69,7 @@ struct FtcFileSink {                                      // download sink (writ
 };
 ```
 
-On the IP-Router build there is **no SD card**, so only the RAM test pattern
+On the IP-Router / IP-Interface build there is **no SD card**, so only the RAM test pattern
 (`ftc <pa> send test`, `ftc <pa> perf`) is used — which is exactly what the throughput A/B needs.
 
 ---
@@ -80,7 +80,7 @@ On the IP-Router build there is **no SD card**, so only the RAM test pattern
 
 ```mermaid
 flowchart TD
-    subgraph CLIENT["CLIENT — IP-Router (PA a.b.c)"]
+    subgraph CLIENT["CLIENT — IP-Router/IP-Interface (PA a.b.c)"]
         CON["FileTransferClientConsole<br/>parses 'ftc ...' commands"]
         FSM["FileTransferClient<br/>FtcState machine, driven from loop()<br/>upload / perf / resume / retry / scan / device-info / download"]
         SRC["FtcFileSource / FtcFileSink<br/>(SD callback or RAM test pattern)"]
