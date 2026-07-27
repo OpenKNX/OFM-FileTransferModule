@@ -355,11 +355,21 @@ static void usage()
     cmdRow("<pa> console | con", "interactive remote console ('quit' to leave)");
     std::printf("\n");
 
+#ifdef OPENKNX_FTC_SECURITY
+    std::printf("%sACCESS (password-protected targets)%s\n", Cy(), Cr());
+    cmdRow("<pa> login <pw>", "unlock write actions (password -> MAC locally, never on the wire)");
+    cmdRow("<pa> logout", "lock the target's write actions again now");
+    std::printf("\n");
+#endif
+
     std::printf("%sEXAMPLES%s\n", Cy(), Cr());
     std::printf("  %sftc --discover%s\n", Cd(), Cr());
     std::printf("  %sftc --ip 11.11.0.126 5.0.3 info%s\n", Cd(), Cr());
-    std::printf("  %sftc --ip 11.11.0.126 5.0.3 send fw.bin.gz 253 fast%s\n", Cd(), Cr());
+    std::printf("  %sftc --ip 11.11.0.126 5.0.3 send fw.bin.gz 254 fast%s\n", Cd(), Cr());
     std::printf("  %sftc --ip 11.11.0.126 5.0.3 console%s\n", Cd(), Cr());
+#ifdef OPENKNX_FTC_SECURITY
+    std::printf("  %sftc --ip 11.11.0.126 5.0.3 login geheim%s\n", Cd(), Cr());
+#endif
     std::printf("\n");
 }
 
@@ -368,6 +378,27 @@ static void usage()
 static void feedConsoleLine(const std::string& line)
 {
     openknx.console.feedLine(line.c_str());
+}
+
+// Invariant guard: a `login`/`logout` line typed INSIDE a remote console would be relayed as plaintext over
+// the tunnel (obj 160) before the target could act -- leaking the password. We never relay such a line; the
+// user runs login as a separate one-shot invocation, where the password is turned into a MAC locally. Match
+// any whitespace-delimited "login"/"logout" token, case-insensitive.
+static bool lineHasAuthKeyword(const std::string& line)
+{
+    std::string tok;
+    for (size_t i = 0; i <= line.size(); i++)
+    {
+        char ch = (i < line.size()) ? line[i] : ' ';
+        if (ch == ' ' || ch == '\t')
+        {
+            if (tok == "login" || tok == "logout") return true;
+            tok.clear();
+        }
+        else
+            tok += (char)std::tolower((unsigned char)ch);
+    }
+    return false;
 }
 
 int main(int argc, char** argv)
@@ -484,14 +515,36 @@ int main(int argc, char** argv)
             std::string line;
             if (stdinLines.poll(line))
             {
-                feedConsoleLine(line); // client catches quit/exit locally and closes the session
-                if (line == "quit" || line == "exit") running = false;
+                if (lineHasAuthKeyword(line))
+                {
+                    // Never relay a login/logout line (would send the password in clear over the tunnel).
+                    std::printf("[console] 'login'/'logout' is not relayed here (it would send the password in\n"
+                                "          clear). Leave the console and run it as a one-shot:  ftc <pa> login <pw>\n");
+                    std::fflush(stdout);
+                }
+                else
+                {
+                    feedConsoleLine(line); // client catches quit/exit locally and closes the session
+                    if (line == "quit" || line == "exit") running = false;
+                }
             }
 
-            // The session ending on the wire (reboot, remote close, cancel) lands the client in a
-            // terminal phase -> leave too.
+            // The session ending on the wire (reboot, remote close, cancel, remote busy) lands the client in
+            // a terminal phase. The close banner (e.g. "remote busy") is queued into the cooperative ftcOut
+            // buffer in the SAME loop() pass that sets the phase and is only drained on the NEXT -> give
+            // loop() a few passes to flush it (same as the one-shot path), set the exit code, then leave.
             FtcPhase ph = openknxFileTransferClient.status().phase;
-            if (ph == FtcPhase::Done || ph == FtcPhase::Failed) running = false;
+            if (ph == FtcPhase::Done || ph == FtcPhase::Failed)
+            {
+                exitCode = (ph == FtcPhase::Failed) ? 1 : 0;
+                for (int i = 0; i < 64; ++i)
+                {
+                    g_knxTunnel.pump();
+                    openknxFileTransferClient.loop(true);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                running = false;
+            }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }

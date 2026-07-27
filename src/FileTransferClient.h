@@ -144,6 +144,12 @@ class FileTransferClient : public OpenKNX::Module
     void requestMkdir(uint16_t pa, const char *dir);                           // mkdir
     void requestRmdir(uint16_t pa, const char *dir);                           // rmdir (directory)
     void requestRename(uint16_t pa, const char *oldPath, const char *newPath); // mv / rename
+#ifdef OPENKNX_FTC_SECURITY
+    // `ftc <pa> login <pw>`: open the target's write window via a challenge-response. The password is turned
+    // into the AES key HERE and never leaves this process on the wire (only nonce + 4-byte MAC travel).
+    void requestLogin(uint16_t pa, const char *pw);
+    void requestLogout(uint16_t pa); // `ftc <pa> logout`: close the target's write window immediately
+#endif
     // mode: 0 = safe/classic (default), 1 = fast/windowed, 2 = forget. A non-zero mode negotiates the
     // server's FAST capability first and silently falls back to classic if missing (ftcBeginFeatureProbe).
     // apply (opt-in, default false): after a verified upload, trigger the target to self-apply the image
@@ -238,6 +244,11 @@ class FileTransferClient : public OpenKNX::Module
         FtcApplyCheck,       // fwupdate (standalone): FileInfo(43) existence pre-check before triggering apply
         FtcApplyProbe,       // apply: CheckFeatures(102) sent, short gate to learn if the target can self-apply
         FtcScanPost,         // post-sweep OpenKNX/info probe + cooperative CSV write (Feature B/C); NOT the FtcScanCo SM
+#ifdef OPENKNX_FTC_SECURITY
+        FtcAuthProbe,        // login: CheckFeatures(102) sent -> is the target password-protected at all?
+        FtcAuthChallenge,    // login: AuthChallenge(103) sent -> waiting for the 16-byte nonce
+        FtcAuthResponse,     // login/logout: AuthResponse(104)/AuthLogout(105) sent -> waiting for the status byte
+#endif
 #ifdef OPENKNX_FTC_CONSOLE
         FtcConsoleProbe,     // console: CheckFeatures(102) sent, short gate -- does the target even have the console feature?
         FtcConsole           // console tunnel: finished lines go to the target (obj 160), its log ring streams back
@@ -307,6 +318,16 @@ class FileTransferClient : public OpenKNX::Module
     FtcState _ftcState = FtcIdle;
     uint16_t _ftcTarget = 0;
     uint32_t _ftcSince = 0;
+
+#ifdef OPENKNX_FTC_SECURITY
+    // login: pad16(password) == the AES key, held only between requestLogin() and the AuthResponse send.
+    // The password itself is never stored beyond this and never leaves the process on the wire.
+    uint8_t _ftcAuthKey[16] = {};
+    bool _ftcLogout = false; // distinguishes the logout flow (cmd 105) from login (103/104) in FtcAuthResponse
+    // CheckFeatures result for a login: only send the challenge if the target is password-protected (0x10);
+    // otherwise report clearly instead of timing out against an old / non-auth device.
+    void authAfterProbe(uint8_t features, bool answered);
+#endif
 
     // --- transfer mode + fast-capability negotiation (phase 1) ---
     uint8_t _ftcMode = 0; // 0 = safe/classic, 1 = fast/windowed, 2 = forget (set by ftcStart)

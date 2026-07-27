@@ -17,3 +17,7 @@
 0x84    Dir can't be deleted
 0x85    Dir can't be created
 0x86    Dir has no more files
+
+0xA0    Auth required (FTC access control: run the 103/104 challenge-response, then retry)
+0xA1    Auth failed (wrong password, expired/no challenge, or empty password -> fail closed)
+0xA2    Writes disabled (stage "Off", or "ProgMode" while not in programming mode)

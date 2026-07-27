@@ -55,6 +55,45 @@ class FileTransferModule : public OpenKNX::Module
     uint8_t _fastBitmap[FTM_FAST_MAX_CHUNKS / 8]; // 1024 B, absolute, seq-1 indexed (global => zero-init)
     uint16_t _fastExpectedChunks = 0;             // chunk count from the fast open; sizes the report + bounds
 
+#ifdef OPENKNX_FTC_SECURITY
+    // --- FTC access control (opt-in via -D OPENKNX_FTC_SECURITY + FileTransfer.share.xml). Gates every FTC
+    // WRITE command (obj 159) and the console OPEN (obj 160). Reading stays open (except stage "Off").
+    // One global, best-effort window (NOT PA-bound, "egal von wem"), refreshed by each accepted write;
+    // the initial authorization is a single challenge-response over the knx AES. Nothing runs per data
+    // chunk -> the upload hot path is unchanged. Everything here compiles out without the flag. ---
+    static constexpr uint8_t FTM_SEC_OFF = 0, FTM_SEC_PROG = 1, FTM_SEC_ALWAYS = 2, FTM_SEC_PW = 3;
+    static constexpr uint32_t SEC_WINDOW_MIN = 30;       // clamp for the ETS idle timeout (s)
+    static constexpr uint32_t SEC_WINDOW_MAX = 3600;     // clamp for the ETS idle timeout (s)
+    static constexpr uint32_t SEC_CHALLENGE_TTL = 30000; // one outstanding challenge lifetime (ms)
+    static constexpr uint8_t SEC_MAC_LEN = 4;            // MAC bytes compared (forgery margin 2^-32)
+    static constexpr uint8_t ST_AUTH_REQUIRED = 0xA0, ST_AUTH_FAILED = 0xA1, ST_WRITES_DISABLED = 0xA2;
+    // ParamFTM_Security / ParamFTM_Password are read LIVE (not cached): a device may boot unconfigured and
+    // then be programmed without a setup() re-run, so a cached stage would go stale. paramByte/paramData are
+    // cheap RAM reads. Precedent: NetworkModule reads ParamNET_OTAUpdate live for the same reason.
+    bool _authorized = false;           // global window open
+    uint32_t _authLastMs = 0;           // last accepted write / auth -> idle timeout
+    uint8_t _nonce[16] = {};            // current outstanding challenge
+    bool _challengePending = false;
+    uint32_t _challengeMs = 0;          // challenge issue time -> 30 s TTL
+    uint8_t _seedKey[16] = {};          // AES-derived nonce seed (bus observer never sees it)
+    bool _seeded = false;
+    uint32_t _nonceCtr = 0;             // monotonic -> nonce never repeats
+    uint8_t _authFailCount = 0;         // consecutive 0xA1 -> non-blocking back-off
+    uint32_t _authBackoffStart = 0;     // back-off window start (wrap-safe: compare elapsed, not absolute)
+    uint32_t _authBackoffDur = 0;       // back-off duration (ms); 0 = no back-off active
+    uint32_t secWindowMs();                        // live ETS idle timeout (ParamFTM_AuthTimeout, clamped) in ms
+    uint8_t secStage();                            // live ParamFTM_Security (unconfigured -> ALWAYS)
+    bool secWriteAllowed();                        // stage + progMode() + window (unconfigured -> allow)
+    static bool secIsWriteCommand(uint8_t propertyId);
+    void secMakeNonce();                           // fill _nonce (seeded AES CTR, one block)
+    static void secComputeMac(const uint8_t *key, const uint8_t *nonce, uint8_t *out16); // CBC-MAC(1 block) = AES_ECB(key, nonce)
+    void cmdAuthChallenge(uint8_t *resultData, uint8_t &resultLength);            // cmd 103
+    void cmdAuthResponse(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength); // cmd 104
+    // Extend the idle window. Does NOT open it: _authorized is set ONLY on a verified login (cmdAuthResponse).
+    // (Security review: setting it here would leak a stale-open window across an Always->Password stage flip.)
+    inline void secRefreshWindow() { _authLastMs = millis(); }
+#endif
+
     bool processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;
     void readFile(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength);
     // Position-write core shared by the classic per-chunk path and the fast handler: seek to

@@ -17,6 +17,9 @@
     // Only the LittleFS default backend lives here; SD / ext-flash self-register from their own modules
     // (they include FileTransferClient.h and call registerFileBackend), so the client needs no storage header.
     #include <LittleFS.h>
+    #ifdef OPENKNX_FTC_SECURITY
+        #include "knx/aes.hpp" // login MAC (client side); reuses the AES already linked by knx (extern "C" wrapper)
+    #endif
 
 FileTransferClient *FileTransferClient::_instance = nullptr;
 
@@ -148,6 +151,12 @@ static constexpr uint8_t FTC_CMD_CANCEL = 90;
 static constexpr uint8_t FTC_CMD_MODULE_VERSION = 100;
 static constexpr uint8_t FTC_CMD_FW_UPDATE = 101;      // arm PicoOTA + reboot ~2s (RP2040 target only); fire-and-forget, no L7 reply
 static constexpr uint8_t FTC_CMD_CHECK_FEATURES = 102; // 1-byte flags: bit0 Resume, bit1 Update, bit2 FAST
+#ifdef OPENKNX_FTC_SECURITY
+static constexpr uint8_t FTC_CMD_AUTH_CHALLENGE = 103; // login: request a nonce
+static constexpr uint8_t FTC_CMD_AUTH_RESPONSE = 104;  // login: submit the 4-byte MAC over the nonce
+static constexpr uint8_t FTC_CMD_AUTH_LOGOUT = 105;    // logout: close the target's window now
+static constexpr uint8_t SEC_MAC_LEN = 4;              // MAC bytes sent (must match the server)
+#endif
 
 static constexpr uint8_t FTC_CMD_FORMAT = 0; // Format: LittleFS.format() -- wipes ALL files + folders
 
@@ -212,6 +221,9 @@ static constexpr uint32_t FTC_TEST_SIZE = 2048;
 static constexpr uint8_t FTC_FEAT_FAST = 0x04;
     #ifdef OPENKNX_FTC_CONSOLE
 static constexpr uint8_t FTC_FEAT_CONSOLE = 0x08; // server compiled with OPENKNX_FTC_CONSOLE (obj-160 tunnel)
+    #endif
+    #ifdef OPENKNX_FTC_SECURITY
+static constexpr uint8_t FTC_FEAT_AUTH = 0x10; // server requires a password (stage 3) -> login makes sense
     #endif
 // Dedicated SHORT probe window -- NOT the 6 s FTC_TIMEOUT. An old server never answers cmd102, so a
 // fast/forget request must give up fast and fall back to classic instead of stalling for seconds.
@@ -922,6 +934,11 @@ const char *FileTransferClient::ftcResultName(uint8_t result)
         case 0x43: return "target: file not open";
         case 0x46: return "target: seek failed";
         case 0x47: return "target: short write -- filesystem full?";
+#ifdef OPENKNX_FTC_SECURITY
+        case 0xA0: return "target: auth required -- run: ftc <pa> login <pw>";
+        case 0xA1: return "target: auth failed -- wrong password?";
+        case 0xA2: return "target: writes disabled (stage Off / not in prog mode)";
+#endif
         default: return "target rejected a chunk";
     }
 }
@@ -1801,6 +1818,78 @@ void FileTransferClient::requestRename(uint16_t pa, const char *oldPath, const c
     memcpy(buf + lo + 1, newPath, ln + 1);
     ftcSimpleCmd(pa, FTC_CMD_RENAME, "mv", buf, (uint8_t)(lo + 1 + ln + 1), newPath);
 }
+
+#ifdef OPENKNX_FTC_SECURITY
+void FileTransferClient::requestLogin(uint16_t pa, const char *pw)
+{
+    // pad16(password) == the AES key (no KDF). Derive it HERE so the password never leaves this process on
+    // the wire -- only the nonce + 4-byte MAC travel. Empty password fails closed (the server does too).
+    memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+    const size_t n = pw ? strlen(pw) : 0;
+    memcpy(_ftcAuthKey, pw, n > 16 ? 16 : n);
+    if (_ftcAuthKey[0] == 0)
+    {
+        openknx.logger.logWithPrefix("FTC", "login: empty password -- nothing sent");
+        return;
+    }
+    _ftcLogout = false;
+    knx.bau().ftcSetResponseCallback(ftcOnResponse);
+    _ftcTarget = pa;
+    ftcStatusReset(FtcPhase::Ping, pa, "login");
+    // Probe first: only challenge a target that is actually password-protected (feature bit 0x10). Against an
+    // old / non-auth device this gives a clear message instead of a 6 s timeout. Use the cache if fresh.
+    if (_ftcFeatValid && _ftcFeatPa == pa)
+    {
+        authAfterProbe(_ftcFeatBits, true);
+        return;
+    }
+    if (ftcSend(FTC_CMD_CHECK_FEATURES, 0)) // obj 159, pid 102
+        _ftcState = FtcAuthProbe;
+    else
+    {
+        memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+        openknx.logger.logWithPrefix("FTC", "login: cannot probe the target");
+    }
+}
+
+/** @brief CheckFeatures result for a login: send the challenge only if the target is password-protected. */
+void FileTransferClient::authAfterProbe(uint8_t features, bool answered)
+{
+    if (!answered)
+    {
+        openknx.logger.logWithPrefix("FTC", "login: target did not answer -- old firmware or no password protection");
+        memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+        ftcFinish();
+        return;
+    }
+    if (!(features & FTC_FEAT_AUTH))
+    {
+        openknx.logger.logWithPrefix("FTC", "login: target is not password-protected -- login not needed");
+        memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+        ftcFinish();
+        return;
+    }
+    if (ftcSend(FTC_CMD_AUTH_CHALLENGE, 0)) // request the nonce (obj 159, pid 103)
+        _ftcState = FtcAuthChallenge;
+    else
+    {
+        memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+        ftcFinish();
+    }
+}
+
+void FileTransferClient::requestLogout(uint16_t pa)
+{
+    _ftcLogout = true;
+    knx.bau().ftcSetResponseCallback(ftcOnResponse);
+    _ftcTarget = pa;
+    ftcStatusReset(FtcPhase::Ping, pa, "logout");
+    if (ftcSend(FTC_CMD_AUTH_LOGOUT, 0)) // pid 105 -> close the window now
+        _ftcState = FtcAuthResponse;      // reuse the status-wait state (it checks prop 105 via _ftcLogout)
+    else
+        openknx.logger.logWithPrefix("FTC", "logout: cannot send");
+}
+#endif
 
 void FileTransferClient::ftcFinish()
 {
@@ -3075,6 +3164,89 @@ void FileTransferClient::loop(bool configured)
             }
             return;
         }
+
+#ifdef OPENKNX_FTC_SECURITY
+        case FtcAuthProbe:
+        {
+            // login pre-flight: CheckFeatures tells us whether the target is password-protected at all.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
+                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
+                _ftcFeatPa = _ftcTarget;
+                _ftcFeatBits = feat;
+                _ftcFeatValid = true; // cache only a real answer
+                authAfterProbe(feat, true);
+            }
+            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            {
+                authAfterProbe(0, false); // no answer in the short window -> old / non-auth device
+            }
+            return;
+        }
+
+        case FtcAuthChallenge:
+        {
+            // login step 1: got the 16-byte nonce -> compute the 4-byte MAC locally and send AuthResponse(104).
+            // The password (as _ftcAuthKey) never leaves this process; only the MAC goes on the wire.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_AUTH_CHALLENGE) return; // stale mirror -> keep waiting
+                if (_ftcRespLen < 17 || _ftcResp[0] != 0x00)
+                {
+                    openknx.logger.logWithPrefix("FTC", "login: target sent no nonce");
+                    memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                    ftcFinish();
+                    return;
+                }
+                uint8_t mac[16]; // MAC = first SEC_MAC_LEN bytes of AES_ECB(pad16(pw), nonce); nonce = _ftcResp[1..16]
+                memcpy(mac, _ftcResp + 1, 16);
+                struct AES_ctx c;
+                AES_init_ctx(&c, _ftcAuthKey);
+                AES_ECB_encrypt(&c, mac);
+                memcpy(_ftcTx, mac, SEC_MAC_LEN);
+                memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey)); // wipe the key as soon as it is used
+                if (ftcSend(FTC_CMD_AUTH_RESPONSE, SEC_MAC_LEN))
+                    _ftcState = FtcAuthResponse;
+                else
+                    ftcFinish();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                openknx.logger.logWithPrefix("FTC", "login: no answer within 6s");
+                memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcAuthResponse:
+        {
+            // login step 2 / logout: the target's status byte. 104: 0x00 authorized / 0xA1 failed. 105: 0x00 done.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                const uint8_t want = _ftcLogout ? FTC_CMD_AUTH_LOGOUT : FTC_CMD_AUTH_RESPONSE;
+                if (_ftcRespProp != want) return; // stale mirror -> keep waiting
+                const uint8_t r = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                if (_ftcLogout)
+                    openknx.logger.logWithPrefix("FTC", "logged out");
+                else if (r == 0x00)
+                    openknx.logger.logWithPrefix("FTC", "login OK -- writes allowed until the target's idle timeout");
+                else
+                    openknx.logger.logWithPrefix("FTC", "login FAILED -- wrong password?");
+                ftcFinish();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                openknx.logger.logWithPrefix("FTC", _ftcLogout ? "logout: no answer within 6s" : "login: no answer within 6s");
+                ftcFinish();
+            }
+            return;
+        }
+#endif
 
         // ===== FAST TRANSFER states (phase 2 windowed + phase 3 forget) =====================
         case FtcFastOpen:

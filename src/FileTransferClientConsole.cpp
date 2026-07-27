@@ -59,6 +59,13 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "  %-33s  %s", "format yes", "Erase the WHOLE filesystem (gated)");
     c.ftcOut(0, "");
 
+#ifdef OPENKNX_FTC_SECURITY
+    c.ftcOut(H, "Access (password-protected targets)");
+    c.ftcOut(0, "  %-33s  %s", "login <pw>", "Unlock write actions on the target (password never sent in clear; stays open until the target's idle timeout)");
+    c.ftcOut(0, "  %-33s  %s", "logout", "Lock the target's write actions again now");
+    c.ftcOut(0, "");
+#endif
+
     c.ftcOut(H, "Transfer");
     c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; flags below");
     c.ftcOut(0, "  %-33s  %s", "receive | download <rem> [local] [pkg] [flags]", "Download a file (always fresh)");
@@ -330,6 +337,23 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestPing(pa);
         return true;
     }
+#ifdef OPENKNX_FTC_SECURITY
+    if (strcmp(sub, "login") == 0) // open the target's write window; password -> MAC locally, never on the wire
+    {
+        if (argc < 3 || arg[0] == 0)
+        {
+            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> login <password>  (max 16 chars, no spaces)");
+            return true;
+        }
+        _client.requestLogin(pa, arg);
+        return true;
+    }
+    if (strcmp(sub, "logout") == 0) // close the target's write window now
+    {
+        _client.requestLogout(pa);
+        return true;
+    }
+#endif
     if (strcmp(sub, "led") == 0) // locate: drive the target's prog-mode LED (on|off|blink)
     {
         uint8_t m = strcmp(arg, "on") == 0 ? 1 : strcmp(arg, "blink") == 0 ? 2

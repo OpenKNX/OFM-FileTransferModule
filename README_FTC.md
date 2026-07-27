@@ -82,13 +82,13 @@ On the IP-Router / IP-Interface build there is **no SD card**, so only the RAM t
 flowchart TD
     subgraph CLIENT["CLIENT — IP-Router/IP-Interface (PA a.b.c)"]
         CON["FileTransferClientConsole<br/>parses 'ftc ...' commands"]
-        FSM["FileTransferClient<br/>FtcState machine, driven from loop()<br/>upload / perf / resume / retry / scan / device-info / download"]
+        FSM["FileTransferClient<br/>FtcState machine, driven from loop()<br/>upload / perf / resume / retry / scan / device-info / download<br/>login / logout (OPENKNX_FTC_SECURITY, §4.8)"]
         SRC["FtcFileSource / FtcFileSink<br/>(SD callback or RAM test pattern)"]
         CON --> FSM
         SRC --- FSM
     end
     subgraph BAU["KNX stack (lib/knx)"]
-        TX["BauSystemB::ftcSendCommand()<br/>connectionless FunctionProperty<br/>AckRequested + LowPriority<br/>length &gt; 250 rejected"]
+        TX["BauSystemB::ftcSendCommand()<br/>connectionless FunctionProperty<br/>AckRequested + LowPriority<br/>length &gt; 251 rejected"]
         CB["callbacks (stack dispatch context):<br/>ftcOnResponse / ftcOnDeviceDescriptor / ftcOnPropertyValue<br/>-> only park bytes, loop() acts"]
     end
     subgraph WIRE["NCN5130 host-UART driver (lib/TPUart)"]
@@ -97,7 +97,7 @@ flowchart TD
     end
     TP(["KNX TP1 bus — fixed 9600 baud"])
     subgraph SERVER["SERVER — target device (PA x.y.z)"]
-        DISP["FileTransferModule::processFunctionProperty()<br/>objectIndex 159, switch on propertyId"]
+        DISP["FileTransferModule::processFunctionProperty()<br/>objectIndex 159, switch on propertyId<br/>+ access gate on writes/console (OPENKNX_FTC_SECURITY, §4.8)"]
         BMP["fast received-bitmap (1024 B, absolute seq-1)"]
         LFS[("LittleFS")]
         DISP --> BMP
@@ -163,11 +163,17 @@ between two `loop()` ticks and a single slot would drop one.
    other jobs: FtcInfo · FtcFsInfo (df / ll footer / pre-upload space check) · FtcDelete (rm/mkdir/rmdir/mv/format)
                FtcDirList/FtcDirInfo (ll/ls) · FtcScan · FtcDevDescr/Ver/Feat/Prop/Enum/Load (device info)
                FtcDownloadOpen/Chunk · FtcCancel (drain + auto-retry re-entry point)
+   access control (OPENKNX_FTC_SECURITY, §4.8):
+               login:  FtcAuthProbe (CheckFeatures: is it password-protected?) ─► FtcAuthChallenge (get nonce)
+                       ─► FtcAuthResponse (send 4-byte MAC) ─► FtcIdle
+               logout: FtcAuthResponse (cmd 105) ─► FtcIdle
 ```
 
 Every waiting state has the same shape: *if a response is pending, consume + validate + advance;
 else if `millis() − _ftcSince > timeout`, time out.* `FTC_TIMEOUT = 6000 ms` for most states;
-the fast path uses tighter, purpose-built deadlines (§3, §5).
+the fast path uses tighter, purpose-built deadlines (§3, §5). The two auth challenge/response states use
+`FTC_TIMEOUT`; the login pre-flight (`FtcAuthProbe`) uses the short `FTC_FEATURE_TIMEOUT` like the other
+CheckFeatures probes.
 
 ---
 
@@ -234,7 +240,13 @@ tunnel (§11.1, `OPENKNX_FTC_CONSOLE`) — it does **not** extend this 159 comma
 | 90 | `Cancel` | → | **no** | close the target's open file/dir (drain then finish) |
 | 100 | `ModuleVersion` | → | yes | 6-byte major/minor/revision — also the `ping` |
 | 101 | `FwUpdate` | → | no | RP2040 only: `picoOTA` + reboot |
-| 102 | `CheckFeatures` | → | yes | 1 byte: bit0 Resume, bit1 Update, bit2 FAST |
+| 102 | `CheckFeatures` | → | yes | 1 byte: bit0 Resume, bit1 Update, bit2 FAST, bit3 Console, **bit4 AuthRequired, bit5 WritesDisabled** |
+| **103** | `AuthChallenge` | → | yes | access control: request a nonce → `0x00` + 16-byte nonce (`OPENKNX_FTC_SECURITY`) |
+| **104** | `AuthResponse` | → | yes | access control: submit the 4-byte MAC over the nonce → `0x00` ok / `0xA1` fail |
+| **105** | `AuthLogout` | → | yes | access control: close the authorized window now → `0x00` |
+
+Commands 103–105 and the CheckFeatures bits 4/5 exist only when the server is built with
+`-D OPENKNX_FTC_SECURITY`; an older/unflagged server ignores 103–105 (§4.8) and never sets bits 4/5.
 
 Two more commands ride the KNX application layer directly (**not** object 159), used by scan and
 device-info: `DeviceDescriptor_Read` (2-byte mask → device class) and `PropertyValue_Read`
@@ -349,9 +361,12 @@ not "the *right* bytes arrived" — the verify is the only honest proof.
 | `0x41` | file already open | | `0x84` | dir can't be deleted |
 | `0x42` | file can't be opened | | `0x85` | dir can't be created |
 | `0x43` | file not opened | | `0x86` | dir has no more files |
-| `0x44` | file can't be deleted | | | |
-| `0x45` | file can't be renamed | | | |
-| `0x46` | seek failed | | | |
+| `0x44` | file can't be deleted | | `0xA0` | **auth required** (run `login`) |
+| `0x45` | file can't be renamed | | `0xA1` | **auth failed** (wrong/empty password) |
+| `0x46` | seek failed | | `0xA2` | **writes disabled** (stage Off / not in prog mode) |
+
+`0xA0/0xA1/0xA2` appear only against an `OPENKNX_FTC_SECURITY` server (§4.8). An old client that does not
+know them treats them as a generic rejection (fails safe, no crash).
 
 ### 4.6 Server write core
 
@@ -414,6 +429,46 @@ with `LL_ACK`.
 mode avoids it — even `safe` uses 247-byte chunks; shrinking to a ≤14-byte APDU would make every frame
 ETS-decodable at ~15× the transfer time, which is pointless. FTC file transfer is the one tolerated
 exception to "standard KNX services only" (§4.1), and this monitor cosmetics is a direct consequence.
+
+### 4.8 Access control (`OPENKNX_FTC_SECURITY`, opt-in)
+
+A **coarse deterrent** — a lock, not an alarm system — that gates the FTC **write** surface (upload,
+format, rm, mkdir, rmdir, mv, fw-update) and the console take-over, so an unauthorized user on the network
+cannot write without a password. Reads stay open (except stage "Off"). Motivation: gate writes remotely when
+the programming button is not reachable. It is **not** KNX Secure and does not resist a tunnel sniffer /
+offline brute-force — those are out of scope by design. Everything is behind `-D OPENKNX_FTC_SECURITY`;
+without the flag the module + client compile byte-identical (the OAM-IP-Router relies on this). Full
+motivation, threat model, and the ETS parameters live in **`OAM-IP-Interface/doc/FTC-SECURITY.md`**.
+
+**Model — login with auto-logout.** One device-global, best-effort authorized window (not PA-bound):
+
+- Client command `login <pw>` runs a challenge-response and opens the window; `logout` (cmd 105) closes it.
+- While open, all writes/console pass with **no per-write handshake** (the client just sends; a closed
+  window answers `0xA0`). Every accepted write **refreshes** the window; it idles closed after the ETS
+  `FTM_AuthTimeout` (default 240 s, 30–3600, read live) — auto-logout. The window opens **only** on a
+  verified login, never via an accepted write (a stale window would otherwise leak across an Always→Password
+  stage change).
+
+**Crypto (reuses the AES already linked by knx — `#include "knx/aes.hpp"`, zero extra flash).**
+`key = pad16(password)` (≤16 chars == the 16-byte AES key, no KDF). `MAC = first 4 bytes of AES_ECB(key,
+nonce)` (a CBC-MAC over one block). Nonce = one seeded AES-CTR block (monotonic counter → single-use; seed
+never on the wire). The password is turned into the MAC **at the point of entry** and **never** travels on
+the bus in clear (only nonce + 4-byte MAC do) — from any client, "egal von wo".
+
+**Client flow (`FileTransferClient`).** `login` first probes `CheckFeatures` (bit4): a target that is not
+password-protected reports it immediately instead of timing out. Then `FtcAuthChallenge` (send 103, receive
+nonce) → compute MAC → `FtcAuthResponse` (send 104, receive `0x00`/`0xA1`). `logout` sends 105. The `ftc-cli`
+console mode **never relays** a `login`/`logout` line (it would leak the password as plaintext over obj 160)
+— run login as a separate one-shot instead.
+
+**Stages (ETS `FTM_Security`):** 0 Off (all locked, only CheckFeatures answers) · 1 ProgMode (writes only in
+programming mode) · 2 Always (legacy, no protection — beta default) · 3 Password. Unconfigured → treated as
+Always (nothing to protect; avoids a lock-out).
+
+**Backward compatibility** is guaranteed by the additive protocol + try-and-error, both directions: a new
+client → old server never sees `0xA0` (old server has no gate) so writes work unchanged; an old client → new
+server has its writes correctly blocked with a generic rejection (no crash), reads still work; unknown
+CheckFeatures bits are ignored by old readers.
 
 ---
 
@@ -808,6 +863,7 @@ reflects the wire, not recovery (`FileTransferClient.cpp`).
 |---|---|---|
 | **`OPENKNX_FTC`** | per env (`:166`, `:260`, `:287`) | Enables the whole **client** (`FileTransferClient*`, the `ftc` console) **and** the send/receive FunctionProperty half in `lib/knx`. Everything it touches is behind this flag, so `grep -r OPENKNX_FTC` finds the full footprint. A server-only device (e.g. a NeoPixel) compiles the client to nothing. |
 | **`OPENKNX_FTC_CONSOLE`** | per env, **initially undefined** (opt-in) | Enables the **interactive console tunnel** (`ftc <pa> console`, §11.1): the `con*` handlers on both sides, a console line-sink in `Console`, and — on the server — implies `OPENKNX_WEBCONSOLE` (the log ring, +`OPENKNX_WEBCONSOLE_BUFSIZE` = 4096 B RAM). All of it is behind this flag; removing `-D` falls back binary-identical. Grants full remote console access — enable only where wanted. |
+| **`OPENKNX_FTC_SECURITY`** | per env, **initially undefined** (opt-in) | Enables the **access-control gate + `login`/`logout`** (§4.8): server cmds 103/104/105 + the write/console gate reading `ParamFTM_Security`/`FTM_Password`/`FTM_AuthTimeout`, and the client login handshake (needs `knx/aes.hpp`; add `knx/src/knx/aes.c` to the build). A product must also ship `FileTransfer.share.xml`. All of it is behind this flag; removing `-D` compiles byte-identical (the OAM-IP-Router relies on this). |
 | **`TPUART_TX_STICKY_OFFSET`** | `ec_flags_*` (`:37`, `:50`) | Send `U_L_DataOffset` only on change (§7.6). **+14 % at pkg 253.** Platform-agnostic. |
 | **`KNX_FIXES_EC`** | `ec_flags_*` (`:39`, `:51`) | KNX robustness fixes, incl. the **print-storm rate-limit** (fix #2) and a null-deref guard on `PID_SUB_LCCONFIG` (`bau091A.cpp`). |
 
@@ -877,6 +933,8 @@ target changes less often than the command.
 | `resume <src> [pkg] [mode]` | upload — same, explicit resume |
 | `perf [kb] [pkg] [mode]` | speed test: push a RAM pattern, report B/s, then delete it |
 | `console` / `con` | **interactive console tunnel** into the target's OpenKNX console (§11.1) — needs `OPENKNX_FTC_CONSOLE` on both devices |
+| `login <pw>` | unlock write actions on a password-protected target (§4.8) — password → MAC locally, never on the wire; needs `OPENKNX_FTC_SECURITY` |
+| `logout` | lock the target's write actions again now (§4.8) |
 
 **Global — `ftc <cmd>`:**
 
@@ -894,7 +952,7 @@ target changes less often than the command.
 
 - `<pa>` — `a.l.d`, e.g. `5.0.3` (comes first).
 - `<src>` — `test` = built-in 2 KB RAM pattern (→ written to `/ftctest.bin` on the target), or a local SD path.
-- `[pkg]` — 16..253, default 64. **Bigger = faster; 253 = max** (§6.4).
+- `[pkg]` — 16..254, default 64. **Bigger = faster; 254 = max** (§6.4).
 - `[mode]` — `safe` | `fast` | `forget` (aliases: `win`/`windowed` = fast, `ff`/`faf` = forget). Order-tolerant with `pkg`.
 
 **Examples:**
@@ -1001,7 +1059,7 @@ Design & verified anchors: `doc/concepts/ftc-console-tunnel.md` (concept) and
   firmware already auto-detects and uses it. A faster board = a PCB rework to strap CSB/UC1 high (§7.4).
 - **Fast chunk cap.** Fast/forget is capped at `FTM_FAST_MAX_CHUNKS = 8192` (~2 MB @ pkg 253, covers
   firmware). Above the cap the server answers `0x4A` and the client transparently runs classic (no cap).
-- **`pkg 254` is a hard no** — NPDU length overflow. `253` is the ceiling.
+- **`pkg 254` is the ceiling** — the spec-legal APDU max (255 = `0xFF` escape). `pkg 255` is rejected.
 - **Server-side hardening TODOs.** The classic `writeFile` still has no sequence/gap awareness of its
   own — correctness comes entirely from the client's stop-and-wait and the shared `writeChunk` absolute
   seek. The fast path's bitmap is the only server-side integrity tracker; the classic path trusts the

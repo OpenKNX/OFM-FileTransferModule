@@ -6,6 +6,11 @@
 #elif defined(ARDUINO_ARCH_ESP32)
 #include <Update.h>
 #endif
+#ifdef OPENKNX_FTC_SECURITY
+#include "knx/aes.hpp" // C++ wrapper (extern "C") around the AES already linked by knx; zero extra flash
+// Fixed public constant, domain separation for the nonce seed only. Not a secret.
+static const uint8_t FTM_SEC_K0[16] = {0x4F, 0x70, 0x65, 0x6E, 0x4B, 0x4E, 0x58, 0x46, 0x54, 0x43, 0x53, 0x65, 0x63, 0x75, 0x72, 0x65};
+#endif
 
 // Module name, shown in log output.
 const std::string FileTransferModule::name()
@@ -65,7 +70,10 @@ enum class FtmCommands
     Cancel = 90,
     ModuleVersion = 100,
     FwUpdate,
-    CheckFeatures
+    CheckFeatures,
+    AuthChallenge = 103, // FTC access control: request a nonce (OPENKNX_FTC_SECURITY)
+    AuthResponse = 104,  // FTC access control: submit the MAC over the nonce
+    AuthLogout = 105     // FTC access control: close the authorized window immediately
 };
 
 bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
@@ -219,6 +227,47 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
     _lastAccess = millis();
     openknx.common.skipLooptimeWarning();
 
+#ifdef OPENKNX_FTC_SECURITY
+    // The auth handshake itself carries no write side effect -> always processable.
+    if ((FtmCommands)propertyId == FtmCommands::AuthChallenge)
+    {
+        cmdAuthChallenge(resultData, resultLength);
+        return true;
+    }
+    if ((FtmCommands)propertyId == FtmCommands::AuthResponse)
+    {
+        cmdAuthResponse(length, data, resultData, resultLength);
+        return true;
+    }
+    if ((FtmCommands)propertyId == FtmCommands::AuthLogout)
+    {
+        // Explicit logout: close the window now. Unconditional + harmless if already closed.
+        _authorized = false;
+        _authLastMs = 0;
+        _challengePending = false;
+        resultData[0] = 0x00;
+        resultLength = 1;
+        return true;
+    }
+    // Stage "Off" locks the WHOLE file transfer (reads included). CheckFeatures stays answerable so a client
+    // can still discover the device is locked. Other stages gate writes only.
+    if (secStage() == FTM_SEC_OFF && knx.configured() && (FtmCommands)propertyId != FtmCommands::CheckFeatures)
+    {
+        resultData[0] = ST_WRITES_DISABLED;
+        resultLength = 1;
+        return true;
+    }
+    // Gate WRITE commands; reads (download/info/list/df/...) stay open in stages 1-3.
+    if (secIsWriteCommand(propertyId) && !secWriteAllowed())
+    {
+        // Password stage -> tell the client to authenticate; otherwise writes are simply off (Off handled above).
+        resultData[0] = (secStage() == FTM_SEC_PW) ? ST_AUTH_REQUIRED : ST_WRITES_DISABLED;
+        resultLength = 1;
+        return true;
+    }
+    if (secIsWriteCommand(propertyId)) secRefreshWindow(); // accepted write extends the idle window
+#endif
+
     switch ((FtmCommands)propertyId)
     {
         case FtmCommands::Format:
@@ -338,6 +387,17 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
         const uint8_t flags = (len > 0) ? data[0] : 0;
         if (flags & 0x01) // OPEN
         {
+#ifdef OPENKNX_FTC_SECURITY
+            // Console take-over is a write action: gate it on the same global window (finding C -> one auth
+            // mechanism, no separate console sub-flag). Client answers 0xA0 by running the 103/104 handshake.
+            if (!secWriteAllowed())
+            {
+                res[0] = (secStage() == FTM_SEC_PW) ? ST_AUTH_REQUIRED : ST_WRITES_DISABLED;
+                resLen = 1;
+                return true;
+            }
+            secRefreshWindow();
+#endif
             if (_conActive)
             {
                 res[0] = 0x01; // BUSY: a session is already owned
@@ -1022,9 +1082,174 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
 #ifdef OPENKNX_FTC_CONSOLE
     result |= 0x8; // Console: obj-160 console tunnel available (ftc <pa> console)
 #endif
+#ifdef OPENKNX_FTC_SECURITY
+    if (secStage() == FTM_SEC_PW) result |= 0x10; // AUTH_REQUIRED: device uses password challenge-response
+    if (!secWriteAllowed()) result |= 0x20;       // WRITES_DISABLED: writes currently blocked (state, per-connect)
+#endif
     resultData[0] = result;
     resultLength = 1;
 }
+
+#ifdef OPENKNX_FTC_SECURITY
+// Live access stage. Unconfigured -> ALWAYS (nothing to protect; the caller also short-circuits on
+// !configured, this keeps the enum sane for any direct reader).
+uint8_t FileTransferModule::secStage()
+{
+    return knx.configured() ? ParamFTM_Security : FTM_SEC_ALWAYS;
+}
+
+// Live ETS idle timeout (auto-logout) in ms, clamped to [30 s, 3600 s]. Read live so an ETS change applies
+// without a reboot; clamped so an out-of-range / erased value can never mean "never" or "instant".
+uint32_t FileTransferModule::secWindowMs()
+{
+    uint32_t s = ParamFTM_AuthTimeout;
+    if (s < SEC_WINDOW_MIN) s = SEC_WINDOW_MIN;
+    if (s > SEC_WINDOW_MAX) s = SEC_WINDOW_MAX;
+    return s * 1000;
+}
+
+// Is a write allowed right now? Unconfigured -> yes (nothing to protect, avoids a lock-out like OTA does).
+bool FileTransferModule::secWriteAllowed()
+{
+    if (!knx.configured()) return true;
+    switch (secStage())
+    {
+        case FTM_SEC_OFF: return false;
+        case FTM_SEC_PROG: return knx.progMode();
+        case FTM_SEC_ALWAYS: return true;
+        case FTM_SEC_PW:
+            if (!_authorized) return false;
+            if ((millis() - _authLastMs) > secWindowMs()) // idle -> auto-logout (close the window)
+            {
+                _authorized = false;
+                return false;
+            }
+            return true;
+    }
+    return false;
+}
+
+// The obj-159 commands that mutate the filesystem / firmware. Everything else (download/info/list/df/cancel/
+// version/features) is a read and stays open.
+bool FileTransferModule::secIsWriteCommand(uint8_t propertyId)
+{
+    switch ((FtmCommands)propertyId)
+    {
+        case FtmCommands::Format:
+        case FtmCommands::Rename:
+        case FtmCommands::FileUpload:
+        case FtmCommands::FileDelete:
+        case FtmCommands::DirCreate:
+        case FtmCommands::DirDelete:
+        case FtmCommands::FileUploadFast:
+#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
+        case FtmCommands::FwUpdate:
+#endif
+            return true;
+        default:
+            return false;
+    }
+}
+
+// One-block seeded AES CTR: monotonic counter guarantees single-use, AES under a seed the bus observer never
+// sees guarantees unpredictability. Seed once (own PA is set by first challenge) from cheap device entropy.
+void FileTransferModule::secMakeNonce()
+{
+    if (!_seeded)
+    {
+        uint8_t s[16] = {0};
+        uint16_t pa = knx.individualAddress();
+        uint32_t t = micros();
+        uintptr_t sp = (uintptr_t)&s; // stack-address entropy
+        memcpy(s + 0, &pa, 2);
+        memcpy(s + 2, &t, 4);
+        memcpy(s + 6, &sp, sizeof sp);
+        struct AES_ctx k0;
+        AES_init_ctx(&k0, FTM_SEC_K0);
+        AES_ECB_encrypt(&k0, s);
+        memcpy(_seedKey, s, 16);
+        _seeded = true;
+    }
+    uint8_t n[16] = {0};
+    _nonceCtr++;
+    uint32_t t = micros();
+    memcpy(n + 0, &_nonceCtr, 4);
+    memcpy(n + 4, &t, 4);
+    struct AES_ctx sk;
+    AES_init_ctx(&sk, _seedKey);
+    AES_ECB_encrypt(&sk, n); // n = the 16-byte nonce
+    memcpy(_nonce, n, 16);
+}
+
+// CBC-MAC over a single 16-byte block (IV=0) collapses to one ECB op: MAC = AES_ECB(key, nonce).
+void FileTransferModule::secComputeMac(const uint8_t *key, const uint8_t *nonce, uint8_t *out16)
+{
+    memcpy(out16, nonce, 16);
+    struct AES_ctx c;
+    AES_init_ctx(&c, key);
+    AES_ECB_encrypt(&c, out16);
+}
+
+// cmd 103: hand out a fresh nonce (single outstanding, 30 s TTL). Answer = 0x00 + 16 nonce bytes.
+void FileTransferModule::cmdAuthChallenge(uint8_t *resultData, uint8_t &resultLength)
+{
+    secMakeNonce();
+    _challengePending = true;
+    _challengeMs = millis();
+    resultData[0] = 0x00;
+    memcpy(resultData + 1, _nonce, 16);
+    resultLength = 17;
+}
+
+// cmd 104: verify the client's MAC over the outstanding nonce. Success -> open the window. Non-blocking
+// back-off after repeated failures (a timestamp compare, never delay()).
+void FileTransferModule::cmdAuthResponse(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    resultLength = 1;
+    // pad16: the ETS TypeText password is stored null-padded to 16 bytes == the AES key (no KDF). Read live.
+    uint8_t pwKey[16];
+    memcpy(pwKey, ParamFTM_Password, 16);
+    const bool pwEmpty = (pwKey[0] == 0);
+    // Under back-off (wrap-safe elapsed compare), or no/expired challenge, or empty password -> fail closed.
+    const bool inBackoff = _authBackoffDur && (millis() - _authBackoffStart) < _authBackoffDur;
+    if (inBackoff ||
+        !_challengePending ||
+        (millis() - _challengeMs) > SEC_CHALLENGE_TTL ||
+        pwEmpty ||
+        length < SEC_MAC_LEN)
+    {
+        _challengePending = false;
+        resultData[0] = ST_AUTH_FAILED;
+        return;
+    }
+
+    uint8_t expected[16];
+    secComputeMac(pwKey, _nonce, expected);
+    uint8_t diff = 0;
+    for (uint8_t i = 0; i < SEC_MAC_LEN; i++) diff |= (uint8_t)(expected[i] ^ data[i]); // constant-time compare
+    _challengePending = false; // single-use regardless of outcome
+
+    if (diff == 0)
+    {
+        _authorized = true; // the ONLY place the window opens (security review MED: never in secRefreshWindow)
+        secRefreshWindow();
+        _authFailCount = 0;
+        _authBackoffDur = 0;
+        resultData[0] = 0x00;
+        logInfoP("FTC authorized");
+    }
+    else
+    {
+        if (_authFailCount < 255) _authFailCount++;
+        // grow the reject window with failures, capped at 5 s -> throttles online guessing, no delay()
+        uint32_t back = (uint32_t)_authFailCount * 500;
+        _authBackoffStart = millis();
+        _authBackoffDur = (back > 5000) ? 5000 : back;
+        resultData[0] = ST_AUTH_FAILED;
+        logInfoP("FTC auth failed (%u)", _authFailCount);
+    }
+}
+#endif
 
 FileTransferModule openknxFileTransferModule;
 #endif

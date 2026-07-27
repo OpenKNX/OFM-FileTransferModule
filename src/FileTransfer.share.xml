@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?xml-model href="../../Organization/knxprod-support/knx_project_20/knx-editor.xsd" type="application/xml" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<KNX xmlns:op="http://github.com/OpenKNX/OpenKNXproducer" xmlns="http://knx.org/xml/project/20" CreatedBy="KNX MT" ToolVersion="5.1.255.16695">
+  <!-- OFM-FileTransferModule own configuration (new: the module had no ETS XML before). A product opts in
+       with `-D OPENKNX_FTC_SECURITY` + an `op:define prefix="FTM"` on this share; without both, nothing is
+       emitted and every existing FTM product (e.g. OAM-IP-Router) stays byte-identical.
+       Exposes the FTC access-control stage + the optional password. The firmware reads ParamFTM_Security /
+       ParamFTM_Password only under the same #ifdef -> zero regression. -->
+  <ManufacturerData>
+    <Manufacturer>
+      <ApplicationPrograms>
+        <ApplicationProgram>
+          <Static>
+            <ParameterTypes>
+              <!-- FTC access-control stage. Gates every FTC WRITE action (upload/format/rm/mkdir/rmdir/mv/
+                   fw-update) and the remote console; reading stays open except in stage "Aus". -->
+              <ParameterType Id="%AID%_PT-FtmSecurity" Name="FtmSecurity">
+                <TypeRestriction Base="Value" SizeInBit="8">
+                  <Enumeration Text="Aus (Datei-Transfer gesperrt)"        Value="0" Id="%ENID%" />
+                  <Enumeration Text="Nur im Programmiermodus"              Value="1" Id="%ENID%" />
+                  <Enumeration Text="Immer aktiv (kein Schutz)"            Value="2" Id="%ENID%" />
+                  <Enumeration Text="Passwortgeschützt"                    Value="3" Id="%ENID%" />
+                </TypeRestriction>
+              </ParameterType>
+              <!-- Access password, max 16 characters == the 16-byte AES key directly (no KDF). Only shown in
+                   stage "Passwortgeschützt". Empty password fails closed (never authorizes). -->
+              <ParameterType Id="%AID%_PT-FtmPassword" Name="FtmPassword">
+                <TypeText SizeInBit="128" />
+              </ParameterType>
+              <!-- Auto-logout idle timeout in seconds. The device closes the authorized window after this
+                   much inactivity; every accepted write refreshes it. Clamped to [30, 3600] in firmware. -->
+              <ParameterType Id="%AID%_PT-FtmAuthTimeout" Name="FtmAuthTimeout">
+                <TypeNumber SizeInBit="16" Type="unsignedInt" minInclusive="30" maxInclusive="3600" />
+              </ParameterType>
+            </ParameterTypes>
+            <Parameters>
+              <!-- FTM config segment: 1 byte stage + 16 bytes password = 17 bytes. -->
+              <Union SizeInBit="8">
+                <Memory CodeSegment="%MID%" Offset="0" BitOffset="0" />
+                <Parameter Id="%AID%_UP-%TT%00001" Name="Security" ParameterType="%AID%_PT-FtmSecurity" Offset="0" BitOffset="0" Text="Zugriffsschutz Datei-Transfer" Value="2" />
+              </Union>
+              <Parameter Id="%AID%_P-%TT%00002" Name="Password" ParameterType="%AID%_PT-FtmPassword" Text="Passwort" Value="" SuffixText="max. 16 Zeichen">
+                <Memory CodeSegment="%MID%" Offset="1" BitOffset="0" />
+              </Parameter>
+              <!-- 16-bit auto-logout timeout at offset 17 (segment = 1 + 16 + 2 = 19 bytes). -->
+              <Parameter Id="%AID%_P-%TT%00003" Name="AuthTimeout" ParameterType="%AID%_PT-FtmAuthTimeout" Text="Automatischer Logout nach Inaktivität" Value="240" SuffixText="Sekunden">
+                <Memory CodeSegment="%MID%" Offset="17" BitOffset="0" />
+              </Parameter>
+            </Parameters>
+            <ParameterRefs>
+              <ParameterRef Id="%AID%_UP-%TT%00001_R-%TT%0000101" RefId="%AID%_UP-%TT%00001" />
+              <ParameterRef Id="%AID%_P-%TT%00002_R-%TT%0000201" RefId="%AID%_P-%TT%00002" />
+              <ParameterRef Id="%AID%_P-%TT%00003_R-%TT%0000301" RefId="%AID%_P-%TT%00003" />
+            </ParameterRefs>
+          </Static>
+          <Dynamic>
+            <Channel Id="%AID%_CH-%PREFIX%" Number="%PREFIX%" Name="FileTransfer" Text="Datei-Transfer" Icon="lock-outline">
+              <ParameterBlock Id="%AID%_PB-nnn" Name="Basic" Text="Allgemein">
+                <ParameterSeparator Id="%AID%_PS-nnn" Text="Zugriffsschutz Datei-Transfer" UIHint="Headline" />
+                <!-- End-user friendly explanation of the whole mechanism (each &lt;= 255 chars). -->
+                <ParameterSeparator Id="%AID%_PS-nnn" Text="Schützt schreibende Aktionen (Upload, Formatieren, Löschen, Umbenennen, Firmware-Update) und die Fernkonsole. Lesen bleibt immer möglich (außer bei 'Aus')." UIHint="Information" />
+                <ParameterSeparator Id="%AID%_PS-nnn" Text="Grober Zugriffsschutz für Fälle ohne Zugang zum Programmier-Knopf – kein Ersatz für KNX Secure." UIHint="Information" />
+                <ParameterRefRef RefId="%AID%_UP-%TT%00001_R-%TT%0000101" IndentLevel="1" />
+                <choose ParamRefId="%AID%_UP-%TT%00001_R-%TT%0000101">
+                  <when test="1">
+                    <ParameterSeparator Id="%AID%_PS-nnn" Text="Schreiben und Fernkonsole nur erlaubt, während das Gerät im Programmiermodus ist (Programmier-Knopf gedrückt)." UIHint="Information" />
+                  </when>
+                  <when test="3">
+                    <ParameterRefRef RefId="%AID%_P-%TT%00002_R-%TT%0000201" IndentLevel="1" />
+                    <ParameterRefRef RefId="%AID%_P-%TT%00003_R-%TT%0000301" IndentLevel="1" />
+                    <!-- Plain-language login / auto-logout model for the end user (split to stay &lt;= 255 chars). -->
+                    <ParameterSeparator Id="%AID%_PS-nnn" Text="Anmelden: einmal 'login' mit Passwort am Client. Danach sind schreibende Aktionen für die eingestellte Zeit ohne erneute Eingabe möglich; jede Aktion verlängert sie." UIHint="Information" />
+                    <ParameterSeparator Id="%AID%_PS-nnn" Text="Nach Ablauf ohne Aktivität wird automatisch abgemeldet. Das Passwort wird nie im Klartext übertragen (Challenge-Response)." UIHint="Information" />
+                    <!-- Honest note: no KNX Secure -> the one-time ETS password download is sniffable on a plain line. -->
+                    <ParameterSeparator Id="%AID%_PS-nnn" Text="Hinweis: Ohne KNX Secure ist nur der einmalige Passwort-Download aus ETS auf unverschlüsselter Linie mitlesbar, nicht der laufende Betrieb." UIHint="Information" />
+                  </when>
+                </choose>
+              </ParameterBlock>
+            </Channel>
+          </Dynamic>
+        </ApplicationProgram>
+      </ApplicationPrograms>
+    </Manufacturer>
+  </ManufacturerData>
+</KNX>
