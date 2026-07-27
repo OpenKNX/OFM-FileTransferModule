@@ -4918,11 +4918,13 @@ void FileTransferClient::loop(bool configured)
                     const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
                     if (st == 0x01)
                     {
+                        _status.phase = FtcPhase::Failed; // busy is an error close -> host exits non-zero
                         conClose("remote busy -- another session owns that console", false);
                         return;
                     }
                     if (st == 0x43)
                     {
+                        _status.phase = FtcPhase::Failed;
                         conClose("remote has no open session", false);
                         return;
                     }
@@ -4930,7 +4932,10 @@ void FileTransferClient::loop(bool configured)
                     conSend(CON_PID_OUT, &_conMaxDrain, 1);
                 }
                 else if (millis() - _ftcSince > FTC_TIMEOUT)
+                {
+                    _status.phase = FtcPhase::Failed;
                     conClose("no answer from the target -- session ended", false);
+                }
                 return;
             }
             if (_conSub == 2) // draining the target's log ring
