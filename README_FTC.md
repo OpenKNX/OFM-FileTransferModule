@@ -120,9 +120,9 @@ Key transport facts (`bau_systemB.cpp`):
 - **`LowPriority`, not `SystemPriority`.** A firmware upload is minutes of frames; at SystemPriority
   it would win every bus arbitration and starve time-critical group traffic (switching, alarms). Low
   lets FTC yield to everything else. The server echoes the request priority, so the answers are Low too.
-- **Stack-overflow guard.** `ftcSendCommand()` rejects `length > 250` *before* the send
+- **Stack-overflow guard.** `ftcSendCommand()` rejects `length > 251` *before* the send
   (`bau_systemB.cpp`): `functionPropertyCommandRequest()` builds a stack-local `CemiFrame(3+length)`
-  and `memcpy`s into a 263-byte buffer at APDU offset 13, so the payload must fit `263 − 13 = 250` bytes.
+  and `memcpy`s into a 264-byte buffer at APDU offset 13, so the payload must fit `264 − 13 = 251` bytes.
   `length` is caller-controlled (a fast DATA frame is `5 + n`), so it is bounded hard.
 
 ### 2.2 Dispatch-context rule
@@ -567,20 +567,23 @@ adds in series with bus time, so each octet costs roughly one TP octet *plus* tw
 
 Asymptotic per-octet ceiling ≈ **408 B/s @19200** (frame → ∞, the fixed 66 ms amortized away).
 
-### 6.4 The `pkg` sweet-spot = **253**
+### 6.4 The `pkg` sweet-spot = **254**
 
 Throughput is **monotonic in frame size** — a bigger frame amortizes the fixed per-frame overhead over
-more payload, so it is *always* faster; going smaller only loses. `pkg 253` (the KNX extended-frame max)
+more payload, so it is *always* faster; going smaller only loses. `pkg 254` (the KNX extended-frame max)
 reaches **~90 % of the per-octet ceiling**.
 
-- Why 253 and not 254: at 254 the NPDU length overflows `uint8` (`256 → 0`), `valid()` drops the frame
-  with a bare "invalid frame". Measured: 253 ok, 254 aborts (`FileTransferClient.cpp`).
-- The frame passed to `ftcSendCommand` at `pkg 253` is exactly **250 bytes** (fast: `245 payload + 5`;
-  classic: `247 payload + 3`) — precisely the stack-overflow guard's ceiling (§2.1). The two limits are
-  independent but happen to meet at 253.
+- Why 254 is the ceiling: 254 octets is the spec-legal APDU maximum — 255 (`0xFF`) is the reserved escape
+  (03_03_02 §2.5). The old `pkg 253` limit was a bug: `NPDU::length()` returned `uint8`, so octetCount 254
+  wrapped `256 → 0` and `valid()` dropped the frame. Fixed — `NPDU::length()` is now `uint16` and the
+  `ftcSendCommand` guard was raised 250 → 251.
+- The frame passed to `ftcSendCommand` at `pkg 254` is exactly **251 bytes** (fast: `246 payload + 5`;
+  classic: `248 payload + 3`) → octetCount 254, the last valid value. The buffer limit (251) and the escape
+  limit (254) meet here.
 
-**Rule of thumb:** use `pkg 253` for every real transfer. Only drop `pkg` if a device on the path
-advertises a smaller max-APDU.
+**Rule of thumb:** use `pkg 254` for every real transfer. Only drop `pkg` if a device on the path
+advertises a smaller max-APDU. (The historic throughput figures below were measured at pkg 253; the +1
+payload byte at 254 is a ~0.4 % gain, not re-measured.)
 
 ---
 
@@ -739,8 +742,8 @@ Each entry: **what** · **why** · **impact**.
 | 6 | **Transfer-level auto-retry** (`_cfgTransferRetries` default 8, `_cfgBackoffMs` default 3000 ms — runtime-settable via `ftc retry`) | A transient failure (target busy after a format erase / reboot, a lost report/close) should recover, not fail. | Bounded, **transient-only** (reason-string classification), **resume-based** re-run; the source is kept open across the retry. Permanent reasons fail immediately (§5.3). |
 | 7 | **Interval-rate display** (`FTC_RATE_MIN_MS = 3000`) | Two deciles caught inside one FIFO-queuing burst give a near-zero `dt` → a nonsense spike (65k, 116k B/s). | Only an interval that spans ≥ 3 s (the FIFO has had time to drain, so queue-rate == wire-rate) is trusted; a shorter gap falls back to the cumulative average (`FileTransferClient.cpp`). |
 | 8 | **Pure "data only" throughput** (`_ftcData100Ms`) | The user asked for the *reine Übertragungszeit* — transfer time, not finalization. | The clock stops when the **last payload byte left the wire** (the close is sent only after the FIFO drains below `FTC_TX_LOW`), **excluding** the close-ack round-trip and the whole-file CRC verify (those vary 10–1000 ms). |
-| 9 | **`pkg` display fix** (`FileTransferClient.cpp`) | Fast/forget reserve 2 payload bytes for the in-frame CRC16, so the naive `payload + overhead` read 251, not the true on-wire 253. | The summary adds the 2 CRC bytes back so it reports the real `pkg 253`. |
-| 10 | **BAU stack-overflow guard** (`bau_systemB.cpp`) | `ftcSendCommand` length is caller-controlled; `> 250` overflows the stack-local `CemiFrame` buffer. | `length > 250` is rejected before the `memcpy`. See §2.1. |
+| 9 | **`pkg` display fix** (`FileTransferClient.cpp`) | Fast/forget reserve 2 payload bytes for the in-frame CRC16, so the naive `payload + overhead` read 252, not the true on-wire 254. | The summary adds the 2 CRC bytes back so it reports the real `pkg 254`. |
+| 10 | **BAU stack-overflow guard** (`bau_systemB.cpp`) | `ftcSendCommand` length is caller-controlled; `> 251` overflows the stack-local `CemiFrame` buffer. | `length > 251` is rejected before the `memcpy`. See §2.1. |
 | 11 | **Sticky-offset** (`TPUART_TX_STICKY_OFFSET`) | Re-sending the offset byte per octet wastes ~189 host bytes/frame, paid in series with the bus. | **+14 % at pkg 253.** See §7.6. |
 | 12 | **IP-mirror duplicate filtering** (`FTC_DUP_WINDOW_MS = 12`, sequence check, report nonce) | A second KNX-IP router on the line mirrors TP → IP routing multicast, so **every answer arrives twice** (a 621 KB run logged 3785 stale answers). A naive read desyncs the `ll` iterator or aborts at chunk 1. | Duplicates are dropped by time window + propertyId + sequence/nonce and merely counted; a 1-byte `0x00` (the open's echoed answer) is never mistaken for a rejection (`FileTransferClient.cpp`). |
 | 13 | **Cooperative console output** (`ftcOut` / `ftcDrainOut`) | The multi-line `ll`/`df` blocks (header + rows + footer + usage bars) were all logged in one `loop()` pass; each `log()` blocks on USB-CDC, so the burst overran the loop-time budget → a "loop took longer" warning on every `ll`/`df`. | Output is queued and drained **one line per `loop()` pass**, gated on `openknx.freeLoopTime()`; the state machine waits while it drains, so order is preserved and no single pass trips the warning. |
@@ -815,7 +818,7 @@ The **server** (`FileTransferModule`) is guarded by `#if defined(ARDUINO_ARCH_RP
 | Constant | Value | Meaning |
 |---|---:|---|
 | `FTC_OBJECT_INDEX` | 159 | FunctionProperty object index (server-enforced) |
-| `FTC_PKG_DEFAULT` / `MIN` / `MAX` | 64 / 16 / 253 | frame size bounds; 254 overflows the NPDU length |
+| `FTC_PKG_DEFAULT` / `MIN` / `MAX` | 64 / 16 / 254 | frame size bounds; 254 = spec-legal APDU max (255 = escape) |
 | `FTC_PKG_OVERHEAD` | 6 | classic payload = `pkg − 6` (fast = `pkg − 8`) |
 | `FTC_TIMEOUT` | 6000 ms | default per-state answer timeout |
 | `_cfgMaxRetries` (`FTC_MAX_RETRIES_DEF`) | 3 | per-chunk retries (CRC/timeout) — **runtime** member, `ftc retry max <0..20>` |
@@ -1024,7 +1027,7 @@ Design & verified anchors: `doc/concepts/ftc-console-tunnel.md` (concept) and
 | **L_ACK** | KNX TP1 layer-2 acknowledge — the per-frame delivery confirmation on the wire |
 | **CRC** | cyclic redundancy check — CRC-16/MODBUS per frame, CRC-32/POSIX whole-file |
 | **LittleFS** | the flash filesystem the server writes to on the target |
-| **pkg** | the on-wire frame size in bytes (payload + overhead); `pkg 253` is the max |
+| **pkg** | the on-wire frame size in bytes (payload + overhead); `pkg 254` is the max |
 | **chunk** | one payload frame of a file; `chunks = ceil(size / payload)`; seq is 1-based (0 = open, 0xFFFF = close) |
 | **PA** | physical/individual address, `area.line.device`, e.g. `5.0.3` |
 | **store-and-forward** | the NCN buffers a whole TX frame from the host before putting it on TP (adds host time in series) |

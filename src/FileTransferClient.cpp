@@ -199,9 +199,10 @@ uint32_t FileTransferClient::ftcCrc32Posix(uint32_t crc, const uint8_t *data, si
 // Chunk overhead = 6 B: request [seq:2][len:1] + answer [seq:2][crc:2] -> payload = pkg - 6.
 static constexpr uint8_t FTC_PKG_OVERHEAD = 6;
 static constexpr uint8_t FTC_PKG_MIN = 16;
-// 253 not 254: at 254 NPDU::length() (npdu.cpp) overflows uint8 (256 -> 0), valid() then drops the
-// frame with a bare "invalid frame". Measured: 253 ok, 254 aborts. See doc/concepts/ftc.md.
-static constexpr uint8_t FTC_PKG_MAX = 253;
+// 254 is the true max: pkg 254 -> FunctionProperty payload 251 (both modes) -> octetCount 254, the last valid
+// value (255=0xFF is the reserved escape per 03_03_02 2.5). Requires the paired fixes: NPDU::length() as uint16
+// (octetCount 254 -> 256, no uint8 wrap) and the ftcSendCommand guard raised to 251. 255 would hit the escape.
+static constexpr uint8_t FTC_PKG_MAX = 254;
 static constexpr uint32_t FTC_TIMEOUT = 6000;
 static constexpr uint32_t FTC_TEST_SIZE = 2048;
 

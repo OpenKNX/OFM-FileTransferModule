@@ -751,7 +751,7 @@ static bool txApdu(KnxIpTunnel* self, uint16_t da, uint8_t* apdu, uint8_t apduLe
 bool KnxIpTunnel::sendCommand(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, const uint8_t* data,
                               uint8_t length)
 {
-    if (length > 250) return false; // stack-overflow guard (§1.1)
+    if (length > 251) return false; // send guard: 4+length must fit apdu[256] and stay <=255 (uint8); mirrors firmware ftcSendCommand 251 (§1.1)
     uint8_t apdu[256];
     uint8_t n = buildFunctionPropertyCommand(apdu, objectIndex, propertyId, data, length);
     return txApdu(this, pa, apdu, n, false); // AckDontCare: an AckRequested frame from the tunnel PA gets no L2-ACK

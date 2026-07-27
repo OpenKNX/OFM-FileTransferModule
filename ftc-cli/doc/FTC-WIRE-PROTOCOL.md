@@ -81,7 +81,7 @@ first (TPCI) octet — i.e. `= 3 + length` for FunctionProperty (byte1 `0xC7` + 
 (`npdu.cpp:11-24`: `octetCount = _data[0]`, `length() = octetCount + 2`; `cemi_frame.cpp:87-98`).
 
 ### 1.1 `ftcSendCommand(asap, sec, objectIndex, propertyId, data, length)` — the FTC workhorse
-`bau_systemB.cpp:599-618`. **Rejects `length > 250`** before send (stack-overflow guard, README §2.1).
+`bau_systemB.cpp:599-618`. **Rejects `length > 251`** before send (stack-overflow guard, README §2.1).
 
 APCI `0x2C7`. Full APDU:
 ```
@@ -538,7 +538,7 @@ Values from `FileTransferClient.cpp` / `.h` (README §10.2) and the server:
 | `_cfgMaxRetries` / `_cfgTransferRetries` / `_cfgBackoffMs` | 3 / 8 / 3000 ms | per-chunk / whole-transfer retries / settle time (runtime-settable) |
 | server `HEARTBEAT_INTERVAL` | 30000 ms | server auto-closes an idle open file/dir; every frame refreshes `_heartbeat` (`FileTransferModule.cpp:24-37,754,830`) |
 | console `CON_IDLE_TMO` | 60000 ms | server reaps an idle console session (`FileTransferModule.h:36`) |
-| `pkg` | 16..**253** (default 64) | frame size; 253 = KNX extended max; 254 overflows the NPDU length octet → drop (README §6.4) |
+| `pkg` | 16..**254** (default 64) | frame size; 254 = KNX extended-frame max (255 = `0xFF` escape); needs NPDU length uint16 + send guard 251 (README §6.4) |
 
 **Host-loop implications over IP:**
 - Over a tunnel there is **no TP-FIFO and no L2 ACK**, so the `FTC_TX_HIGH/LOW` FIFO gate does not apply

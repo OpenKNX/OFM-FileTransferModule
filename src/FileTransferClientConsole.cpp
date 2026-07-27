@@ -81,7 +81,7 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "  %-33s  %s", "?", "This help");
     c.ftcOut(0, "");
 
-    c.ftcOut(0, "  [mode]  = safe (default) | fast | faf (experimental)       [pkg] = auto (default, starts 253 + degrades) or 16..253");
+    c.ftcOut(0, "  [mode]  = safe (default) | fast | faf (experimental)       [pkg] = auto (default, starts 254 + degrades) or 16..254");
     c.ftcOut(0, "  [flags] = apply . verbose . no-resume (send) . keep (default) . verbose (perf | receive)");
     c.ftcOut(0, "  local path: / (LittleFS) | sd/ (SD) | efc/ (ExtFlash)");
     c.ftcOut(0, "");
