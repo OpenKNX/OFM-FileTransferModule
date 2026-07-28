@@ -20,7 +20,13 @@
 // to FTC_PKG_MAX). 96 = headroom for nested sd//efc/ paths over the ~22-char flat firmware names, without the
 // vector-multiplied cost of FtcEntry::name (a single filename, kept at 64). Every path buffer sizes off this;
 // all writes stay snprintf/strncpy-bounded, so a longer input truncates safely (never overflows).
-static constexpr size_t FTC_PATH_MAX = 96;
+#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+static constexpr size_t FTC_PATH_MAX = 96;   // embedded target: RAM-bounded path buffers
+#define FTC_PATH_SCAN "95"                   // sscanf width (FTC_PATH_MAX-1), literal for the format string
+#else
+static constexpr size_t FTC_PATH_MAX = 512;  // native ftc-cli host: long absolute host paths (no RAM constraint)
+#define FTC_PATH_SCAN "511"
+#endif
 
 // The source is reached through this callback triple so the client needs no storage header: the router
 // registers implementations via registerFileBackend(); everything storage-specific stays router-side.

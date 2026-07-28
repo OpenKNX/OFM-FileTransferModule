@@ -68,7 +68,7 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Transfer");
     c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; flags below");
-    c.ftcOut(0, "  %-33s  %s", "receive | download <rem> [local] [pkg] [flags]", "Download a file (always fresh)");
+    c.ftcOut(0, "  %-33s  %s", "get | receive | download <rem> [local]", "Download a file (always fresh)");
     c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [flags]", "Speed test: push a pattern, report B/s");
     c.ftcOut(0, "");
 
@@ -410,11 +410,11 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestDelete(pa, arg);
         return true;
     }
-    if (strcmp(sub, "receive") == 0 || strcmp(sub, "download") == 0)
+    if (strcmp(sub, "receive") == 0 || strcmp(sub, "download") == 0 || strcmp(sub, "get") == 0)
     {
-        // ftc <pa> receive|download <remote> [local] [pkg] [verbose]  -- pull a file onto the local sink (SD).
-        char rem[80] = {0}, a2[80] = {0}, a3[80] = {0}, a4[80] = {0};
-        const int n = sscanf(cmd.c_str(), "ftc %*s %*s %79s %79s %79s %79s", rem, a2, a3, a4);
+        // ftc <pa> receive|download|get <remote> [local] [pkg] [verbose]  -- pull a file onto the local sink (SD).
+        char rem[FTC_PATH_MAX] = {0}, a2[FTC_PATH_MAX] = {0}, a3[80] = {0}, a4[80] = {0};
+        const int n = sscanf(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %" FTC_PATH_SCAN "s %79s %79s", rem, a2, a3, a4);
         if (n < 1)
         {
             openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> receive <remotepath> [localpath] [pkg] [verbose]   e.g. ftc 5.0.3 receive fw.bin sd/fw.bin 16");
@@ -542,8 +542,8 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     // trailing tokens are order-tolerant: a number (or `auto`) is pkg, apply|on|yes / no|off|noapply
     // toggles the opt-in self-apply, no-resume|nr|fresh forces a fresh upload, verbose|v = 1 Hz progress,
     // and anything else is the mode (safe|fast|forget).
-    char src[80] = {0}, t1[24] = {0}, t2[24] = {0}, t3[24] = {0}, t4[24] = {0}, t5[24] = {0};
-    const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %79s %23s %23s %23s %23s %23s", src, t1, t2, t3, t4, t5);
+    char src[FTC_PATH_MAX] = {0}, t1[24] = {0}, t2[24] = {0}, t3[24] = {0}, t4[24] = {0}, t5[24] = {0};
+    const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %23s %23s %23s %23s %23s", src, t1, t2, t3, t4, t5);
     if (nt < 1)
     {
         openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> send <src> [pkg] [mode] [flags]   e.g. ftc 5.0.3 send sd/fw.bin");

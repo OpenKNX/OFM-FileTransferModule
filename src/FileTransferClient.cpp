@@ -2130,10 +2130,13 @@ void FileTransferClient::conAfterProbe(uint8_t features, bool answered)
     if (!(features & FTC_FEAT_CONSOLE))
     {
         if (!answered)
-            openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u did not answer -- no console feature (build it with -D OPENKNX_FTC_CONSOLE)",
+            // No probe answer at all -> the target is absent or not a File-Transfer device. Do NOT claim
+            // "no console feature" (misleading for an unreachable PA); the device may not be there at all.
+            openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u: no answer -- not reachable or not a File-Transfer device",
                                                   (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF);
         else
-            openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u has no console feature -- build the target with -D OPENKNX_FTC_CONSOLE",
+            // Probe answered but the Console bit is clear -> the device IS there, just built without the feature.
+            openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u: no console feature -- the target  didn't support the console",
                                                   (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF);
         ftcFinish();
         return;
