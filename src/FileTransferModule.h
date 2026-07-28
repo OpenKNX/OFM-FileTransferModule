@@ -92,6 +92,10 @@ class FileTransferModule : public OpenKNX::Module
     // Extend the idle window. Does NOT open it: _authorized is set ONLY on a verified login (cmdAuthResponse).
     // (Security review: setting it here would leak a stale-open window across an Always->Password stage flip.)
     inline void secRefreshWindow() { _authLastMs = millis(); }
+    // Auth-failed result payload: [ST_AUTH_FAILED, remainSecHi, remainSecLo]. The 2 back-off seconds let the
+    // client report "next try in N min". Old clients read only byte 0 (backward-compatible). len set to 3.
+    inline void secAuthFail(uint8_t *res, uint8_t &len, uint32_t sec)
+    { if (sec > 0xFFFF) sec = 0xFFFF; res[0] = ST_AUTH_FAILED; res[1] = (uint8_t)(sec >> 8); res[2] = (uint8_t)sec; len = 3; }
 #endif
 
     bool processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;

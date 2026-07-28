@@ -438,6 +438,17 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
             resLen = 1;
             return true;
         }
+#ifdef OPENKNX_FTC_SECURITY
+        // F1(a): a console command line runs arbitrary privileged actions -> re-gate EVERY line, not just the
+        // OPEN. The PW auth window (or prog mode) can lapse mid-session; refuse + let the client auto-close.
+        if (!secWriteAllowed())
+        {
+            res[0] = (secStage() == FTM_SEC_PW) ? ST_AUTH_REQUIRED : ST_WRITES_DISABLED;
+            resLen = 1;
+            return true;
+        }
+        secRefreshWindow(); // an executed console command is activity -> extend the idle (inactivity) window
+#endif
         const uint8_t n = (len > 1) ? (uint8_t)MIN(len - 1, CONSOLE_INPUT_SIZE) : 0;
         memcpy(_conLine, data + 1, n);
         _conLine[n] = 0;
@@ -456,6 +467,13 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
             return true;
         }
         _conLastAccess = millis();
+#ifdef OPENKNX_FTC_SECURITY
+        // An attached console (its 3 s keepalive) is ACTIVE diagnosis, not inactivity -> keep the PW auth
+        // window fresh so a logged-in user is NEVER auto-logged-out while the console stays open (error
+        // analysis may sit idle watching logs). The "Automatischer Logout nach Inaktivität" resumes counting
+        // down normally once the console is closed. No effect on non-PW stages (window unused there).
+        if (secStage() == FTM_SEC_PW && _authorized) secRefreshWindow();
+#endif
         const uint32_t wp = openknx.logger.ringWritePos(); // snapshot once
         uint32_t pending = wp - _conCursor;
         if (pending > OpenKNX::Log::Logger::RING_SIZE) // wrapped past the cursor -> resync + flag
@@ -1210,16 +1228,20 @@ void FileTransferModule::cmdAuthResponse(uint8_t length, uint8_t *data, uint8_t 
     uint8_t pwKey[16];
     memcpy(pwKey, ParamFTM_Password, 16);
     const bool pwEmpty = (pwKey[0] == 0);
-    // Under back-off (wrap-safe elapsed compare), or no/expired challenge, or empty password -> fail closed.
-    const bool inBackoff = _authBackoffDur && (millis() - _authBackoffStart) < _authBackoffDur;
-    if (inBackoff ||
-        !_challengePending ||
-        (millis() - _challengeMs) > SEC_CHALLENGE_TTL ||
-        pwEmpty ||
-        length < SEC_MAC_LEN)
+    // Already under back-off: reject at once and report the REMAINING wait (so the client can say "next try in
+    // N min"). An attempt during the window neither extends it nor counts as a new guess. (Brute-force throttle.)
+    if (_authBackoffDur && (millis() - _authBackoffStart) < _authBackoffDur)
     {
         _challengePending = false;
-        resultData[0] = ST_AUTH_FAILED;
+        secAuthFail(resultData, resultLength, (_authBackoffDur - (millis() - _authBackoffStart) + 999) / 1000);
+        return;
+    }
+    // No/expired challenge, empty password, or malformed MAC -> fail closed, but this is NOT a password guess
+    // (no back-off, no wait reported).
+    if (!_challengePending || (millis() - _challengeMs) > SEC_CHALLENGE_TTL || pwEmpty || length < SEC_MAC_LEN)
+    {
+        _challengePending = false;
+        secAuthFail(resultData, resultLength, 0);
         return;
     }
 
@@ -1233,20 +1255,27 @@ void FileTransferModule::cmdAuthResponse(uint8_t length, uint8_t *data, uint8_t 
     {
         _authorized = true; // the ONLY place the window opens (security review MED: never in secRefreshWindow)
         secRefreshWindow();
-        _authFailCount = 0;
+        _authFailCount = 0; // a successful login resets the brute-force protection
         _authBackoffDur = 0;
         resultData[0] = 0x00;
+        resultLength = 1;
         logInfoP("FTC authorized");
     }
     else
     {
         if (_authFailCount < 255) _authFailCount++;
-        // grow the reject window with failures, capped at 5 s -> throttles online guessing, no delay()
-        uint32_t back = (uint32_t)_authFailCount * 500;
+        // 3 free tries; from the 4th failure the wait escalates 1,2,4,8,16,32,64 min (doubling, capped at 64).
+        uint32_t backMs = 0;
+        if (_authFailCount > 3)
+        {
+            uint8_t sh = (uint8_t)(_authFailCount - 4);
+            if (sh > 6) sh = 6;                 // cap at 2^6 = 64 min
+            backMs = (uint32_t)60000u << sh;
+        }
         _authBackoffStart = millis();
-        _authBackoffDur = (back > 5000) ? 5000 : back;
-        resultData[0] = ST_AUTH_FAILED;
-        logInfoP("FTC auth failed (%u)", _authFailCount);
+        _authBackoffDur = backMs;
+        secAuthFail(resultData, resultLength, backMs / 1000);
+        logInfoP("FTC auth failed (%u), backoff %us", _authFailCount, (unsigned)(backMs / 1000));
     }
 }
 #endif

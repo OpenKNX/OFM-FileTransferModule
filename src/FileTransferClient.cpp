@@ -3251,7 +3251,17 @@ void FileTransferClient::loop(bool configured)
                 else if (r == 0x00)
                     openknx.logger.logWithPrefix("FTC", "login OK -- writes allowed until the target's idle timeout");
                 else
-                    openknx.logger.logWithPrefix("FTC", "login FAILED -- wrong password?");
+                {
+                    // 0xA1 auth failed. Bytes 1..2 (if present) carry the remaining brute-force back-off in
+                    // seconds: 0 = still within the 3 free tries, else "too many tries, wait N".
+                    const uint16_t backSec = (_ftcRespLen >= 3) ? (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]) : 0;
+                    if (backSec == 0)
+                        openknx.logger.logWithPrefix("FTC", "login FAILED -- wrong password, try again");
+                    else if (backSec < 60)
+                        openknx.logger.logWithPrefixAndValues("FTC", "login FAILED -- too many tries, next attempt in %u s", backSec);
+                    else
+                        openknx.logger.logWithPrefixAndValues("FTC", "login FAILED -- too many tries, next attempt in %u min", (backSec + 59) / 60);
+                }
                 ftcFinish();
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
