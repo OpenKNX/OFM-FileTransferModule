@@ -445,7 +445,7 @@ class FileTransferClient : public OpenKNX::Module
     static constexpr uint8_t CON_DRAIN_MIN = 8;      // smallest sensible drain cap to request
     static constexpr uint8_t CON_DRAIN_MAX = 247;    // max console text per PID_OUT answer (one APDU minus the 7 B header)
     static constexpr uint32_t CON_KEEP_MS = 3000;    // idle: poll OUT to fetch async logs + keep the session fresh
-    uint8_t _conSub = 0;                             // 0 = idle in-session, 1 = await IN ack, 2 = draining OUT
+    uint8_t _conSub = 0;                             // 0 = idle in-session, 1 = await command ack, 2 = draining OUT, 3 = await OPEN ack
     uint8_t _conMaxDrain = CON_DRAIN_MAX;            // cap on PID_OUT drain bytes/answer (small = fits constrained tunnels)
     uint32_t _conKeepNext = 0;                       // millis() of the next idle keepalive poll
     uint32_t _conStartMs = 0;                        // millis() at conOpen() -> session duration on close (0 = never opened)
@@ -453,7 +453,8 @@ class FileTransferClient : public OpenKNX::Module
     static void consoleFeedLineStatic(const char *line); // Console line-sink trampoline -> instance()->consoleFeedLine
     void conSend(uint8_t pid, const uint8_t *payload, uint8_t len); // A_FunctionProperty_Command on obj 160 (arms _ftcRespPending)
     void conAfterProbe(uint8_t features, bool answered); // capability pre-flight result -> open the session or bail with a clear note
-    void conOpen();                                      // send OPEN (obj 160), arm the sink + banner, enter FtcConsole
+    void conOpen();                                      // send OPEN (obj 160), enter FtcConsole; banner deferred to the OK ack
+    void conRefuse(const char *reason);                  // OPEN refused (auth/locked/busy) -> one-line note, no session
     void conClose(const char *reason, bool sendClose);   // detach the sink, optionally CLOSE the remote, banner + finish
 #endif
 

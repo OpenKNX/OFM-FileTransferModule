@@ -2141,18 +2141,29 @@ void FileTransferClient::conAfterProbe(uint8_t features, bool answered)
     conOpen();
 }
 
-/** @brief Feature confirmed: send OPEN (obj 160, PID_IN, [0x01, myPaHi, myPaLo] -- PA logged at the target), arm the line-sink + banner, enter FtcConsole. */
+/** @brief Feature confirmed: send OPEN (obj 160, PID_IN, [0x01, myPaHi, myPaLo] -- PA logged at the target).
+ *  The banner, the local-input hijack and the session-start stamp are deferred to the _conSub==3 OK branch:
+ *  only a target that actually accepts the OPEN gets a console -- a refusal (auth/locked/busy) never flashes a
+ *  banner or a bogus "(session time ...)". */
 void FileTransferClient::conOpen()
 {
     const uint16_t myPa = knx.individualAddress();
     uint8_t f[3] = {0x01, (uint8_t)(myPa >> 8), (uint8_t)(myPa & 0xFF)}; // OPEN + our PA
     conSend(CON_PID_IN, f, 3);
     _ftcState = FtcConsole;
-    _conStartMs = millis(); // stamp the session start -> duration reported on close
-    _conSub = 1;            // await the OPEN ack
-    openknx.console.setLineSink(&consoleFeedLineStatic);
-    ftcOut(CONSOLE_HEADLINE_COLOR, "-- console %u.%u.%u -- 'quit'/'exit' to leave, 'ftc cancel' to escape --",
-           (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF);
+    _conSub = 3; // await the OPEN ack (distinct from a command ack so the reject paths stay clean)
+}
+
+/** @brief OPEN refused by the target -> print one clean line (no banner, no session, no duration) and finish.
+ *  Nothing was opened, so there is nothing to CLOSE and no line-sink was armed. */
+void FileTransferClient::conRefuse(const char *reason)
+{
+    _conSub = 0;
+    _conStartMs = 0;
+    _status.phase = FtcPhase::Failed; // a refused console is a non-zero exit for the host CLI
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%u.%u.%u: %s",
+           (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF, reason);
+    ftcFinish();
 }
 
 /** @brief Console line-sink trampoline (static -> instance), same pattern as ftcOnResponse. */
@@ -2199,14 +2210,15 @@ void FileTransferClient::conClose(const char *reason, bool sendClose)
         conSend(CON_PID_IN, f, 1);
     }
     _conSub = 0;
+    const uint8_t a = (_ftcTarget >> 12) & 0x0F, b = (_ftcTarget >> 8) & 0x0F, c = _ftcTarget & 0xFF;
     if (_conStartMs) // opened -> append the session duration HH:MM:SS
     {
         const uint32_t secs = (millis() - _conStartMs) / 1000;
-        ftcOut(CONSOLE_HEADLINE_COLOR, "-- %s (session time %02u:%02u:%02u) --", reason,
+        ftcOut(CONSOLE_HEADLINE_COLOR, "-- %u.%u.%u: %s (session time %02u:%02u:%02u) --", a, b, c, reason,
                (unsigned)(secs / 3600), (unsigned)((secs / 60) % 60), (unsigned)(secs % 60));
     }
     else
-        ftcOut(CONSOLE_HEADLINE_COLOR, "-- %s --", reason);
+        ftcOut(CONSOLE_HEADLINE_COLOR, "-- %u.%u.%u: %s --", a, b, c, reason);
     _conStartMs = 0; // don't carry a stale start into a later close without an open
     ftcFinish();
 }
@@ -5080,7 +5092,7 @@ void FileTransferClient::loop(bool configured)
 
         case FtcConsole:
         {
-            if (_conSub == 1) // waiting for the ack of an IN send (OPEN or a command line)
+            if (_conSub == 3) // waiting for the OPEN ack -- only a genuine accept opens a session (M7/M8, #2)
             {
                 if (_ftcRespPending)
                 {
@@ -5088,25 +5100,73 @@ void FileTransferClient::loop(bool configured)
                     if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_IN) return; // stale mirror
                     if (ftcDropDup()) return;
                     const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
-                    if (st == 0x01)
+                    if (st == 0x00) // accepted -> NOW it is a real session: stamp, hijack local input, banner, drain
                     {
-                        _status.phase = FtcPhase::Failed; // busy is an error close -> host exits non-zero
-                        conClose("remote busy -- another session owns that console", false);
+                        _conStartMs = millis();
+                        openknx.console.setLineSink(&consoleFeedLineStatic);
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "-- console %u.%u.%u -- 'quit'/'exit' to leave, 'ftc cancel' to escape --",
+                               (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF);
+                        _conSub = 2; // pull any prompt/output the takeover produced
+                        conSend(CON_PID_OUT, &_conMaxDrain, 1);
                         return;
                     }
-                    if (st == 0x43)
+                    if (st == 0xA0) // password stage, not logged in -- guide the user, do NOT open a doomed session
                     {
+                        _conSub = 0;
+                        _conStartMs = 0;
                         _status.phase = FtcPhase::Failed;
-                        conClose("remote has no open session", false);
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "%u.%u.%u: password-protected -- run: ftc %u.%u.%u login <pw>, then retry",
+                               (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF,
+                               (_ftcTarget >> 12) & 0x0F, (_ftcTarget >> 8) & 0x0F, _ftcTarget & 0xFF);
+                        ftcFinish();
                         return;
                     }
-                    _conSub = 2; // ok -> pull whatever the command produced
-                    conSend(CON_PID_OUT, &_conMaxDrain, 1);
+                    if (st == 0xA2) // writes disabled: prog-mode stage (not in prog) or ETS access = "Aus"
+                    {
+                        conRefuse("console locked -- set prog mode, or ETS access is \"Aus\"");
+                        return;
+                    }
+                    if (st == 0x01) // another PA already owns the console
+                    {
+                        conRefuse("console in use -- try again later");
+                        return;
+                    }
+                    conRefuse("unexpected target response -- console not opened"); // incl. 0x43 / malformed / future codes
+                    return;
+                }
+                else if (millis() - _ftcSince > FTC_TIMEOUT)
+                    conRefuse("no answer from the target -- console not opened");
+                return;
+            }
+            if (_conSub == 1) // waiting for the ack of a COMMAND line (the OPEN ack is _conSub==3)
+            {
+                if (_ftcRespPending)
+                {
+                    _ftcRespPending = false;
+                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_IN) return; // stale mirror
+                    if (ftcDropDup()) return;
+                    const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                    if (st == 0x00) // accepted -> pull whatever the command produced
+                    {
+                        _conSub = 2;
+                        conSend(CON_PID_OUT, &_conMaxDrain, 1);
+                        return;
+                    }
+                    // Reasons stay short: conClose() already frames them as "-- <pa>: <reason> (session time) --".
+                    _status.phase = FtcPhase::Failed; // any non-OK ends the session with a clear reason (no zombie)
+                    if (st == 0xA0) // PW window lapsed mid-session: the server re-gates each command (F1a)
+                        conClose("authorization expired -- log in again", true);
+                    else if (st == 0xA2) // locked mid-session (prog mode left, or mode reprogrammed)
+                        conClose("console locked", true);
+                    else if (st == 0x43) // target dropped the session (idle-reaped or closed)
+                        conClose("target idle timeout", true);
+                    else // 0x01 previous command still running, or any unknown code -> fail safe
+                        conClose("target busy or unexpected response", true);
                 }
                 else if (millis() - _ftcSince > FTC_TIMEOUT)
                 {
                     _status.phase = FtcPhase::Failed;
-                    conClose("no answer from the target -- session ended", false);
+                    conClose("no answer from target", true);
                 }
                 return;
             }
@@ -5117,6 +5177,12 @@ void FileTransferClient::loop(bool configured)
                     _ftcRespPending = false;
                     if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_OUT) return; // stale mirror
                     if (ftcDropDup()) return;
+                    if (_ftcRespLen >= 1 && _ftcResp[0] != 0x00) // 0x43 = session gone on the target (#3: kill the zombie)
+                    {
+                        _status.phase = FtcPhase::Failed;
+                        conClose("target idle timeout", false);
+                        return;
+                    }
                     const uint8_t more = (_ftcRespLen >= 2) ? _ftcResp[1] : 0;
                     const uint8_t ovf = (_ftcRespLen >= 3) ? _ftcResp[2] : 0;
                     // Payload is already-formatted remote console text -> write it verbatim to our serial
@@ -5138,7 +5204,10 @@ void FileTransferClient::loop(bool configured)
                     }
                 }
                 else if (millis() - _ftcSince > FTC_TIMEOUT)
-                    conClose("no answer while draining -- session ended", false);
+                {
+                    _status.phase = FtcPhase::Failed; // F1: a silent-drain timeout is an error, not a clean exit
+                    conClose("no answer while draining", false);
+                }
                 return;
             }
             // _conSub == 0: idle in-session -> periodic keepalive poll (async logs + keep the session fresh)
