@@ -42,6 +42,7 @@ class FileTransferModule : public OpenKNX::Module
     static constexpr uint32_t CON_IDLE_TMO = 60000;  // reap an orphaned session, re-enable the local console
     bool _conActive = false;
     uint16_t _conOwnerPa = 0;                    // from the OPEN payload, logging only (the hook carries no PA)
+    char _conOwnerStr[20] = {};                  // persistent "remote a.b.c" -> handed to disableConsole() so local input gets a reason
     uint32_t _conCursor = 0;                     // read position (ringWritePos scale, monotonic)
     bool _conCmdPending = false;                 // a parked line waits to run in conLoop()
     char _conLine[CONSOLE_INPUT_SIZE + 1] = {};  // one parked command line (Console.h: 100 + NUL)

@@ -410,7 +410,8 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
             _conCursor = openknx.logger.ringWritePos(); // start "now"
             _conOwnerPa = (len >= 3) ? (uint16_t)((data[1] << 8) | data[2]) : 0;
             _conLastAccess = millis();
-            openknx.console.disableConsole(true); // silence the local console for the duration
+            snprintf(_conOwnerStr, sizeof(_conOwnerStr), "remote %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
+            openknx.console.disableConsole(true, _conOwnerStr); // silence the local console; local input now gets a one-line "occupied (remote a.b.c)" notice instead of a dead prompt
             logInfoP("Console taken over by %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
             res[0] = 0x00;
             resLen = 1;
