@@ -228,6 +228,14 @@ static constexpr uint8_t FTC_FEAT_AUTH = 0x10; // server requires a password (st
 // Dedicated SHORT probe window -- NOT the 6 s FTC_TIMEOUT. An old server never answers cmd102, so a
 // fast/forget request must give up fast and fall back to classic instead of stalling for seconds.
 static constexpr uint32_t FTC_FEATURE_TIMEOUT = 800;
+// Console robustness on a CONGESTED bus: all FTC frames are low priority, so a bulk transfer starves the small
+// console control frames (verified by busmon: console 114 frames vs bulk 1325 over the same window). The
+// pre-flight probe is an idempotent read -> resend it a few times before declaring "no answer"; the in-session
+// round-trips just need a longer window (the probe already proved the target present) -> congestion DELAYS the
+// console, it must not KILL it. Only the (idempotent) probe is resent; OPEN/command/drain merely wait longer
+// (no resend -> no double-exec, no re-OPEN BUSY, no drain cursor gap).
+static constexpr uint8_t  FTC_CON_PROBE_RETRIES = 5;  // resend CheckFeatures up to N times on timeout (~N*800 ms budget)
+static constexpr uint32_t FTC_CON_TIMEOUT = 10000;    // console OPEN/command/drain round-trip window (vs 6 s FTC_TIMEOUT)
 // Chunk cap above which fast is refused and we fall back to classic (mirrors the server's static
 // bitmap size FTM_FAST_MAX_CHUNKS = 8192, ~2 MB @ pkg253). Classic has no such cap.
 static constexpr uint16_t FTC_FAST_MAX_CHUNKS = 8192;
@@ -2118,6 +2126,7 @@ void FileTransferClient::requestConsole(uint16_t pa, uint8_t maxDrain)
         conAfterProbe(_ftcFeatBits, true);
         return;
     }
+    _conProbeTries = 0; // fresh pre-flight retry budget for this console open
     if (ftcSend(FTC_CMD_CHECK_FEATURES, 0)) // arms _ftcRespPending + _ftcSince (obj 159, pid 102)
         _ftcState = FtcConsoleProbe;
     else
@@ -2179,6 +2188,7 @@ void FileTransferClient::consoleFeedLineStatic(const char *line)
 /** @brief A finished local input line during a session: quit/exit and `ftc cancel` end it, everything else is one command sent to the target. */
 void FileTransferClient::consoleFeedLine(const char *line)
 {
+    _conLastInputMs = millis(); // any local line (sent, dropped, or quit) defers the next idle poll -> TP: no keepalive collision while typing
     if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0)
     {
         conClose("session closed", true);
@@ -2189,9 +2199,9 @@ void FileTransferClient::consoleFeedLine(const char *line)
         conClose("session cancelled", true);
         return;
     }
-    if (_conSub != 0) // lockstep: one command in flight -- the echo already printed, just drop the extra line
-    {
-        openknx.logger.logWithPrefix("FTC", "busy -- wait for the current command to finish");
+    if (_conSub != 0) // lockstep, no queue: a command OR a keepalive/output drain is in flight -> this line is
+    {                 // dropped (NOT queued, by design) -- say so clearly so the user retypes instead of waiting
+        openknx.logger.logWithPrefix("FTC", "NOT sent -- still busy, retype your command");
         return;
     }
     uint8_t n = (uint8_t)strlen(line);
@@ -5099,7 +5109,15 @@ void FileTransferClient::loop(bool configured)
                 conAfterProbe(feat, true);
             }
             else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
-                conAfterProbe(0, false); // no answer in the short window -> old/other server, no console
+            {
+                // Congested bus can starve a single probe. Resend the idempotent CheckFeatures a few times
+                // (ftcSend re-arms _ftcSince) before giving up -> the console opens under load instead of
+                // failing with a misleading "no answer".
+                if (_conProbeTries < FTC_CON_PROBE_RETRIES && ftcSend(FTC_CMD_CHECK_FEATURES, 0))
+                    _conProbeTries++;
+                else
+                    conAfterProbe(0, false); // still nothing after the retries -> absent / not an FTC device
+            }
             return;
         }
 
@@ -5147,7 +5165,7 @@ void FileTransferClient::loop(bool configured)
                     conRefuse("unexpected target response -- console not opened"); // incl. 0x43 / malformed / future codes
                     return;
                 }
-                else if (millis() - _ftcSince > FTC_TIMEOUT)
+                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // longer window: probe proved presence, so a slow OPEN ack is congestion, not absence
                     conRefuse("no answer from the target -- console not opened");
                 return;
             }
@@ -5176,7 +5194,7 @@ void FileTransferClient::loop(bool configured)
                     else // 0x01 previous command still running, or any unknown code -> fail safe
                         conClose("target busy or unexpected response", true);
                 }
-                else if (millis() - _ftcSince > FTC_TIMEOUT)
+                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant: wait, do NOT resend (command is not idempotent)
                 {
                     _status.phase = FtcPhase::Failed;
                     conClose("no answer from target", true);
@@ -5216,15 +5234,19 @@ void FileTransferClient::loop(bool configured)
                         _conKeepNext = millis() + CON_KEEP_MS;
                     }
                 }
-                else if (millis() - _ftcSince > FTC_TIMEOUT)
+                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant per-chunk window; re-armed on every chunk that arrives -> big outputs drain slowly but completely under load
                 {
                     _status.phase = FtcPhase::Failed; // F1: a silent-drain timeout is an error, not a clean exit
                     conClose("no answer while draining", false);
                 }
                 return;
             }
-            // _conSub == 0: idle in-session -> periodic keepalive poll (async logs + keep the session fresh)
-            if (millis() >= _conKeepNext)
+            // _conSub == 0: idle in-session -> periodic keepalive poll (async logs + keep the session fresh).
+            // Suppress the poll while the user is actively typing (last local line < CON_KEEP_MS ago): over a
+            // TP tunnel each drain round-trips 1-2 s, and a line typed into that window would be dropped as
+            // "busy". Deferring keeps _conSub==0 so the command is sent immediately; async logs still flow once
+            // typing pauses for CON_KEEP_MS (and every command's own drain carries the ring in the meantime).
+            if (millis() >= _conKeepNext && (millis() - _conLastInputMs) >= CON_KEEP_MS)
             {
                 _conKeepNext = millis() + CON_KEEP_MS;
                 conSend(CON_PID_OUT, &_conMaxDrain, 1);

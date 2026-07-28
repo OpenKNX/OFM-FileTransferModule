@@ -452,8 +452,10 @@ class FileTransferClient : public OpenKNX::Module
     static constexpr uint8_t CON_DRAIN_MAX = 247;    // max console text per PID_OUT answer (one APDU minus the 7 B header)
     static constexpr uint32_t CON_KEEP_MS = 3000;    // idle: poll OUT to fetch async logs + keep the session fresh
     uint8_t _conSub = 0;                             // 0 = idle in-session, 1 = await command ack, 2 = draining OUT, 3 = await OPEN ack
+    uint8_t _conProbeTries = 0;                       // console pre-flight: CheckFeatures resends used (congested-bus tolerance)
     uint8_t _conMaxDrain = CON_DRAIN_MAX;            // cap on PID_OUT drain bytes/answer (small = fits constrained tunnels)
     uint32_t _conKeepNext = 0;                       // millis() of the next idle keepalive poll
+    uint32_t _conLastInputMs = 0;                    // millis() of the last local line -> suspend the idle poll while typing (TP: keeps _conSub==0 free for the command instead of colliding with an in-flight drain)
     uint32_t _conStartMs = 0;                        // millis() at conOpen() -> session duration on close (0 = never opened)
     void consoleFeedLine(const char *line);          // a finished local line -> remote; quit/exit/`ftc cancel` end the session
     static void consoleFeedLineStatic(const char *line); // Console line-sink trampoline -> instance()->consoleFeedLine
