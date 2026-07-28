@@ -400,9 +400,18 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
 #endif
             if (_conActive)
             {
-                res[0] = 0x01; // BUSY: a session is already owned
-                resLen = 1;
-                return true;
+                // A DIFFERENT owner is refused (single-owner console, no hijack). But the SAME owner
+                // re-opening means its previous session was lost (e.g. a drain answer that never crossed a
+                // constrained interface, or a client that died without a CLOSE) -> take it over cleanly and
+                // reset below, instead of locking it out until CON_IDLE_TMO. reqPa 0 (no PA sent) stays busy.
+                const uint16_t reqPa = (len >= 3) ? (uint16_t)((data[1] << 8) | data[2]) : 0;
+                if (reqPa == 0 || reqPa != _conOwnerPa)
+                {
+                    res[0] = 0x01; // BUSY: a session is already owned by someone else
+                    resLen = 1;
+                    return true;
+                }
+                logInfoP("Console re-opened by same owner %u.%u.%u -- resetting session", (reqPa >> 12) & 0x0F, (reqPa >> 8) & 0x0F, reqPa & 0xFF);
             }
             _conActive = true;
             _conCmdPending = false;

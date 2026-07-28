@@ -5237,7 +5237,10 @@ void FileTransferClient::loop(bool configured)
                 else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant per-chunk window; re-armed on every chunk that arrives -> big outputs drain slowly but completely under load
                 {
                     _status.phase = FtcPhase::Failed; // F1: a silent-drain timeout is an error, not a clean exit
-                    conClose("no answer while draining", false);
+                    // sendClose = true: the target likely still owns the session (e.g. a drain answer that never
+                    // crossed a constrained interface); the 1-byte CLOSE fits any tunnel and releases it now
+                    // instead of leaving it wedged until CON_IDLE_TMO. Fire-and-forget: harmless if it is gone.
+                    conClose("no answer while draining", true);
                 }
                 return;
             }
