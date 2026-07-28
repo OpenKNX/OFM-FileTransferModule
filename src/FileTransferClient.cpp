@@ -151,12 +151,12 @@ static constexpr uint8_t FTC_CMD_CANCEL = 90;
 static constexpr uint8_t FTC_CMD_MODULE_VERSION = 100;
 static constexpr uint8_t FTC_CMD_FW_UPDATE = 101;      // arm PicoOTA + reboot ~2s (RP2040 target only); fire-and-forget, no L7 reply
 static constexpr uint8_t FTC_CMD_CHECK_FEATURES = 102; // 1-byte flags: bit0 Resume, bit1 Update, bit2 FAST
-#ifdef OPENKNX_FTC_SECURITY
+    #ifdef OPENKNX_FTC_SECURITY
 static constexpr uint8_t FTC_CMD_AUTH_CHALLENGE = 103; // login: request a nonce
 static constexpr uint8_t FTC_CMD_AUTH_RESPONSE = 104;  // login: submit the 4-byte MAC over the nonce
 static constexpr uint8_t FTC_CMD_AUTH_LOGOUT = 105;    // logout: close the target's window now
 static constexpr uint8_t SEC_MAC_LEN = 4;              // MAC bytes sent (must match the server)
-#endif
+    #endif
 
 static constexpr uint8_t FTC_CMD_FORMAT = 0; // Format: LittleFS.format() -- wipes ALL files + folders
 
@@ -234,8 +234,8 @@ static constexpr uint32_t FTC_FEATURE_TIMEOUT = 800;
 // round-trips just need a longer window (the probe already proved the target present) -> congestion DELAYS the
 // console, it must not KILL it. Only the (idempotent) probe is resent; OPEN/command/drain merely wait longer
 // (no resend -> no double-exec, no re-OPEN BUSY, no drain cursor gap).
-static constexpr uint8_t  FTC_CON_PROBE_RETRIES = 5;  // resend CheckFeatures up to N times on timeout (~N*800 ms budget)
-static constexpr uint32_t FTC_CON_TIMEOUT = 10000;    // console OPEN/command/drain round-trip window (vs 6 s FTC_TIMEOUT)
+static constexpr uint8_t FTC_CON_PROBE_RETRIES = 5; // resend CheckFeatures up to N times on timeout (~N*800 ms budget)
+static constexpr uint32_t FTC_CON_TIMEOUT = 10000;  // console OPEN/command/drain round-trip window (vs 6 s FTC_TIMEOUT)
 // Chunk cap above which fast is refused and we fall back to classic (mirrors the server's static
 // bitmap size FTM_FAST_MAX_CHUNKS = 8192, ~2 MB @ pkg253). Classic has no such cap.
 static constexpr uint16_t FTC_FAST_MAX_CHUNKS = 8192;
@@ -942,11 +942,11 @@ const char *FileTransferClient::ftcResultName(uint8_t result)
         case 0x43: return "target: file not open";
         case 0x46: return "target: seek failed";
         case 0x47: return "target: short write -- filesystem full?";
-#ifdef OPENKNX_FTC_SECURITY
+    #ifdef OPENKNX_FTC_SECURITY
         case 0xA0: return "target: auth required -- run: ftc <pa> login <pw>";
         case 0xA1: return "target: auth failed -- wrong password?";
         case 0xA2: return "target: writes disabled (stage Off / not in prog mode)";
-#endif
+    #endif
         default: return "target rejected a chunk";
     }
 }
@@ -1135,45 +1135,52 @@ void FileTransferClient::ftcSendClose()
 // Everything below runs only when FAST was negotiated (ftcGateFast kept _ftcMode 1/2); the classic path
 // above is untouched. All non-blocking: bursts capped per loop(), FIFO-gated, waits are millis() deadlines.
 
+/** @brief auto-pkg degrade: step the payload down from the requested base toward FTC_PKG_MIN on a link
+ *  retry, so a link that only passes tiny frames (a foreign tunnel capping around 16-55 B) still gets there.
+ *  Sets _ftcPayloadSize/_ftcChunks and falls back to classic if the smaller frame overflows the fast window.
+ *  The CALLER recomputes the start sequence afterwards (fresh -> seq 1; resume -> have/newPayload). No-op
+ *  until at least one whole-transfer retry, and only under auto-pkg. Deterministic from _ftcTransferRetries
+ *  (not accumulative), so a space-check / resume re-entry re-runs it harmlessly. */
+void FileTransferClient::ftcAutoDegradePayload()
+{
+    if (!_ftcPkgAuto || _ftcTransferRetries == 0) return;
+    // Degrade linearly from the requested base down to FTC_PKG_MIN, reaching the floor on the LAST retry.
+    // The step spans base..MIN across the whole retry budget, so the floor is reached regardless of how many
+    // retries are configured.
+    uint32_t want = FTC_PKG_MIN;
+    if (_ftcPayloadBase > FTC_PKG_MIN)
+    {
+        const uint32_t budget = (_cfgTransferRetries > 0) ? _cfgTransferRetries : 1u;
+        const uint32_t span = (uint32_t)_ftcPayloadBase - FTC_PKG_MIN;
+        const uint32_t step = (span + budget - 1u) / budget; // ceil -> hits MIN by the last retry
+        const uint32_t drop = (uint32_t)_ftcTransferRetries * step;
+        want = (_ftcPayloadBase > FTC_PKG_MIN + drop) ? (_ftcPayloadBase - drop) : (uint32_t)FTC_PKG_MIN;
+    }
+    uint32_t nch = (_ftcSize + want - 1) / want;
+    // fast/forget mirror chunks in _ftcRecvBmp[1024] -> hard cap FTC_FAST_MAX_CHUNKS. A degrade crossing it
+    // would make the server reject the fast open (0x4A, classified permanent); fall back to classic (0xFFFE
+    // ceiling) so the auto-degrade still completes instead of dead-ending.
+    if (_ftcMode != 0 && nch > FTC_FAST_MAX_CHUNKS)
+    {
+        _ftcMode = 0;
+        openknx.logger.logWithPrefix("FTC", "auto pkg: chunk count over the fast window -> classic mode");
+    }
+    if (nch <= 0xFFFE && (uint16_t)want != _ftcPayloadSize) // don't degrade past the 16-bit seq limit
+    {
+        _ftcPayloadSize = (uint8_t)want;
+        _ftcChunks = (uint16_t)nch;
+        _status.chunks = _ftcChunks;
+        openknx.logger.logWithPrefixAndValues("FTC", "auto pkg -> %u B/chunk (link retries, robuster frame)", (unsigned)_ftcPayloadSize);
+    }
+}
+
 /** @brief Open the transfer via the fast path (mode 1/2) or classic (mode 0), using the resume decision from FtcResumeInfo. */
 void FileTransferClient::ftcProceedToUpload()
 {
-    // auto pkg: on a FRESH (non-resume) restart caused by link retries, drop to a smaller/robuster frame.
-    // Safe ONLY here -- _ftcResume==false + _ftcStartSeq==1 means offsets start at seq 1, so changing the
-    // payload cannot corrupt a resume (whose offsets = (seq-1)*_ftcPayloadSize). Deterministic and
-    // idempotent, so the space-check re-entry re-runs it harmlessly.
-    if (_ftcPkgAuto && !_ftcResume && _ftcStartSeq == 1 && _ftcTransferRetries > 0)
-    {
-        // Degrade linearly from the requested base down to FTC_PKG_MIN, reaching the floor on the LAST
-        // retry -- so a link that only passes tiny frames (e.g. a foreign tunnel capping around 16 B) still
-        // gets a shot at the minimum frame before the final abort. The step spans base..MIN across the
-        // whole retry budget, so the floor is reached regardless of how many retries are configured.
-        uint32_t want = FTC_PKG_MIN;
-        if (_ftcPayloadBase > FTC_PKG_MIN)
-        {
-            const uint32_t budget = (_cfgTransferRetries > 0) ? _cfgTransferRetries : 1u;
-            const uint32_t span   = (uint32_t)_ftcPayloadBase - FTC_PKG_MIN;
-            const uint32_t step   = (span + budget - 1u) / budget; // ceil -> hits MIN by the last retry
-            const uint32_t drop   = (uint32_t)_ftcTransferRetries * step;
-            want = (_ftcPayloadBase > FTC_PKG_MIN + drop) ? (_ftcPayloadBase - drop) : (uint32_t)FTC_PKG_MIN;
-        }
-        uint32_t nch = (_ftcSize + want - 1) / want;
-        // fast/forget mirror chunks in _ftcRecvBmp[1024] -> hard cap FTC_FAST_MAX_CHUNKS. A degrade crossing
-        // it would make the server reject the fast open (0x4A, classified permanent); fall back to classic
-        // (0xFFFE ceiling) so the auto-degrade still completes instead of dead-ending.
-        if (_ftcMode != 0 && nch > FTC_FAST_MAX_CHUNKS)
-        {
-            _ftcMode = 0;
-            openknx.logger.logWithPrefix("FTC", "auto pkg: chunk count over the fast window -> classic mode");
-        }
-        if (nch <= 0xFFFE && (uint16_t)want != _ftcPayloadSize) // don't degrade past the 16-bit seq limit
-        {
-            _ftcPayloadSize = (uint8_t)want;
-            _ftcChunks = (uint16_t)nch;
-            _status.chunks = _ftcChunks;
-            openknx.logger.logWithPrefixAndValues("FTC", "auto pkg -> %u B/chunk (link retries, robuster frame)", (unsigned)_ftcPayloadSize);
-        }
-    }
+    // auto pkg (FRESH path only): offsets start at seq 1, so changing the payload cannot corrupt a resume.
+    // The resume path degrades separately, BEFORE its CRC-fold boundary is snapshotted (see FtcResumeInfo),
+    // so the smaller stride and the resume start sequence / CRC seed stay consistent.
+    if (!_ftcResume && _ftcStartSeq == 1) ftcAutoDegradePayload();
 
     // Pre-upload free-space gate: refuse early if the file won't fit, rather than filling the FS and dying
     // mid-stream. Runs once after FtcResumeInfo; degrades gracefully against an old server (FtcFsInfo timeout).
@@ -1827,7 +1834,7 @@ void FileTransferClient::requestRename(uint16_t pa, const char *oldPath, const c
     ftcSimpleCmd(pa, FTC_CMD_RENAME, "mv", buf, (uint8_t)(lo + 1 + ln + 1), newPath);
 }
 
-#ifdef OPENKNX_FTC_SECURITY
+    #ifdef OPENKNX_FTC_SECURITY
 void FileTransferClient::requestLogin(uint16_t pa, const char *pw)
 {
     // pad16(password) == the AES key (no KDF). Derive it HERE so the password never leaves this process on
@@ -1893,11 +1900,11 @@ void FileTransferClient::requestLogout(uint16_t pa)
     _ftcTarget = pa;
     ftcStatusReset(FtcPhase::Ping, pa, "logout");
     if (ftcSend(FTC_CMD_AUTH_LOGOUT, 0)) // pid 105 -> close the window now
-        _ftcState = FtcAuthResponse;      // reuse the status-wait state (it checks prop 105 via _ftcLogout)
+        _ftcState = FtcAuthResponse;     // reuse the status-wait state (it checks prop 105 via _ftcLogout)
     else
         openknx.logger.logWithPrefix("FTC", "logout: cannot send");
 }
-#endif
+    #endif
 
 void FileTransferClient::ftcFinish()
 {
@@ -2112,7 +2119,8 @@ void FileTransferClient::requestConsole(uint16_t pa, uint8_t maxDrain)
             k = (uint8_t)(k * 0x21 + 0x0B);
         }
         const char *s = r;
-        for (uint8_t n = 0; n < _diagIx; n++) s += strlen(s) + 1; // walk to the _diagIx-th record
+        for (uint8_t n = 0; n < _diagIx; n++)
+            s += strlen(s) + 1; // walk to the _diagIx-th record
         openknx.logger.logWithPrefix("FTC", s);
         _diagIx = (_diagIx + 1) % 12;
         return;
@@ -2126,7 +2134,7 @@ void FileTransferClient::requestConsole(uint16_t pa, uint8_t maxDrain)
         conAfterProbe(_ftcFeatBits, true);
         return;
     }
-    _conProbeTries = 0; // fresh pre-flight retry budget for this console open
+    _conProbeTries = 0;                     // fresh pre-flight retry budget for this console open
     if (ftcSend(FTC_CMD_CHECK_FEATURES, 0)) // arms _ftcRespPending + _ftcSince (obj 159, pid 102)
         _ftcState = FtcConsoleProbe;
     else
@@ -2811,11 +2819,15 @@ void FileTransferClient::ftcGaReport()
 
 void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pkg, bool noResume, uint8_t mode, bool apply)
 {
-    // pkg omitted (0) or `auto` -> adaptive: start at the fastest frame, degrade per fresh link-retry.
+    // pkg omitted (0) or `auto` -> adaptive: start at the fastest frame, degrade per fresh link-retry. When
+    // the interface max APDU was detected (setApduHint), START the auto there instead of at FTC_PKG_MAX, so a
+    // constrained link (e.g. Siemens ~55) begins at the right frame at once rather than wasting ~1 min
+    // degrading down from 254. The degrade stays armed as the safety net if the hint is slightly optimistic.
     if (pkg == 0)
     {
         _ftcPkgAuto = true;
         pkg = FTC_PKG_MAX;
+        if (_apduHint >= FTC_PKG_MIN) pkg = (_apduHint > FTC_PKG_MAX) ? FTC_PKG_MAX : (unsigned)_apduHint;
     }
     else
         _ftcPkgAuto = false;
@@ -2832,6 +2844,7 @@ void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pk
 
     _ftcResume = false;      // FtcResumeInfo decides resume/truncate/skip; noResume forces a fresh upload
     _ftcNoResume = noResume; // send `no-resume`: discard any target partial (truncate)
+    _ftcLastReportMs = 0;    // fresh request -> the delivery-rate pacing interval re-arms on the first report
     _ftcStartSeq = 1;
     _ftcResumeBase = 0;
     _ftcSrcCrc = 0;
@@ -2859,6 +2872,40 @@ void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pk
 
     if (!_ftcTestSource)
     {
+    #if !defined(ARDUINO_ARCH_RP2040) && !defined(ARDUINO_ARCH_ESP32) && !defined(ARDUINO_ARCH_ESP8266)
+        // Native ftc-cli: local source and remote name are SEPARATE namespaces. `src` is a host path
+        // (relative or absolute) that must be opened verbatim; the remote target name is derived from its
+        // basename -> a deep host build path like ../build/x/firmware.bin.gz uploads to the target as
+        // /firmware.bin.gz (never an invalid nested path on the target's flat filesystem). `fwupdate`/`apply`
+        // then reference that same /basename. (Embedded reuses _ftcPath for both -- see the #else branch.)
+        char localSrc[FTC_PATH_MAX];
+        strncpy(localSrc, src, sizeof(localSrc) - 1);
+        localSrc[sizeof(localSrc) - 1] = '\0';
+        const char *base = strrchr(src, '/');
+        base = (base != nullptr) ? base + 1 : src;
+        if (base[0] == '\0')
+        {
+            openknx.logger.logWithPrefixAndValues("FTC", "source '%s' has no file name -- aborting", src);
+            return;
+        }
+        snprintf(_ftcPath, sizeof(_ftcPath), "/%s", base); // remote name = /<basename>, also the apply path
+        const char *stripped = localSrc;
+        const FtcBackend *be = ftcResolveBackend(localSrc, &stripped); // host: only the default backend exists
+        if (be == nullptr || be->src.open == nullptr)
+        {
+            openknx.logger.logWithPrefixAndValues("FTC", "no file backend -- aborting");
+            return;
+        }
+        _activeSrc = &be->src;
+        const int32_t sz = _activeSrc->open(localSrc); // open the real host path, unmodified
+        if (sz < 0)
+        {
+            openknx.logger.logWithPrefixAndValues("FTC", "cannot open source '%s' -- aborting (file not found?)", localSrc);
+            ftcCloseSource();
+            return;
+        }
+        _ftcSize = (uint32_t)sz;
+    #else
         // Resolve the local backend by the path's prefix ("sd/..", "efc/..", or the LittleFS default),
         // then strip it so _ftcPath is the bare path for BOTH the local open and the remote target.
         const char *stripped = _ftcPath;
@@ -2898,6 +2945,7 @@ void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pk
             return;
         }
         _ftcSize = (uint32_t)sz;
+    #endif
     }
 
     if (_ftcTestSource)
@@ -3063,6 +3111,13 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     // Client-requested download chunk size (goes into the FileDownload-open request, honored by the server).
     // pkg 0 or out of range -> the default FTC_DL_PAYLOAD; smaller helps on links that can't carry big frames.
     _dlPayload = (pkg >= 16 && pkg <= FTC_DL_PAYLOAD) ? pkg : FTC_DL_PAYLOAD;
+    // No explicit pkg + a detected interface APDU -> cap the chunk so the target's answer frame (chunk + ~6 B
+    // header) fits the link from the first chunk, instead of failing/degrading on a constrained interface.
+    if (pkg == 0 && _apduHint >= 16 + 6)
+    {
+        const uint8_t cap = (uint8_t)((_apduHint - 6 > FTC_DL_PAYLOAD) ? FTC_DL_PAYLOAD : _apduHint - 6);
+        if (cap < _dlPayload) _dlPayload = cap;
+    }
     // Resolve the LOCAL destination's backend by its prefix; the stripped path is what we actually write.
     const char *stripped = localPath;
     const FtcBackend *be = ftcResolveBackend(localPath, &stripped);
@@ -3190,7 +3245,7 @@ void FileTransferClient::loop(bool configured)
             return;
         }
 
-#ifdef OPENKNX_FTC_SECURITY
+    #ifdef OPENKNX_FTC_SECURITY
         case FtcAuthProbe:
         {
             // login pre-flight: CheckFeatures tells us whether the target is password-protected at all.
@@ -3281,7 +3336,7 @@ void FileTransferClient::loop(bool configured)
             }
             return;
         }
-#endif
+    #endif
 
         // ===== FAST TRANSFER states (phase 2 windowed + phase 3 forget) =====================
         case FtcFastOpen:
@@ -3404,6 +3459,23 @@ void FileTransferClient::loop(bool configured)
                                                           (unsigned)missing, (unsigned)(_ftcWndEnd - _ftcReportBase),
                                                           (unsigned)_ftcReportBase, (unsigned)_ftcWndEnd);
 
+                // Delivery-rate (BBR) pacing: the report is ground truth -- (window - missing) payload bytes the
+                // target CONFIRMED this window / elapsed = the MEASURED wire rate. Feed it to the host pacer
+                // (clean -> probe higher; lossy -> snap the send rate to this ceiling). This paces the send RATE;
+                // the window SIZE stays AIMD (below). No-op on embedded (the real TP FIFO paces there).
+                {
+                    const uint32_t nowRepMs = millis();
+                    const uint32_t dtRep = _ftcLastReportMs ? (nowRepMs - _ftcLastReportMs) : 0;
+                    _ftcLastReportMs = nowRepMs;
+                    if (dtRep > 0)
+                    {
+                        const uint16_t win = (uint16_t)(_ftcWndEnd - _ftcReportBase);
+                        const uint32_t deliveredB = (uint32_t)(win - missing) * _ftcPayloadSize;
+                        const uint32_t bps = (uint32_t)(((uint64_t)deliveredB * 1000ULL) / dtRep);
+                        knx.bau().ftcPacingRate(bps, missing == 0); // no-op on embedded (real TP FIFO paces)
+                    }
+                }
+
                 if (missing == 0)
                 {
                     // Whole window/page received -> advance. AIMD additive-increase (windowed only).
@@ -3448,6 +3520,7 @@ void FileTransferClient::loop(bool configured)
                 }
                 if (!_ftcRecovering) // multiplicative decrease sizes the NEXT window, not this one
                     _ftcWnd = (uint16_t)((_ftcWnd / 2 >= FTC_WND_MIN) ? _ftcWnd / 2 : FTC_WND_MIN);
+                // (the send-rate snap-to-measured already fired via ftcPacingRate above for this lossy report)
                 _ftcResendCur = _ftcReportBase;
                 _ftcState = FtcFastResend;
             }
@@ -3463,6 +3536,10 @@ void FileTransferClient::loop(bool configured)
                                                           (unsigned)_ftcReportRetries, (unsigned)FTC_REPORT_RETRIES,
                                                           (unsigned)(_ftcRepWaitStart ? millis() - _ftcRepWaitStart : 0),
                                                           (unsigned)_ftcReportBase, (unsigned)_ftcWndEnd);
+                // A report timeout is a congestion "kick" with no delivery sample: back the send rate off so
+                // the flood eases and the re-query gets through, instead of holding the rate high until the
+                // whole transfer aborts. The rate climbs back once clean windows resume -> it self-recovers.
+                knx.bau().ftcPacingRate(0, false);                                      // 0 && !clean = kick -> back off (no-op on embedded)
                 ftcSendReport(_ftcReportBase, (uint16_t)(_ftcWndEnd - _ftcReportBase)); // retry (fresh nonce)
             }
             return;
@@ -3591,6 +3668,12 @@ void FileTransferClient::loop(bool configured)
                 // our prefix. Arm the resume params, then ONE cooperative CRC to `have` (compared against the
                 // target) that snapshots the fold seed at the boundary -- ftcResumeCrcDone finishes the decision
                 // (and resets to a fresh upload on a mismatch, since _ftcResume is armed true before the CRC).
+                // Resume must degrade too: a constrained link that only passes tiny frames would otherwise
+                // dead-end retrying the base pkg on every attempt. Degrade the payload FIRST -- before the
+                // start sequence and the CRC-fold boundary below are derived -- so the smaller stride, the
+                // resume point (rounded down to a stride boundary; the few bytes back to `have` are re-sent
+                // idempotently from the same source) and the CRC seed all agree.
+                ftcAutoDegradePayload();
                 _ftcStartSeq = (uint16_t)(have / _ftcPayloadSize + 1);
                 _ftcDone = (have / _ftcPayloadSize) * _ftcPayloadSize;
                 _ftcResumeBase = _ftcDone;
@@ -5185,7 +5268,7 @@ void FileTransferClient::loop(bool configured)
                     }
                     // Reasons stay short: conClose() already frames them as "-- <pa>: <reason> (session time) --".
                     _status.phase = FtcPhase::Failed; // any non-OK ends the session with a clear reason (no zombie)
-                    if (st == 0xA0) // PW window lapsed mid-session: the server re-gates each command (F1a)
+                    if (st == 0xA0)                   // PW window lapsed mid-session: the server re-gates each command (F1a)
                         conClose("authorization expired -- log in again", true);
                     else if (st == 0xA2) // locked mid-session (prog mode left, or mode reprogrammed)
                         conClose("console locked", true);

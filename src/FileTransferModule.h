@@ -37,7 +37,7 @@ class FileTransferModule : public OpenKNX::Module
     static constexpr uint8_t CON_OBJECT_INDEX = 160; // separate from FTC-159
     static constexpr uint8_t CON_PID_IN = 1;         // A_FunctionProperty_Command: input / control
     static constexpr uint8_t CON_PID_OUT = 2;        // A_FunctionProperty_Command: output drain
-    static constexpr uint8_t CON_DRAIN_MIN = 8;      // smallest sensible drain cap a client may request
+    static constexpr uint8_t CON_DRAIN_MIN = 4;      // smallest drain cap a client may request (4 keeps margin under a 15-octet-APDU interface; below this a request is ignored -> full window)
     static constexpr uint8_t CON_DRAIN_MAX = 247;    // max console text per PID_OUT answer (one APDU minus the 7 B header)
     static constexpr uint32_t CON_IDLE_TMO = 60000;  // reap an orphaned session, re-enable the local console
     bool _conActive = false;
