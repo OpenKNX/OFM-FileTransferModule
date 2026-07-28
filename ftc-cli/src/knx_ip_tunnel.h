@@ -70,6 +70,12 @@ class KnxIpTunnel
     // Outstanding-frame count for the client's flow control (TP-FIFO analogue on IP). 0 when idle.
     uint16_t txQueueSize() const;
 
+    // Delivery-rate (BBR-style) pacing feedback from the FTC client's per-window reports: clean -> probe the
+    // send rate higher; a lossy window -> snap it to `deliveredBps` (the measured wire ceiling); deliveredBps==0
+    // && !clean = a report-timeout kick -> back off. The tunnel ACKs instantly, so the confirmed delivered
+    // rate -- not a guess -- sets the TP send rate.
+    void pacingRate(uint32_t deliveredBps, bool clean);
+
     // --- callback registration (HostBau.ftcSet*Callback forwards here) ---------------------------
     void setResponseCallback(FtcResponseCb cb) { _responseCb = cb; }
     void setDeviceDescriptorCallback(FtcDdCb cb) { _ddCb = cb; }

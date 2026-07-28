@@ -97,6 +97,7 @@ class HostBau
 
     // --- flow control ----------------------------------------------------------------------------
     virtual uint16_t ftcTxQueueSize() { return g_knxTunnel.txQueueSize(); }
+    virtual void ftcPacingRate(uint32_t deliveredBps, bool clean) { g_knxTunnel.pacingRate(deliveredBps, clean); }
 };
 
 /// @brief Host knx facade: only bau() + individualAddress() are used by the four files.

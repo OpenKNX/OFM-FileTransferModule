@@ -156,11 +156,17 @@ static constexpr uint8_t TPCI_DATA_CONN = 0x40; // | (seq<<2)
 static constexpr uint8_t PRIO_SYSTEM = 0x00;
 static constexpr uint8_t PRIO_LOW = 0x03;
 
-static constexpr uint32_t HEARTBEAT_MS = 60000;    // CONNECTIONSTATE_REQUEST cadence
-static constexpr uint16_t TX_MAX_OUTSTANDING = 64; // soft backpressure cap for the senders
+static constexpr uint32_t HEARTBEAT_MS = 60000; // CONNECTIONSTATE_REQUEST cadence
 static constexpr int RX_BUF = 1024;
 static constexpr uint32_t TX_ACK_TIMEOUT_MS = 1000; // KNXnet/IP tunneling: TUNNELING_ACK deadline before retransmit (03_08_04 §2.6)
-static constexpr uint8_t TX_ACK_MAX_RETRIES = 5;    // retransmits of the same (seq) frame before freeing the gate
+static constexpr uint8_t TX_ACK_MAX_RETRIES = 5;    // retransmits of the same (seq) frame before the slot is freed
+
+// NOTE ON TX PIPELINING (why there is exactly one in-flight frame): we tried sending a second TUNNELING_REQUEST
+// before the first was ACKed, to overlap the tunnel round-trip with the ~290 ms TP wire time (a measured
+// ~194 ms/chunk idle gap). HW test proved real interfaces enforce the KNXnet/IP 1-outstanding rule: the second
+// frame is dropped, no ACK ever comes, the in-flight slot never frees and the whole transfer wedges. So the
+// transport is strictly 1-outstanding (see the TxInflight slot in TunnelState). Overlapping the RTT would need
+// a per-interface capability probe first -- do NOT reintroduce multi-outstanding sending blindly.
 
 static uint32_t nowMs()
 {
@@ -191,15 +197,19 @@ namespace
         uint8_t txSeq = 0; // outgoing TUNNELING_REQUEST seq
         uint8_t rxSeq = 0; // last accepted inbound tunnel seq (server-driven)
         bool rxSeqValid = false;
-        uint16_t txOutstanding = 0;               // TUNNELING_REQUESTs sent, not yet ACKed (KNXnet/IP tunneling: 1-outstanding)
-        std::deque<std::vector<uint8_t>> txQueue; // cEMI frames waiting to go out one-at-a-time (fast/forget window)
+        std::deque<std::vector<uint8_t>> txQueue; // cEMI frames waiting to go out (fast/forget window)
 
-        // Retransmit of the outstanding TUNNELING_REQUEST: a lost/late TUNNELING_ACK must not wedge the
-        // 1-outstanding gate forever. Keep the full frame body (connection header + cEMI) so it can be resent
-        // verbatim (same seq -> the server dedups it) until an ACK arrives or the retry budget is spent.
-        std::vector<uint8_t> txLastFrame; // last TUNNELING_REQUEST body, for retransmit (empty = nothing outstanding)
-        uint32_t txSentMs = 0;            // when the outstanding frame was last (re)sent
-        uint8_t txAckRetries = 0;         // retransmits already done for the current outstanding frame
+        // The SINGLE in-flight TUNNELING_REQUEST: sent, awaiting its TUNNELING_ACK. KNXnet/IP tunnelling is
+        // strictly 1-outstanding (03_08_04 §2.6): the client must wait for each request's ACK before sending the
+        // next. This is not just advisory -- real interfaces ENFORCE it (HW-verified: a second request sent before
+        // the first is ACKed is silently dropped and never ACKed, which wedges the transfer). So there is at most
+        // ONE unacked frame at any moment; a std::deque would only ever hold 0 or 1 entries, so we keep a single
+        // slot instead. `txInflightBusy` marks it occupied; `txInflight.body` keeps the whole frame (connection
+        // header + cEMI) so a lost/late ACK can be resent verbatim -- same seq, so the server dedups the frame it
+        // already processed -- until the ACK arrives or the retry budget is spent, either of which frees the slot.
+        struct TxInflight { std::vector<uint8_t> body; uint32_t sentMs; uint8_t retries; };
+        TxInflight txInflight;         // the one frame awaiting its ACK (valid only while txInflightBusy)
+        bool txInflightBusy = false;   // true from send until ACK / retry-budget-exhausted
 
         uint32_t lastHeartbeat = 0; // last CONNECTIONSTATE_REQUEST sent
 
@@ -291,14 +301,24 @@ namespace
     uint32_t g_txActivity = 0;
 
     // Virtual TP-FIFO (in frames) for fast/forget pacing. The KNXnet/IP tunnel ACKs every frame almost
-    // instantly, so txOutstanding never reflects the real ~350 B/s TP bottleneck -> the fast pump sees an
-    // empty FIFO and blasts the whole window, overrunning the interface's TP transmit FIFO (drops, "deadline
-    // exceeded"). We model that FIFO here: +1 per transmitted FTC frame, drained at the measured TP frame
-    // rate. ftcTxQueueSize() then paces on FTC_TX_HIGH/LOW exactly as on the device. VFIFO_DRAIN_FPS is the
-    // one knob (frames/s ~= B/s ÷ ~245 B/chunk); tune against real hardware.
+    // instantly, so the real ~350 B/s TP bottleneck is invisible to the sender -> the fast pump sees an empty
+    // FIFO and blasts the whole window, overrunning the interface's TP transmit FIFO (drops, "deadline
+    // exceeded"). This models that FIFO: +1 per transmitted FTC frame, drained at the current send rate;
+    // ftcTxQueueSize() then paces on FTC_TX_HIGH/LOW exactly as on the device.
     double g_vfifoFrames = 0.0;
     uint32_t g_vfifoLastMs = 0;
-    constexpr double VFIFO_DRAIN_FPS = 1.4; // ~343 B/s at 245 B/chunk (just under the measured safe rate)
+    double g_vfifoFrameBytes = 245.0; // bytes of the last transmitted frame -> the Bps rate maps to a frames/s drain
+
+    // Delivery-rate (BBR-style) send pacing -- NOT a fixed ceiling. The FTC report gives the MEASURED delivered
+    // rate each window (bytes the target confirmed / elapsed): a clean window probes higher, a lossy window
+    // snaps the rate to the measured wire ceiling (no guessing), a report-timeout kick backs off. So the link,
+    // via what it actually delivers, sets the rate -- it finds the top, holds just under it, and self-recovers
+    // from a kick. Byte-based, since APDU auto-framing makes frame sizes vary. VFIFO_* are control gains.
+    double g_vfifoDrainBps = 450.0;          // launch (safe); the delivery-rate loop takes over immediately
+    constexpr double VFIFO_RATE_MIN = 120.0; // floor so a burst of losses cannot stall the transfer entirely
+    constexpr double VFIFO_PROBE = 1.12;     // clean window -> probe the send rate up this much
+    constexpr double VFIFO_MARGIN = 0.95;    // on loss, pace to 95% of the measured wire rate (small headroom)
+    constexpr double VFIFO_KICK = 0.8;       // report-timeout kick -> multiplicative back-off (no sample)
 
     void vfifoDrain()
     {
@@ -308,39 +328,42 @@ namespace
             g_vfifoLastMs = now;
             return;
         }
-        g_vfifoFrames -= (double)(now - g_vfifoLastMs) * (VFIFO_DRAIN_FPS / 1000.0);
+        const double fps = g_vfifoDrainBps / (g_vfifoFrameBytes > 8.0 ? g_vfifoFrameBytes : 8.0);
+        g_vfifoFrames -= (double)(now - g_vfifoLastMs) * (fps / 1000.0);
         g_vfifoLastMs = now;
         if (g_vfifoFrames < 0.0) g_vfifoFrames = 0.0;
     }
 
-    // Put ONE queued cEMI on the wire, but only when the tunnel is idle. KNXnet/IP tunneling is strictly
-    // 1-outstanding: the client must wait for the TUNNELING_ACK of the previous frame before sending the next.
-    // The fast/forget pump blasts a whole window from loop(); without this the interface drops the excess.
+    // Put ONE queued cEMI on the wire, but only when the single in-flight slot is free. KNXnet/IP tunnelling is
+    // strictly 1-outstanding: we must wait for the previous frame's TUNNELING_ACK before sending the next. The
+    // fast/forget pump enqueues a whole window from loop(); this releases exactly one frame each time the slot
+    // frees (on ACK or retransmit exhaustion), so the interface never sees more than one unacked request.
     void drainTxQueue()
     {
-        if (s.txOutstanding != 0 || s.txQueue.empty()) return; // previous frame not yet ACKed -> wait
+        if (s.txInflightBusy) return; // slot occupied -> wait for its ACK (strict 1-outstanding)
+
+        // Drop any oversize frame that cannot fit the send buffer (a guard; FTC APDUs never reach this size).
+        while (!s.txQueue.empty() && (uint16_t)(4 + s.txQueue.front().size()) > RX_BUF)
+            s.txQueue.pop_front();
+        if (s.txQueue.empty()) return;
+
         std::vector<uint8_t>& cemi = s.txQueue.front();
         uint8_t body[RX_BUF];
-        if ((uint16_t)(4 + cemi.size()) > sizeof(body))
-        {
-            s.txQueue.pop_front();
-            return;
-        }               // oversize guard
         body[0] = 0x04; // connection header length
         body[1] = s.channelId;
         body[2] = s.txSeq;
         body[3] = 0x00;
         memcpy(&body[4], cemi.data(), cemi.size());
         const uint16_t flen = (uint16_t)(4 + cemi.size());
-        if (!sendKnxIp(ST_TUNNELING_REQUEST, body, flen)) return; // socket busy -> retry next pump
+        if (!sendKnxIp(ST_TUNNELING_REQUEST, body, flen)) return; // socket busy -> keep it queued, retry next pump
+
         s.txSeq = (uint8_t)(s.txSeq + 1);
-        s.txOutstanding = 1;
-        s.txLastFrame.assign(body, body + flen); // keep for retransmit until ACKed (see pump())
-        s.txSentMs = nowMs();
-        s.txAckRetries = 0;
-        g_txActivity++; // completion-quiescence signal for the host CLI (commands with their own sub-state)
-        vfifoDrain();   // model the TP transmit FIFO for fast/forget flow control (see txQueueSize)
+        s.txInflight = {std::vector<uint8_t>(body, body + flen), nowMs(), 0}; // occupy the slot for ACK + retransmit
+        s.txInflightBusy = true;
+        g_txActivity++;                          // completion-quiescence signal for the host CLI (commands with their own sub-state)
+        vfifoDrain();                            // model the TP transmit FIFO for fast/forget flow control (see txQueueSize)
         g_vfifoFrames += 1.0;
+        g_vfifoFrameBytes = (double)cemi.size(); // this frame's size -> the adaptive Bps maps to the right fps
         s.txQueue.pop_front();
     }
 
@@ -666,16 +689,12 @@ void KnxIpTunnel::pump()
             }
             case ST_TUNNELING_ACK:
             {
-                // Only the ACK whose seq matches the outstanding frame frees the gate; a duplicate/stale
-                // ACK (e.g. for a frame we already retransmitted) is ignored so txOutstanding can never be
-                // over-decremented and release a later, still-unacked frame.
+                // Free the in-flight slot when the ACK's seq matches the frame we sent (its seq = body[2]). A
+                // duplicate/stale ACK, or one arriving after the slot is already free, finds no match and is
+                // ignored -- so the slot can never be freed twice or under a wrong seq.
                 const uint8_t ackSeq = (n >= KNXIP_HEADER_LEN + 3) ? buf[8] : 0;
-                if (s.txOutstanding > 0 && !s.txLastFrame.empty() && ackSeq == s.txLastFrame[2])
-                {
-                    s.txOutstanding--;
-                    s.txLastFrame.clear(); // ACKed -> stop retransmitting the outstanding frame
-                    s.txAckRetries = 0;
-                }
+                if (s.txInflightBusy && s.txInflight.body.size() > 2 && s.txInflight.body[2] == ackSeq)
+                    s.txInflightBusy = false;
                 break;
             }
             case ST_CONNECTIONSTATE_RESPONSE:
@@ -697,24 +716,19 @@ void KnxIpTunnel::pump()
         }
     }
 
-    // TUNNELING_ACK retransmit: a lost/late ACK must not wedge the 1-outstanding TX gate forever. If the
-    // outstanding frame is still unacked past the deadline, resend it verbatim (same seq -> the server
-    // dedups a frame it already processed); after the retry budget is spent, free the gate so the FTC
-    // layer's own retry/abort can act instead of the transfer hanging while the connection stays alive.
-    if (_connected && s.txOutstanding != 0 && !s.txLastFrame.empty() && (uint32_t)(nowMs() - s.txSentMs) >= TX_ACK_TIMEOUT_MS)
+    // TUNNELING_ACK retransmit: a lost/late ACK must not wedge the in-flight slot forever. Once the frame is past
+    // its ACK deadline, resend it verbatim (same seq -> the server dedups a frame it already processed); after the
+    // retry budget is spent, free the slot so the FTC layer's own retry/abort can act instead of hanging.
+    if (_connected && s.txInflightBusy && (uint32_t)(nowMs() - s.txInflight.sentMs) >= TX_ACK_TIMEOUT_MS)
     {
-        if (s.txAckRetries < TX_ACK_MAX_RETRIES)
+        if (s.txInflight.retries < TX_ACK_MAX_RETRIES)
         {
-            sendKnxIp(ST_TUNNELING_REQUEST, s.txLastFrame.data(), (uint16_t)s.txLastFrame.size());
-            s.txSentMs = nowMs();
-            s.txAckRetries++;
+            sendKnxIp(ST_TUNNELING_REQUEST, s.txInflight.body.data(), (uint16_t)s.txInflight.body.size());
+            s.txInflight.sentMs = nowMs();
+            s.txInflight.retries++;
         }
         else
-        {
-            s.txOutstanding = 0;
-            s.txLastFrame.clear();
-            s.txAckRetries = 0;
-        }
+            s.txInflightBusy = false; // budget spent -> free the slot for the FTC-layer retry
     }
 
     // A TUNNELING_ACK this pass may have freed the 1-outstanding slot -> push the next queued frame.
@@ -730,7 +744,8 @@ void KnxIpTunnel::pump()
 static bool txApdu(KnxIpTunnel* self, uint16_t da, uint8_t* apdu, uint8_t apduLen, bool ackReq)
 {
     if (!self->connected() || s.sock == SOCK_INVALID) return false;
-    if (s.txOutstanding >= TX_MAX_OUTSTANDING) return false;
+    // Backpressure is the txQueue cap in sendTunnel() (below); it returns false when the queue is full and that
+    // propagates up through here. No separate in-flight cap is needed -- the transport is strictly 1-outstanding.
 
     uint8_t cemi[RX_BUF];
     if (s.coConnected && da == s.coPa)
@@ -835,10 +850,28 @@ uint16_t KnxIpTunnel::txQueueSize() const
     // Report the HIGHER of the real unacked-tunnel count and the modeled TP-FIFO depth, so the fast/forget
     // pump paces to the TP bottleneck the tunnel would otherwise hide (see g_vfifoFrames).
     vfifoDrain();
-    uint16_t vq = (uint16_t)(g_vfifoFrames + 0.5);                      // modeled TP-FIFO depth
-    uint16_t inflight = (uint16_t)(s.txQueue.size() + s.txOutstanding); // frames queued / unacked at the tunnel
+    uint16_t vq = (uint16_t)(g_vfifoFrames + 0.5);                                   // modeled TP-FIFO depth
+    uint16_t inflight = (uint16_t)(s.txQueue.size() + (s.txInflightBusy ? 1 : 0));   // frames queued + the one unacked at the tunnel
     uint16_t hi = (inflight > vq) ? inflight : vq;
     return hi;
+}
+
+void KnxIpTunnel::pacingRate(uint32_t deliveredBps, bool clean)
+{
+    // BBR-style control on the send rate from the FTC report (ground truth of what the target received): the
+    // three branches below probe up / snap to the measured ceiling / back off. Finds the wire ceiling and holds
+    // just under it, and self-recovers from a kick. Only fast mode drives this; classic is self-clocked.
+    if (!clean && deliveredBps == 0)
+        g_vfifoDrainBps *= VFIFO_KICK;                 // kick: no delivery sample -> ease off
+    else if (clean)
+        g_vfifoDrainBps *= VFIFO_PROBE;                // link kept up -> probe higher (find the ceiling)
+    else
+        g_vfifoDrainBps = (double)deliveredBps * VFIFO_MARGIN; // overshot -> snap to the measured wire ceiling
+    if (g_vfifoDrainBps < VFIFO_RATE_MIN) g_vfifoDrainBps = VFIFO_RATE_MIN;
+    // Runaway guard: if the bottleneck is LATENCY not rate (delivered plateaus while clean), the probe would
+    // climb forever harmlessly (the pacer just never binds). Cap it so it stays a sane multiple of what the
+    // link actually delivers -- there is no point pacing far above the measured ceiling.
+    if (deliveredBps > 0 && g_vfifoDrainBps > 2.0 * deliveredBps) g_vfifoDrainBps = 2.0 * deliveredBps;
 }
 
 KnxIpTunnel g_knxTunnel;
