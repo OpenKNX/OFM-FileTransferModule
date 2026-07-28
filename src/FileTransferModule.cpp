@@ -1113,6 +1113,7 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
 // !configured, this keeps the enum sane for any direct reader).
 uint8_t FileTransferModule::secStage()
 {
+    if (_secStageOvr >= 0) return (uint8_t)_secStageOvr; // TEST override (local console); reboot restores ETS
     return knx.configured() ? ParamFTM_Security : FTM_SEC_ALWAYS;
 }
 
@@ -1120,6 +1121,7 @@ uint8_t FileTransferModule::secStage()
 // without a reboot; clamped so an out-of-range / erased value can never mean "never" or "instant".
 uint32_t FileTransferModule::secWindowMs()
 {
+    if (_secWinOvrS) return _secWinOvrS * 1000; // TEST override (unclamped, local console)
     uint32_t s = ParamFTM_AuthTimeout;
     if (s < SEC_WINDOW_MIN) s = SEC_WINDOW_MIN;
     if (s > SEC_WINDOW_MAX) s = SEC_WINDOW_MAX;
@@ -1167,6 +1169,70 @@ bool FileTransferModule::secIsWriteCommand(uint8_t propertyId)
         default:
             return false;
     }
+}
+
+// Local serial-console test hooks: flip the access stage / set a known test password / shorten the idle
+// window at RUNTIME so all four modes + login can be exercised without an ETS download (which reboots and
+// kills sessions). Never persisted -> a reboot restores the ETS config. Every override change drops any open
+// auth window (_authorized=false) so the next action re-evaluates cleanly.
+bool FileTransferModule::processCommand(const std::string cmd, bool diagnoseKo)
+{
+    if (diagnoseKo) return false;
+
+    if (cmd == "ftm" || cmd == "ftm sec") // status
+    {
+        static const char* const names[] = {"OFF (locked)", "PROG-only", "ALWAYS (open)", "PW (password)"};
+        logInfoP("stage: %s [%s]", names[secStage() & 3], (_secStageOvr >= 0) ? "override" : "ETS");
+        logInfoP("idle window: %u s [%s]", (unsigned)(secWindowMs() / 1000), _secWinOvrS ? "override" : "ETS");
+        logInfoP("authorized now: %s | test-pw: %s", secWriteAllowed() ? "yes" : "no", _secPwOvrSet ? "set" : "off");
+        return true;
+    }
+    if (cmd.rfind("ftm sec ", 0) == 0)
+    {
+        const std::string a = cmd.substr(8);
+        if (a == "ets") _secStageOvr = -1;
+        else if (a == "off") _secStageOvr = FTM_SEC_OFF;
+        else if (a == "prog") _secStageOvr = FTM_SEC_PROG;
+        else if (a == "always") _secStageOvr = FTM_SEC_ALWAYS;
+        else if (a == "pw") _secStageOvr = FTM_SEC_PW;
+        else { logInfoP("usage: ftm sec off|prog|always|pw|ets"); return true; }
+        _authorized = false;
+        logInfoP("stage override -> %s", a.c_str());
+        return true;
+    }
+    if (cmd == "ftm pw") // clear the test password -> ETS password active again
+    {
+        _secPwOvrSet = false;
+        _authorized = false;
+        logInfoP("test password cleared (ETS password active)");
+        return true;
+    }
+    if (cmd.rfind("ftm pw ", 0) == 0)
+    {
+        const std::string p = cmd.substr(7);
+        if (p.length() > 16) { logInfoP("test password: max 16 chars"); return true; }
+        memset(_secPwOvr, 0, sizeof(_secPwOvr));
+        memcpy(_secPwOvr, p.c_str(), p.length()); // null-padded 16 == the AES key (same pad16 as ETS)
+        _secPwOvrSet = true;
+        _authorized = false;
+        logInfoP("test password set (%u chars) -- log in with it now", (unsigned)p.length());
+        return true;
+    }
+    if (cmd.rfind("ftm secwin ", 0) == 0)
+    {
+        _secWinOvrS = (uint32_t)atoi(cmd.substr(11).c_str());
+        logInfoP("idle window override -> %u s%s", (unsigned)_secWinOvrS, _secWinOvrS ? "" : " (cleared, ETS active)");
+        return true;
+    }
+    return false;
+}
+
+void FileTransferModule::showHelp()
+{
+    openknx.console.printHelpLine("ftm, ftm sec", "FTC: show the access stage / auth state (TEST overrides)");
+    openknx.console.printHelpLine("ftm sec <mode>", "FTC: override stage off|prog|always|pw|ets (reboot restores ETS)");
+    openknx.console.printHelpLine("ftm pw <password>", "FTC: set a runtime TEST password (empty arg = clear)");
+    openknx.console.printHelpLine("ftm secwin <seconds>", "FTC: override the auth idle window (0 = clear)");
 }
 
 // One-block seeded AES CTR: monotonic counter guarantees single-use, AES under a seed the bus observer never
@@ -1225,8 +1291,10 @@ void FileTransferModule::cmdAuthResponse(uint8_t length, uint8_t *data, uint8_t 
 {
     resultLength = 1;
     // pad16: the ETS TypeText password is stored null-padded to 16 bytes == the AES key (no KDF). Read live.
+    // A runtime test-password override ("ftm pw", local console) wins over the ETS key when set.
     uint8_t pwKey[16];
-    memcpy(pwKey, ParamFTM_Password, 16);
+    if (_secPwOvrSet) memcpy(pwKey, _secPwOvr, 16);
+    else memcpy(pwKey, ParamFTM_Password, 16);
     const bool pwEmpty = (pwKey[0] == 0);
     // Already under back-off: reject at once and report the REMAINING wait (so the client can say "next try in
     // N min"). An attempt during the window neither extends it nor counts as a new guess. (Brute-force throttle.)

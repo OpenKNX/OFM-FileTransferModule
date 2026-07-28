@@ -11,6 +11,10 @@ class FileTransferModule : public OpenKNX::Module
   public:
     const std::string name() override;
     const std::string version() override;
+#ifdef OPENKNX_FTC_SECURITY
+    bool processCommand(const std::string cmd, bool diagnoseKo) override; // "ftm sec/pw/secwin" test overrides
+    void showHelp() override;
+#endif
     const uint8_t _major = MODULE_FileTransferModule_Version_Major; // also update library.json
     const uint8_t _minor = MODULE_FileTransferModule_Version_Minor;
     const uint8_t _revision = MODULE_FileTransferModule_Version_Revision;
@@ -96,6 +100,13 @@ class FileTransferModule : public OpenKNX::Module
     // client report "next try in N min". Old clients read only byte 0 (backward-compatible). len set to 3.
     inline void secAuthFail(uint8_t *res, uint8_t &len, uint32_t sec)
     { if (sec > 0xFFFF) sec = 0xFFFF; res[0] = ST_AUTH_FAILED; res[1] = (uint8_t)(sec >> 8); res[2] = (uint8_t)sec; len = 3; }
+    // TEST/diagnostic runtime overrides of the ETS security config, set via the local serial console
+    // ("ftm sec/pw/secwin"). Never persisted -> a reboot restores the ETS config. Let a tester flip all four
+    // stages + a known password + a short idle window without an ETS download (which would reboot the device).
+    int8_t _secStageOvr = -1;    // -1 = none (ETS param wins); else an FTM_SEC_* value
+    uint32_t _secWinOvrS = 0;    // 0 = none; else idle-window seconds (bypasses the [30,3600] clamp for testing)
+    uint8_t _secPwOvr[16] = {};  // runtime test key (null-padded password == AES key), used iff _secPwOvrSet
+    bool _secPwOvrSet = false;
 #endif
 
     bool processFunctionProperty(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;
