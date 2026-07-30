@@ -17,10 +17,10 @@
               <!-- Display order open->locked; Values stay firmware-mapped (0=OFF,1=PROG,2=ALWAYS,3=PW). -->
               <ParameterType Id="%AID%_PT-FtmSecurity" Name="FtmSecurity">
                 <TypeRestriction Base="Value" SizeInBit="8">
-                  <Enumeration Text="Immer erlaubt"  Value="2" Id="%ENID%" />
-                  <Enumeration Text="Mit Passwort"   Value="3" Id="%ENID%" />
-                  <Enumeration Text="Im Prog-Modus"   Value="1" Id="%ENID%" />
-                  <Enumeration Text="Gesperrt"       Value="0" Id="%ENID%" />
+                  <Enumeration Text="Immer erlaubt" Value="2" Id="%ENID%" />
+                  <Enumeration Text="Mit Passwort"  Value="3" Id="%ENID%" />
+                  <Enumeration Text="Im Prog-Modus" Value="1" Id="%ENID%" />
+                  <Enumeration Text="Ausgeschaltet" Value="0" Id="%ENID%" />
                 </TypeRestriction>
               </ParameterType>
               <!-- Access password, max 16 characters == the 16-byte AES key directly (no KDF). Only shown in
