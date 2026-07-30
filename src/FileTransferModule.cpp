@@ -777,19 +777,72 @@ void FileTransferModule::cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_
     logInfoP("Filesystem: total %u B, used %u B, free %u B", (unsigned)total, (unsigned)used, (unsigned)(total >= used ? total - used : 0));
 }
 
+// Server-side directory-listing backend registry (default: none -> LittleFS only, unchanged behaviour).
+FileTransferModule::DirBackend FileTransferModule::_dirBackends[2];
+uint8_t FileTransferModule::_dirBackendN = 0;
+
+void FileTransferModule::registerDirBackend(const char *prefix, FtcDirOpen open, FtcDirNext next, FtcDirClose close)
+{
+    if (_dirBackendN >= 2 || prefix == nullptr || prefix[0] == '\0') return;
+    _dirBackends[_dirBackendN] = {prefix, open, next, close};
+    _dirBackendN++;
+}
+
 void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
 
     if (!_dirOpen)
     {
-        logDebugP("List directory \"%s\"", (char *)data);
-        _dir = LittleFS.open((char *)data, "r");
+        const char *path = (char *)data;
+        logDebugP("List directory \"%s\"", path);
+        // Resolve a registered prefix backend ("sd/…", "efc/…"); else the LittleFS default (unchanged).
+        if (_activeDirBe && _activeDirBe->close) _activeDirBe->close(); // close any stale iteration first
+        _activeDirBe = nullptr;
+        for (uint8_t i = 0; i < _dirBackendN; i++)
+        {
+            const char *p = _dirBackends[i].prefix;
+            const size_t L = strlen(p);
+            if (strncmp(path, p, L) == 0 && path[L] == '/') // "sd/x" -> backend "sd", stripped "/x"
+            {
+                _activeDirBe = &_dirBackends[i];
+                if (_activeDirBe->open) _activeDirBe->open(path + L);
+                break;
+            }
+        }
+        if (_activeDirBe == nullptr) _dir = LittleFS.open(path, "r");
         _dirOpen = true;
     }
 
     if (!checkOpenedDir(resultData, resultLength)) return;
 
+    // --- backend-served root (SD / ExtFlash): one entry per round-trip via the registered iterator ---
+    if (_activeDirBe != nullptr)
+    {
+        char name[64];
+        name[0] = '\0';
+        const uint8_t type = _activeDirBe->next ? _activeDirBe->next(name, sizeof(name)) : 0;
+        if (type == 0)
+        {
+            resultLength = 2;
+            pushByte(0x0, resultData);
+            pushByte(0x0, resultData + 1);
+            logDebugP("List directory completed");
+            if (_activeDirBe->close) _activeDirBe->close();
+            _activeDirBe = nullptr;
+            _dirOpen = false;
+            return;
+        }
+        name[sizeof(name) - 1] = '\0';
+        pushByte(0x0, resultData);
+        pushByte(type, resultData + 1); // 1 = file, 2 = dir
+        const uint16_t nlen = (uint16_t)strlen(name);
+        memcpy(resultData + 2, name, nlen);
+        resultLength = (uint8_t)(nlen + 2);
+        return;
+    }
+
+    // --- LittleFS default (unchanged) ---
     File subDirectory = _dir.openNextFile();
     if (!subDirectory)
     {

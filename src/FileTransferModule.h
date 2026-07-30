@@ -6,6 +6,15 @@
 
 #define HEARTBEAT_INTERVAL 30000
 
+// A directory-listing backend for a non-LittleFS root ("sd/", "efc/"). The storage module registers one
+// (e.g. SDCardModule, SdFat-based), so the server can list/df those roots on a remote `ll`/`df` — LittleFS
+// stays the default (no backend registered -> unchanged behaviour). Stateful iterator: open() begins the
+// listing of `path` (the prefix already stripped, e.g. "/"), next() yields ONE entry (0 = end, 1 = file,
+// 2 = dir; the name is written to nameOut, NUL-terminated), close() ends the iteration.
+typedef bool (*FtcDirOpen)(const char *path);
+typedef uint8_t (*FtcDirNext)(char *nameOut, uint16_t nameCap);
+typedef void (*FtcDirClose)();
+
 class FileTransferModule : public OpenKNX::Module
 {
   public:
@@ -20,7 +29,22 @@ class FileTransferModule : public OpenKNX::Module
     const uint8_t _revision = MODULE_FileTransferModule_Version_Revision;
     void loop(bool configured) override;
 
+    // Register a directory-listing backend for a path prefix (e.g. "sd"). Bounded to 2 (sd + efc).
+    // Backward-compatible: with none registered, remote listing stays LittleFS-only.
+    static void registerDirBackend(const char *prefix, FtcDirOpen open, FtcDirNext next, FtcDirClose close);
+
   private:
+    struct DirBackend
+    {
+        const char *prefix = nullptr;
+        FtcDirOpen open = nullptr;
+        FtcDirNext next = nullptr;
+        FtcDirClose close = nullptr;
+    };
+    static DirBackend _dirBackends[2];
+    static uint8_t _dirBackendN;
+    DirBackend *_activeDirBe = nullptr; // non-null while iterating a backend dir (instead of the LittleFS _dir)
+
     uint32_t _rebootRequested = 0;
     uint32_t _heartbeat = 0;
     uint32_t _lastAccess = 0;
