@@ -1123,8 +1123,6 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
     pushInt(filesize, resultData + 1);
     pushInt(crc, resultData + 5);
     resultLength = 9;
-
-    // logHexDebugP(resultData, resultLength);
 }
 
 /**
@@ -1613,7 +1611,7 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
     result |= 0x2; // Update
 #endif
-    result |= 0x4; // FAST: server understands cmd44/cmd45; one bit covers both windowed & forget.
+    result |= 0x4; // FAST: server understands cmd44/cmd45 (windowed fast upload).
 #ifdef OPENKNX_FTC_CONSOLE
     result |= 0x8; // Console: obj-160 console tunnel available (ftc <pa> console)
 #endif

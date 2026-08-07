@@ -262,12 +262,11 @@ static void renderUiDemo()
     std::printf("  %s  %s  %s  %s  %s\n", t.chip("OpenKNX").c_str(), t.chip("TUNNEL", 'c').c_str(),
                 t.chip("FAST", 'a').c_str(), t.chip("PROG", 'o').c_str(), t.chip("ROUTING (!)", 'r').c_str());
 
-    // T5 — block gauges, incl. the per-transfer-mode fill colours (mock: safe green · fast cyan · forget amber).
+    // T5 — block gauges, incl. the per-transfer-mode fill colours (mock: safe green · fast cyan).
     t.section("«bar» · bar()  — block gauge  (df usage · transfer-mode colours)");
     std::printf("  %s  %s\n", t.bar(0.62).c_str(), c.dim("62 %  · flash 1.24 / 2.00 MB").c_str());
     std::printf("  %s %s  %s\n", t.chip("safe", 'g').c_str(), t.bar(0.62, 20, 'g').c_str(), c.dim("CRC per chunk · reliable").c_str());
     std::printf("  %s %s  %s\n", t.chip("fast", 'c').c_str(), t.bar(0.62, 20, 'c').c_str(), c.dim("windowed · paced").c_str());
-    std::printf("  %s %s  %s\n", t.chip("forget", 'a').c_str(), t.bar(0.62, 20, 'a').c_str(), c.dim("blind · fastest · may drop under load").c_str());
 
     // T6 — a follow-up note / hint.
     t.section("«note» · note()  — follow-up hint");
@@ -287,7 +286,7 @@ static void renderUiDemo()
     // barStyle: 'b' block · 'l' line · 'p' pill    sparkStyle: 'b' bars · 'd' dots · 'l' line — one combo per row.
     auto animate = [&](char dir, const std::string& file, double totalMB, const std::string& mode,
                        char barStyle, char sparkStyle) {
-        const char col = ftc::Tpl::modeColor(mode);                      // safe=g · fast=c · forget=a
+        const char col = ftc::Tpl::modeColor(mode);                      // safe=g · fast=c
         const std::string label = t.chip(mode, col) + " " + c.txt(file); // mode chip + filename (caller-coloured)
         std::vector<double> win;                                         // rolling window feeding the live inline sparkline
         std::vector<double> hist;                                        // the FULL run history -> the wide recap graph at the end
@@ -309,21 +308,18 @@ static void renderUiDemo()
         }
         // The 99,99 % hold: last chunk is on the wire, awaiting the CRC/confirm. Bar is full, % stays 99,99.
         char det[80];
-        std::snprintf(det, sizeof(det), "%.2f/%.2f MB · %s", totalMB, totalMB,
-                      mode == "forget" ? "flushed (no confirm)" : "finalising · CRC check");
+        std::snprintf(det, sizeof(det), "%.2f/%.2f MB · %s", totalMB, totalMB, "finalising · CRC check");
         t.progress(0.9999, false, dir, label, det, t.spark(win, 0, 0, sparkStyle), col, barStyle);
         if (tty) std::this_thread::sleep_for(std::chrono::milliseconds(650));
         // Confirmed -> 100 %.
         char okd[48];
-        std::snprintf(okd, sizeof(okd), "%.2f MB · %s", totalMB, mode == "forget" ? "sent (unverified)" : "verified");
+        std::snprintf(okd, sizeof(okd), "%.2f MB · %s", totalMB, "verified");
         t.progress(1.0, true, dir, label, okd, "", col, barStyle);
         // Recap: the whole run's throughput as a wide history graph (same spark style as the live line).
         t.graph("throughput", hist, 48, "KB/s", sparkStyle);
     };
     animate('^', "config.toml", 0.30, "safe", 'b', 'b');     // block bar · bars graph
-    animate('^', "firmware.bin.gz", 2.00, "fast", 'l', 'd'); // line bar  · dots graph
-    animate('v', "telemetry.log", 0.75, "forget", 'p', 'l'); // pill bar  · line graph
-    t.note("forget is blind (no ACK) — fastest, but chunks can drop under load; use safe/fast when integrity matters");
+    animate('v', "firmware.bin.gz", 2.00, "fast", 'l', 'd'); // line bar  · dots graph
 
     // T10 — the driveable Info-LED simulation (busmon RX blink + active-tunnel count), animated on a tty.
     t.section("«led» · led() · ledRow()  — Info-LED simulation  (busmon · tunnel count)");
@@ -1330,8 +1326,8 @@ static void usage()
                                                             "Host-Datei hochladen (Alias: upload) — mode: safe·fast · fast w<N> pint das Fenster"));
     U.cmdRow("<pa> get [sd/|efc/]<remote> [local]", L.tr("download a file (alias: download/receive)", "Datei herunterladen (Alias: download/receive)"));
     U.cmdRow("<pa> fwupdate <remote>", L.tr("flash an uploaded firmware -> reboots target", "hochgeladene Firmware flashen -> Ziel-Reboot"));
-    U.cmdRow("<pa> perf [kb] [pkg|auto] [mode] [sd|efc]", L.tr("throughput test — mode: safe·fast·forget · +nr/keep/verbose · fast w<N> pins the window · sd|efc = target drive",
-                                                             "Durchsatz-Test — mode: safe·fast·forget · +nr/keep/verbose · fast w<N> pint das Fenster · sd|efc = Ziel-Drive"));
+    U.cmdRow("<pa> perf [kb] [pkg|auto] [mode] [sd|efc]", L.tr("throughput test — mode: safe·fast · +nr/keep/verbose · fast w<N> pins the window · sd|efc = target drive",
+                                                             "Durchsatz-Test — mode: safe·fast · +nr/keep/verbose · fast w<N> pint das Fenster · sd|efc = Ziel-Drive"));
     U.cmdRow("<pa> rm | mkdir | rmdir | mv", L.tr("delete / create / remove / rename", "löschen / anlegen / entfernen / umbenennen"));
     U.cmdRow("<pa> format yes", L.tr("erase the WHOLE filesystem (gated)", "GANZES Dateisystem löschen (gesichert)"));
     U.cmdRow("gzip <in> <out>", L.tr("gzip a local file (RP firmware prep; in-process, no tunnel)", "lokale Datei gzip'en (RP-Firmware; in-process, kein Tunnel)"));
@@ -1342,8 +1338,8 @@ static void usage()
 
     U.section(L.tr("TRANSFER OPTIONS", "TRANSFER-OPTIONEN"), L.tr("(send; order-independent)", "(send; reihenfolgeunabhängig)"));
     U.cmdRow("pkg = <n> | auto", L.tr("APDU payload; auto = detected interface max", "APDU-Nutzlast; auto = erkannter Interface-Max"));
-    U.cmdRow("mode = safe | fast | forget", L.tr("CRC/chunk · windowed (AIMD) · blind end-CRC · fast w<N> = fixed window",
-                                                 "CRC/Chunk · Fenster (AIMD) · blind End-CRC · fast w<N> = festes Fenster"));
+    U.cmdRow("mode = safe | fast", L.tr("CRC/chunk · windowed (AIMD) · fast w<N> = fixed window",
+                                        "CRC/Chunk · Fenster (AIMD) · fast w<N> = festes Fenster"));
     U.cmdRow("apply | on | yes", L.tr("also flash + reboot after upload", "nach Upload auch flashen + Reboot"));
     U.cmdRow("no-resume | nr | fresh", L.tr("ignore a partial; upload from zero", "Fragment ignorieren; von vorn hochladen"));
     U.cmdRow("verbose | v", L.tr("1 Hz progress line during the transfer", "1-Hz-Fortschrittszeile beim Transfer"));
@@ -1548,10 +1544,9 @@ static std::string kbStr(uint32_t bytes)
 }
 
 /**
- * @brief The three transfer modes, named for a UI.
+ * @brief The transfer modes, named for a UI.
  */
-static const char* xferModeName(uint8_t m) { return m == 1 ? "fast" : m == 2 ? "forget"
-                                                                             : "safe"; }
+static const char* xferModeName(uint8_t m) { return m == 1 ? "fast" : "safe"; }
 
 /**
  * @brief The setup Panel (Source/Target/Size/Mode/Framing/Options) — drawn once when transferSetup() is valid.
@@ -1578,11 +1573,9 @@ static void renderXferSetup(const FtcTransferSetup& s)
     }
     if (s.kind != FtcXferKind::Download)
     {
-        const char* sem = s.mode == 1   ? L.tr("windowed · CRC per window (report)", "windowed · CRC pro Fenster (Report)")
-                          : s.mode == 2 ? L.tr("blind · CRC once at the end", "blind · CRC nur am Ende")
-                                        : L.tr("CRC per chunk · reliable", "CRC pro Chunk · zuverlässig");
-        const char mc = s.mode == 1 ? 'c' : s.mode == 2 ? 'a'
-                                                        : 'g';
+        const char* sem = s.mode == 1 ? L.tr("windowed · CRC per window (report)", "windowed · CRC pro Fenster (Report)")
+                                      : L.tr("CRC per chunk · reliable", "CRC pro Chunk · zuverlässig");
+        const char mc = s.mode == 1 ? 'c' : 'g';
         p.kv(L.tr("Mode", "Modus"), t.chip(xferModeName(s.mode), mc) + "  " + c.dim(sem));
     }
     if (s.chunkSize && s.chunks) // download learns size/chunks only after the open answer -> skip until known

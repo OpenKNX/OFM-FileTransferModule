@@ -229,7 +229,7 @@ struct TunnelState
     uint8_t txSeq = 0; // outgoing TUNNELING_REQUEST seq
     uint8_t rxSeq = 0; // last accepted inbound tunnel seq (server-driven)
     bool rxSeqValid = false;
-    std::deque<std::vector<uint8_t>> txQueue; // cEMI frames waiting to go out (fast/forget window)
+    std::deque<std::vector<uint8_t>> txQueue; // cEMI frames waiting to go out (fast window)
 
     // The SINGLE in-flight TUNNELING_REQUEST: sent, awaiting its TUNNELING_ACK. KNXnet/IP tunnelling is
     // strictly 1-outstanding (03_08_04 §2.6): the client must wait for each request's ACK before sending the
@@ -349,7 +349,7 @@ uint32_t g_txActivity = 0;
 uint32_t g_rxActivity = 0;
 uint32_t g_dropActivity = 0;
 
-// Virtual TP-FIFO (in frames) for fast/forget pacing. The KNXnet/IP tunnel ACKs every frame almost
+// Virtual TP-FIFO (in frames) for fast pacing. The KNXnet/IP tunnel ACKs every frame almost
 // instantly, so the real ~350 B/s TP bottleneck is invisible to the sender -> the fast pump sees an empty
 // FIFO and blasts the whole window, overrunning the interface's TP transmit FIFO (drops, "deadline
 // exceeded"). This models that FIFO: +1 per transmitted FTC frame, drained at the current send rate;
@@ -389,7 +389,7 @@ void vfifoDrain()
 /**
  * @brief Put ONE queued cEMI on the wire, but only when the single in-flight slot is free.
  * @details KNXnet/IP tunnelling is strictly 1-outstanding: we must wait for the previous frame's
- *          TUNNELING_ACK before sending the next. The fast/forget pump enqueues a whole window from
+ *          TUNNELING_ACK before sending the next. The fast pump enqueues a whole window from
  *          loop(); this releases exactly one frame each time the slot frees (on ACK or retransmit
  *          exhaustion), so the interface never sees more than one unacked request.
  */
@@ -419,7 +419,7 @@ void drainTxQueue()
     s.txInflight = {std::vector<uint8_t>(body, body + flen), nowMs(), 0}; // occupy the slot for ACK + retransmit
     s.txInflightBusy = true;
     g_txActivity++; // completion-quiescence signal for the host CLI (commands with their own sub-state)
-    vfifoDrain();   // model the TP transmit FIFO for fast/forget flow control (see txQueueSize)
+    vfifoDrain();   // model the TP transmit FIFO for fast flow control (see txQueueSize)
     g_vfifoFrames += 1.0;
     g_vfifoFrameBytes = (double)cemi.size(); // this frame's size -> the adaptive Bps maps to the right fps
     s.txQueue.pop_front();
@@ -427,7 +427,7 @@ void drainTxQueue()
 
 /**
  * @brief Enqueue a cEMI for tunneled transmission; drainTxQueue() sends it 1-outstanding.
- * @details Returns false only if the queue is full (backpressure to the fast/forget pump). Fires an
+ * @details Returns false only if the queue is full (backpressure to the fast pump). Fires an
  *          immediate drain so single frames (safe mode, control, T_ACK) go out with no added latency.
  */
 bool sendTunnel(const uint8_t* cemi, uint16_t cemiLen)
@@ -1041,7 +1041,7 @@ void KnxIpTunnel::scanDisconnect()
 /**
  * @brief Outstanding-frame count for the FTC flow control.
  * @details Reports the HIGHER of the real unacked-tunnel count and the modeled TP-FIFO depth, so the
- *          fast/forget pump paces to the TP bottleneck the tunnel would otherwise hide (see g_vfifoFrames).
+ *          fast pump paces to the TP bottleneck the tunnel would otherwise hide (see g_vfifoFrames).
  */
 uint16_t KnxIpTunnel::txQueueSize() const
 {

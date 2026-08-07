@@ -15,16 +15,14 @@
     #include <string.h>
 
 /**
- * @brief Transfer-mode keyword -> 0 safe/classic, 1 fast/windowed, 2 forget.
+ * @brief Transfer-mode keyword -> 0 safe/classic, 1 fast/windowed.
  *
- * Aliases: win/windowed -> fast, ff -> forget; anything unrecognised -> safe.
- * any unrecognised token -> safe.
+ * Aliases: win/windowed -> fast; any unrecognised token -> safe.
  */
 static uint8_t ftcParseModeWord(const char *t)
 {
     if (strcmp(t, "fast") == 0 || strcmp(t, "win") == 0 || strcmp(t, "windowed") == 0) return 1;
-    if (strcmp(t, "forget") == 0 || strcmp(t, "ff") == 0) return 2;
-    return 0; // "safe" and anything unrecognised
+    return 0;
 }
 
 /** @brief The categorized `ftc ?` help, built via the client's cooperative ftcOut queue (drained in loop()). */
@@ -106,7 +104,6 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(H, "%s", RULE);
 }
 
-/** @brief `ftc status` shown as text: progress %, throughput and last result. */
 void FileTransferClientConsole::showStatus()
 {
     static const char *const kPhase[] = {"idle", "ping", "list", "info", "delete",
@@ -114,7 +111,7 @@ void FileTransferClientConsole::showStatus()
     const FtcStatus &s = _client.status();
     auto &l = openknx.logger;
     l.logWithPrefixAndValues("FTC", "status: %s  target %u.%u.%u  \"%s\"", kPhase[(uint8_t)s.phase],
-                             (s.target >> 12) & 0x0F, (s.target >> 8) & 0x0F, s.target & 0xFF, s.path);
+                             FTC_PA_ARGS(s.target), s.path);
     if (s.total)
     {
         const uint16_t p = s.percentX100();
@@ -189,7 +186,6 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         return;
     }
 
-    // ftc scan area <a> yes i really know what i am doing
     if (strcmp(a1, "area") == 0)
     {
         unsigned ar = 0;
@@ -218,7 +214,6 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         return;
     }
 
-    // numeric: "a.l" (line) or "a.l.d" (single, or start of a <from> <to> range)
     unsigned a = 0, l = 0, d = 0;
     const int f = sscanf(a1, "%u.%u.%u", &a, &l, &d);
     if (f == 2 && a <= 15 && l <= 15)
@@ -253,7 +248,6 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
 /** @brief Parse/dispatch one `ftc ...` command; PA first (it changes less often than the cmd), `cancel`/`?` take no PA. */
 bool FileTransferClientConsole::processCommand(const std::string &cmd)
 {
-    // Only our own commands -- everything else falls through to the next module.
     if (cmd.compare(0, 4, "ftc ") != 0 && cmd != "ftc" && cmd != "ftc ?")
         return false;
 
@@ -266,7 +260,6 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     char paStr[24] = {0};
     char sub[16] = {0};
     char arg[80] = {0};
-    // Fixed 3 tokens; pkg/mode/flags for perf/send are parsed order-independently in their handlers below.
     const int argc = sscanf(cmd.c_str(), "ftc %23s %15s %79s", paStr, sub, arg);
 
     // "ftc" with nothing but whitespace after it (e.g. "ftc " or "ftc   ") -> full help, like `ftc ?`.
@@ -282,7 +275,6 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestCancel();
         return true;
     }
-    // "ftc status" / "ftc s" -- no PA, readable during a running transfer (bypasses the busy check).
     if (argc >= 1 && (strcmp(paStr, "status") == 0 || strcmp(paStr, "s") == 0))
     {
         showStatus();
@@ -355,7 +347,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         return true;
     }
 #endif
-    if (strcmp(sub, "led") == 0) // locate: drive the target's prog-mode LED (on|off|blink)
+    if (strcmp(sub, "led") == 0)
     {
         uint8_t m = strcmp(arg, "on") == 0 ? 1 : strcmp(arg, "blink") == 0 ? 2
                                                                            : 0;
@@ -378,12 +370,12 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestList(pa, argc >= 3 ? arg : "/", true);
         return true;
     }
-    if (strcmp(sub, "ls") == 0) // short list: names only
+    if (strcmp(sub, "ls") == 0)
     {
         _client.requestList(pa, argc >= 3 ? arg : "/", false);
         return true;
     }
-    if (strcmp(sub, "df") == 0) // filesystem: total / used / free + usage bar
+    if (strcmp(sub, "df") == 0)
     {
         _client.requestFsInfo(pa, argc >= 3 ? arg : ""); // "sd/" / "efc/" -> that provider; else LittleFS
         return true;
@@ -449,8 +441,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         if (strcmp(arg, "yes") != 0)
         {
             openknx.logger.logWithPrefix("FTC", "format erases ALL files and folders on the target's filesystem.");
-            openknx.logger.logWithPrefixAndValues("FTC", "confirm with:  ftc %u.%u.%u format yes", (pa >> 12) & 0x0F,
-                                                  (pa >> 8) & 0x0F, pa & 0xFF);
+            openknx.logger.logWithPrefixAndValues("FTC", "confirm with:  ftc %u.%u.%u format yes", FTC_PA_ARGS(pa));
             return true;
         }
         _client.requestFormat(pa);
@@ -488,9 +479,8 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         return true;
     }
 
-    if (strcmp(sub, "fwupdate") == 0 || strcmp(sub, "apply") == 0) // 'apply' = alias for fwupdate
+    if (strcmp(sub, "fwupdate") == 0 || strcmp(sub, "apply") == 0)
     {
-        // ftc <pa> fwupdate <remotepath> -- trigger the target to apply an already-uploaded firmware.
         if (argc < 3)
         {
             openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> fwupdate <remotepath>   e.g. ftc 5.0.3 fwupdate /fw.bin.gz");
@@ -539,7 +529,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             }
             else
             {
-                // Only a RECOGNISED mode word (fast/forget) or an explicit "safe" sets the mode -- otherwise a
+                // Only a RECOGNISED mode word (fast) or an explicit "safe" sets the mode -- otherwise a
                 // stray trailing token (previously "nr") would silently reset a just-parsed mode to 0 (=safe).
                 const uint8_t m = ftcParseModeWord(t[i]);
                 if (m != 0 || strcmp(t[i], "safe") == 0) mode = m;
@@ -559,7 +549,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     // ftc <pa> send|upload <src> [pkg] [mode] [flags]. src is mandatory (first token after sub); the
     // trailing tokens are order-tolerant: a number (or `auto`) is pkg, apply|on|yes / no|off|noapply
     // toggles the opt-in self-apply, no-resume|nr|fresh forces a fresh upload, verbose|v = 1 Hz progress,
-    // and anything else is the mode (safe|fast|forget).
+    // and anything else is the mode (safe|fast).
     char src[FTC_PATH_MAX] = {0}, t1[24] = {0}, t2[24] = {0}, t3[24] = {0}, t4[24] = {0}, t5[24] = {0};
     const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %23s %23s %23s %23s %23s", src, t1, t2, t3, t4, t5);
     if (nt < 1)
@@ -575,10 +565,10 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     unsigned fixedWnd = 0; // fast w<N>: pin the fast window (0 = adaptive AIMD)
     char target[32] = {0}; // explicit remote target ("sd/foo", "efc/foo", "/foo"); empty -> /<basename>
     const char *rest[5] = {t1, t2, t3, t4, t5};
-    for (int i = 0; i < nt - 1; i++) // tokens after src
+    for (int i = 0; i < nt - 1; i++)
     {
         const char *tk = rest[i];
-        if (strchr(tk, '/') != nullptr && target[0] == '\0') // a token with '/' is the remote path, not an option
+        if (strchr(tk, '/') != nullptr && target[0] == '\0')
         {
             strncpy(target, tk, sizeof(target) - 1);
             target[sizeof(target) - 1] = '\0';
@@ -599,7 +589,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             fixedWnd = (unsigned)atoi(tk + 1); // fast w<N>: pin the fast window (no AIMD probe-up; loss still ratchets down)
         else
         {
-            const uint8_t m = ftcParseModeWord(tk); // only a recognised mode word / explicit "safe" sets the mode
+            const uint8_t m = ftcParseModeWord(tk);
             if (m != 0 || strcmp(tk, "safe") == 0) mode = m;
         }
     }

@@ -180,8 +180,8 @@ class Tpl
 
     /**
      * @brief Paint a string in one of the named hues. 'g' green · 'c' cyan · 'a' amber · 'o' gold · 'r' red.
-     * @details The single hue selector the transfer-mode colours ride on (mock: safe=green, fast=cyan,
-     *          forget=amber) so bars, chips and labels of one mode all agree.
+     * @details The single hue selector the transfer-mode colours ride on (mock: safe=green, fast=cyan)
+     *          so bars, chips and labels of one mode all agree.
      */
     std::string paint(char color, const std::string& s) const
     {
@@ -196,12 +196,11 @@ class Tpl
     }
 
     /**
-     * @brief The fill hue for an FTC transfer mode name (mock palette). safe->g · fast->c · forget->a.
+     * @brief The fill hue for an FTC transfer mode name (mock palette). safe->g · fast->c.
      */
     static char modeColor(const std::string& mode)
     {
         if (mode == "fast") return 'c';
-        if (mode == "forget") return 'a';
         return 'g'; // safe / default
     }
 
@@ -242,7 +241,7 @@ class Tpl
      *          never a moment before. On `done` the line finalises with a green ✔ and a newline.
      *          dir: '^' upload (green ↑) · 'v' download (cyan ↓) · 0 none. detail/spark are pre-built by the
      *          caller. On a non-tty sink nothing is drawn per frame (no \r spam); only the final `done` line is
-     *          emitted. `color` sets the fill hue = the transfer mode (safe=g · fast=c · forget=a). `label` is
+     *          emitted. `color` sets the fill hue = the transfer mode (safe=g · fast=c). `label` is
      *          used verbatim, so the caller colours it (e.g. a mode chip + filename). `barStyle` picks the bar
      *          glyphs like bar(): 'b' block · 'l' line · 'p' pill.
      */
