@@ -59,6 +59,10 @@ struct FtcFileSink
     bool (*open)(const char *path);                 // create/truncate; false on failure
     int (*write)(const uint8_t *buf, uint16_t len); // append; bytes written, or -1 on error
     void (*close)();
+    // Resume-open (download resume): truncate `path` to exactly keepBytes (a whole-chunk boundary) and
+    // position for append; returns keepBytes on success, <0 on failure. Subsequent writes use `write`
+    // (append). A provider that cannot resume leaves this nullptr -> resume is not offered (fresh fallback).
+    int32_t (*resumeOpen)(const char *path, uint32_t keepBytes) = nullptr;
 };
 
 // A named local-storage backend. The client resolves a local path's prefix (e.g. "sd/x", "efc/x", or
@@ -269,7 +273,7 @@ class FileTransferClient : public OpenKNX::Module
     // (fwupdate -> reboot). Forced false for the perf/test sources so /ftctest.bin is never flashed.
     void requestUpload(uint16_t pa, const char *src, unsigned pkg, bool noResume, uint8_t mode = 0, bool apply = false, const char *target = "", uint16_t fixedWnd = 0);
     void requestPerf(uint16_t pa, uint32_t sizeBytes, unsigned pkg, uint8_t mode = 0, bool keep = false, uint16_t fixedWnd = 0, const char *drive = ""); // upload a test pattern, report B/s (keep = leave it as /ftcperf_<crc>.bin; fixedWnd>0 pins the fast window)
-    void requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg = 0);    // pull to a local backend; pkg 0 = default chunk size
+    void requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg = 0, bool noResume = false); // pull to a local backend; pkg 0 = default chunk size; noResume forces a fresh (truncating) download
     // `ftc <pa> fwupdate <remote>`: trigger the target to apply an already-uploaded firmware (reboots it).
     // FileInfo existence pre-check first, so a mistyped path cannot reboot a live coupler.
     void requestFwUpdate(uint16_t pa, const char *remotePath);
@@ -366,6 +370,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcGaPtr,            // group comm (BCU1): A_Memory_Read of the 1-byte table pointer (0x0111/0x0112) -> table at 0x100 + pointer
         FtcGaMem,            // group comm: A_Memory_Read walking the current table's blob
         FtcDownloadOpen,
+        FtcDownloadCrcPrefix, // download resume: cooperatively CRC the on-disk prefix [0,keepBytes) before appending
         FtcDownloadChunk,    // download: FileDownload chunk sent, waiting for the data + CRC16
         FtcDownloadVerify,   // download: FileInfo(43) sent after the last chunk -- compare target CRC32 vs the received-stream CRC32
         FtcPerfCleanup,
@@ -416,6 +421,7 @@ class FileTransferClient : public OpenKNX::Module
     void ftcSetFixedWindow(uint16_t fixedWnd); // perf/upload `w<N>`: pin the fast window, clamped to [MIN,MAX] (0 = adaptive AIMD)
     bool ftcResolvePkg(unsigned &pkg);         // resolve pkg auto/apduHint + range-check; false (logged) if out of range
     void ftcResetTransferJob(unsigned pkg, uint8_t mode); // clear the per-request transfer state + set payload size/base
+    void ftcArmHardDeadline(uint32_t size);              // arm the size-scaled whole-transfer wedge backstop at up/download start
 
     // --- fast-transfer negotiation (phase 1): capability probe + classic fallback ---------------
     // Read the TP transmit FIFO depth via the bau -- the fast-transfer pump's flow control (send while
@@ -498,7 +504,9 @@ class FileTransferClient : public OpenKNX::Module
     // Block-synchronous windows: stream [base,wndEnd), report, resend gaps, advance. _ftcWnd (AIMD) sizes
     // the NEXT window; _ftcWndEnd freezes the CURRENT high edge so halving on loss can't orphan tail seqs.
     static constexpr uint16_t FTC_BMP_BYTES = 1024; // = FTM_FAST_MAX_CHUNKS/8; mirror of the server bitmap
-    uint16_t _ftcWnd = 8;                           // AIMD window size (grows +8 clean, halves on loss), bounded [MIN,MAX]
+    uint16_t _ftcWnd = 16;                          // AUTO window: +8 climb from 16 until the first loss LOCKS it at the last clean size (Discover&Lock); bounded [MIN,MAX]
+    bool _ftcWndLocked = false;                     // set on the first lossy window -> _ftcWnd never probes up again (stable, no edge oscillation)
+    uint16_t _ftcWndClean = 16;                     // last window proven clean (0 loss) -> the lock target when the next x2 probe overruns
     uint16_t _ftcWndFix = 0;                        // fast: fixed window (0 = adaptive AIMD). >0 pins the ceiling: NO grow (no
                                                     // "feel-its-way-up" that floods at the end); loss still ratchets it down one
                                                     // step and it STAYS there. Set per-request (perf `w<N>`); 0 for uploads.
@@ -515,17 +523,19 @@ class FileTransferClient : public OpenKNX::Module
     uint32_t _ftcRepWaitStart = 0;                  // [dbg] millis() of the first query of the current report round (retry re-sends keep it) -> per-window answer latency
     uint8_t _ftcReportNonce = 0;                    // bumped on every report send; the answer must echo it (staleness)
     uint32_t _ftcDeadline = 0;
+    uint32_t _ftcHardDeadline = 0;                  // absolute wall-clock wedge backstop for the whole transfer (0 = unarmed). Armed per attempt at up/download start, cleared at ftcFinish + retry-arm -> only ever fires inside a transfer
     uint32_t _ftcInfoDeadline = 0;                  // patience window for the pre-transfer FileInfo on a busy target
     uint8_t _ftcInfoLen = 0;                         // FileInfo(43) payload length -- kept so a congested send can be re-tried
     uint8_t _ftcTransferRetries = 0;                // whole-transfer auto-retries spent (bounded by _cfgTransferRetries); reset only on a fresh request
     bool _ftcRetryPending = false;                  // a transient upload abort armed a resume-retry -> FtcCancel re-runs the transfer after a backoff
     // Retry tuning -- runtime-settable via `ftc retry <max|transfer|backoff> [value]` (defaults below).
     static constexpr uint8_t FTC_MAX_RETRIES_DEF = 3;          // per-chunk retries (CRC/timeout) before that chunk fails
-    static constexpr uint8_t FTC_TRANSFER_RETRIES_DEF = 8;     // whole-transfer auto-retries (transient abort -> resume)
+    static constexpr uint8_t FTC_TRANSFER_RETRIES_DEF = 3;     // auto-resume attempts (transient abort -> re-trigger the action + resume); runtime-settable via `ftc retry transfer <n>`
     static constexpr uint32_t FTC_RETRY_BACKOFF_MS_DEF = 3000; // ms between transfer retries (let a busy/rebooting target settle)
     uint8_t _cfgMaxRetries = FTC_MAX_RETRIES_DEF;
     uint8_t _cfgTransferRetries = FTC_TRANSFER_RETRIES_DEF;
     uint32_t _cfgBackoffMs = FTC_RETRY_BACKOFF_MS_DEF;
+    bool _cfgAutoResume = true;                     // master on/off for the mid-action auto-resume (re-trigger the aborted up/download); off = a transient abort fails immediately
 
     // --- throughput measurement (measured from the wire, never estimated) ---
     uint32_t _ftcStartMs = 0;         // set when the open frame goes out, i.e. when bytes start flowing (RE-armed each retry attempt)
@@ -785,6 +795,8 @@ class FileTransferClient : public OpenKNX::Module
     void ftcDlSendOpen();  // FileDownload open: [00][00][pkg][path]
     void ftcDlSendChunk();
     void ftcCloseSink();
+    // FtcDownloadCrcPrefix finished: resume-open the sink at keepBytes and start chunks, or fall back to fresh.
+    void ftcDlAfterPrefixFold();
     void ftcDownloadPanel(bool ok, bool statOk, uint32_t tcrc); // framed DOWNLOAD result box + Verify line (FtcDownloadVerify)
     uint32_t _dlSize = 0;
     uint16_t _dlChunks = 0;
@@ -796,6 +808,17 @@ class FileTransferClient : public OpenKNX::Module
     uint32_t _dlCrc = 0;                                        // running CRC32/POSIX folded over the received stream -> compared to the target FileInfo CRC32
     bool _dlSinkOpen = false;
     char _dlLocal[FTC_PATH_MAX] = {0}; // local (resolved) destination path, prefix already stripped
+    // --- download resume + auto-resume (additive; fresh download stays byte-identical) ---
+    bool _ftcDownload = false;         // this op is a download -> ftcAbort auto-resume + FtcCancel re-trigger pick the download path
+    bool _dlNoResume = false;          // no-resume: discard any local partial, fetch fresh (truncate) -- mirrors _ftcNoResume
+    uint32_t _dlResumeBase = 0;        // bytes already on the local sink kept by a resume (0 = fresh); whole-chunk boundary
+    uint32_t _dlCrcOff = 0;            // cooperative prefix-CRC cursor: on-disk bytes already folded into _dlCrc
+    // Re-trigger params (auto-resume re-runs requestDownload with these). _dlLocalArg keeps the ORIGINAL
+    // prefixed local arg so the backend re-resolves (sd/efc), unlike _dlLocal which is already stripped.
+    uint16_t _dlTarget = 0;
+    uint8_t _dlPkg = 0;
+    char _dlRemote[FTC_REMOTE_PATH_LIMIT + 1] = {0};
+    char _dlLocalArg[FTC_PATH_MAX] = {0};
 
     // Backends are resolved directly (ftcResolveBackend): LittleFS default + optional sd/efc bridges. One
     // transfer at a time -> a single active source/sink pair remembered for this transfer's read/write/close.

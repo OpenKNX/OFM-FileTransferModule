@@ -88,6 +88,28 @@ static bool littleFsSinkOpen(const char *path)
     _ftcSinkFile = LittleFS.open(path, "w"); // create / truncate
     return (bool)_ftcSinkFile;
 }
+// Download resume: open the existing partial read+write (NO truncate/create), cut it to exactly keepBytes
+// (drops the partial last chunk) and seek to the end so subsequent writes append. keepBytes on success, <0 else.
+static int32_t littleFsResumeOpen(const char *path, uint32_t keepBytes)
+{
+#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+    // ESP fs::File has no truncate() -> cannot cut the partial to the chunk boundary; a plain append could leave
+    // a stale tail across a second interrupt. Skip resume here (the caller falls back to a fresh download).
+    // Resume works on RP2040 (native File::truncate) and the host shim.
+    (void)path;
+    (void)keepBytes;
+    return -1;
+#else
+    _ftcSinkFile = LittleFS.open(path, "r+"); // existing file, read+write, no create, no truncate
+    if (!_ftcSinkFile) return -1;
+    if (!_ftcSinkFile.truncate(keepBytes) || !_ftcSinkFile.seek(keepBytes))
+    {
+        _ftcSinkFile.close();
+        return -1;
+    }
+    return (int32_t)keepBytes;
+#endif
+}
 static bool littleFsAvailable() { return true; }
 static uint64_t littleFsFree()
 {
@@ -107,7 +129,7 @@ static uint64_t littleFsFree()
 const FtcBackend *FileTransferClient::ftcResolveBackend(const char *path, const char **stripped)
 {
     static const FtcBackend kLittleFs = {"", {littleFsOpen, ftcSharedRead, ftcSharedClose},
-                                         {littleFsSinkOpen, ftcSharedSinkWrite, ftcSharedSinkClose},
+                                         {littleFsSinkOpen, ftcSharedSinkWrite, ftcSharedSinkClose, littleFsResumeOpen},
                                          littleFsAvailable, littleFsFree};
     #ifdef OPENKNX_SDCARD
     // Captureless lambdas adapt sd::IFileStore's methods to the client's function-pointer triple (the transfer
@@ -118,7 +140,12 @@ const FtcBackend *FileTransferClient::ftcResolveBackend(const char *path, const 
                                     []() { sd::fileStore.close(); }},
                                    {[](const char *p) { return sd::fileStore.sinkOpen(p); },
                                     [](const uint8_t *b, uint16_t l) { return sd::fileStore.sinkWrite(b, l); },
-                                    []() { sd::fileStore.sinkClose(); }},
+                                    []() { sd::fileStore.sinkClose(); },
+                                    // resume: sinkOpen(keepBytes) opens "r+" AND seekSet(keepBytes) (SdFileStore.cpp:83), so
+                                    // sinkWrite appends at the resume base; sinkClose truncates to the written size. HW-test on SD.
+                                    [](const char *p, uint32_t keepBytes) -> int32_t {
+                                        return sd::fileStore.sinkOpen(p, keepBytes, 0) ? (int32_t)keepBytes : -1;
+                                    }},
                                    []() { return sd::fileStore.available(); }, nullptr};
     if (strncmp(path, "sd", 2) == 0 && path[2] == '/') { *stripped = path + 2; return &kSd; }
     #endif
@@ -129,7 +156,11 @@ const FtcBackend *FileTransferClient::ftcResolveBackend(const char *path, const 
                                      []() { efc::fileStore.close(); }},
                                     {[](const char *p) { return efc::fileStore.sinkOpen(p); },
                                      [](const uint8_t *b, uint16_t l) { return efc::fileStore.sinkWrite(b, l); },
-                                     []() { efc::fileStore.sinkClose(); }},
+                                     []() { efc::fileStore.sinkClose(); },
+                                     // resume: sinkOpen(keepBytes) opens "r+" AND seek(keepBytes) (EfcFileStore.cpp:75) -> sinkWrite appends at the base.
+                                     [](const char *p, uint32_t keepBytes) -> int32_t {
+                                         return efc::fileStore.sinkOpen(p, keepBytes, 0) ? (int32_t)keepBytes : -1;
+                                     }},
                                     []() { return efc::fileStore.available(); },
                                     []() { return efc::fileStore.freeBytes(); }};
     if (strncmp(path, "efc", 3) == 0 && path[3] == '/') { *stripped = path + 3; return &kEfc; }
@@ -255,7 +286,7 @@ static constexpr uint8_t FTC_CMD_FILESYSTEM_INFO = 46;  // LittleFS total+used b
 static constexpr uint32_t FTC_FS_MARGIN = 8192;         // headroom demanded above the payload (LittleFS block rounding + metadata)
 // AIMD window bounds (plan sec.3.3, B's smaller bounds -> limits erase-stall exposure): start at 8,
 // grow +8 after a clean window, halve on loss, clamp to [4,64].
-static constexpr uint16_t FTC_WND_INIT = 8;
+static constexpr uint16_t FTC_WND_INIT = 16; // AUTO ramp start: already near-optimal + 0-loss on our link -> fast from the first window (not a slow +8 climb from 8)
 static constexpr uint16_t FTC_WND_MIN = 4;
 static constexpr uint16_t FTC_WND_MAX = 64;
 // TP transmit-FIFO water marks (via ftcTxQueueSize()): the pump sends only below HIGH, and drains below
@@ -274,6 +305,8 @@ static constexpr uint16_t FTC_NOPROGRESS_MAX = 4;    // reports whose (union) mi
 // wall clock -- a slow-but-steady TP upload must not false-abort). 30s covers the worst legit no-progress
 // gap (a report round-trip + its retries ~12s, plus a server flash-erase stall).
 static constexpr uint32_t FTC_FAST_STALL_MS = 30000; // no forward progress for this long -> genuinely wedged
+static constexpr uint32_t FTC_HARD_BASE_MS = 15000;  // wedge backstop: base patience added on top of the size term
+static constexpr uint32_t FTC_HARD_FLOOR_BPS = 40;   // pessimistic floor (real ~250 B/s) -> hard-deadline = base + size/floor: a legit slow transfer never trips it, a wedge (e.g. the 0x02 CRC re-query that has no cumulative cap) always terminates. The unattended-JOB safety net.
 
 // Scan pacing: one DeviceDescriptor_Read every SPACING ms (paced, not blasted), then wait DRAIN ms after
 // the last probe for the slowest answer. The bounded listing caps RAM on a wide sweep; the log is not.
@@ -841,6 +874,7 @@ void FileTransferClient::ftcStart(uint16_t pa, bool upload, uint8_t mode)
     // connection-oriented client path was never finished and stalls after chunk 1.
     _ftcTarget = pa;
     _ftcUpload = upload;
+    _ftcDownload = false; // this is the upload/ping/perf entry -> not a download (requestDownload sets it true)
     _ftcMode = mode; // 0 = classic (ping is always classic); 1 = fast, negotiates FAST before the open
     _ftcSequence = 0;
     _ftcDone = 0;
@@ -1267,6 +1301,7 @@ void FileTransferClient::ftcProceedToUpload()
     _ftcNoTargetCrc = false; // re-armed per transfer; the SD/EFC verify (0x01) sets it for the summary
     _status.total = _ftcSize; // set here (resume base known) so the bar starts at the resumed %, not 0.00%
     _status.done = _ftcResumeBase;
+    ftcArmHardDeadline(_ftcSize); // wedge backstop, re-armed each attempt
     _xferSetup.resumedBytes = _ftcResumeBase; // 0 = fresh; >0 once FtcResumeInfo matched a partial -> UI RESUME badge
     // auto pkg (FRESH path only): offsets start at seq 1, so changing the payload cannot corrupt a resume.
     // The resume path degrades separately, BEFORE its CRC-fold boundary is snapshotted (see FtcResumeInfo),
@@ -1297,7 +1332,9 @@ void FileTransferClient::ftcProceedToUpload()
     _ftcNextSeq = _ftcStartSeq;
     _ftcFoldWatermark = (uint32_t)_ftcStartSeq - 1;   // prefix [1.._ftcStartSeq-1] already folded (or none)
     _ftcWnd = _ftcWndFix ? _ftcWndFix                 // fixed window (perf w<N>): start pinned, never grows
-                         : FTC_WND_INIT;              // fast = adaptive AIMD window
+                         : FTC_WND_INIT;              // AUTO: x2 ramp start
+    _ftcWndLocked = false;                            // Discover&Lock: fresh transfer starts unlocked
+    _ftcWndClean = FTC_WND_INIT;                      // no window proven clean yet -> first-loss fallback (halve if it overruns immediately)
     _ftcPrevMissing = 0xFFFF;
     _ftcNoProgress = 0;
     _ftcReportRetries = 0;
@@ -1716,7 +1753,7 @@ void FileTransferClient::ftcAbort(const char *reason)
                            strstr(reason, "full") ||            // target filesystem full (0x47) -- retries can't make room
                            strstr(reason, "space") ||           // pre-upload space check failed -- a retry can't create room
                            strstr(reason, "cancel");            // user cancelled -- never silently restart
-    if (_ftcUpload && !permanent && _ftcTransferRetries < _cfgTransferRetries)
+    if (_cfgAutoResume && (_ftcUpload || _ftcDownload) && !permanent && _ftcTransferRetries < _cfgTransferRetries)
     {
         _ftcTransferRetries++;
         openknx.logger.logWithPrefixAndValues("FTC", "transient (%s) -> transfer retry %u/%u (resume in %ums)",
@@ -1724,9 +1761,13 @@ void FileTransferClient::ftcAbort(const char *reason)
                                               (unsigned)_cfgBackoffMs);
         // Do NOT close the source here: the retry re-reads it (read() is offset-based/stateless, so a
         // still-open handle is safe). It IS closed on the final give-up below and on success (ftcFinish).
+        // Download: FLUSH the half-written sink now (close it) so the re-trigger's resume sees the true
+        // on-disk partial size. No-op for uploads (no sink open).
+        ftcCloseSink();
         SecurityControl secR = {false, None};
         knx.bau().ftcSendCommand(_ftcTarget, secR, FTC_OBJECT_INDEX, FTC_CMD_CANCEL, _ftcTx, 0);
         _ftcRetryPending = true;
+        _ftcHardDeadline = 0; // the re-run re-arms it in ftcProceedToUpload; keep FtcCancel/backoff from re-tripping the check
         _ftcState = FtcCancel;
         _ftcSince = millis();
         return;
@@ -2044,6 +2085,8 @@ void FileTransferClient::ftcFinish()
     // FtcScanPost really completes it sets _scanPostDone and calls scanReport()+ftcFinish() again.
     if (_ftcState == FtcScanPost && !_scanPostDone) return;
 
+    _ftcHardDeadline = 0; // every op terminates here -> clear so a stale deadline never trips a later info-ga/scan
+
     // Close the T_Connect the info-ga memory walk opened, if any. Only OURS: ftcScanConnect self-guards
     // against an existing connection, so _gaConnected is never set for someone else's ETS session.
     if (_gaConnected)
@@ -2064,6 +2107,7 @@ void FileTransferClient::ftcFinish()
     ftcCloseSink(); // a download aborted mid-flight must not leave the SD file handle open
     _ftcRespPending = false;
     _ftcRetryPending = false; // never carry a pending-retry across the end of a transfer
+    _ftcDownload = false;     // op over -> a later upload/scan must not inherit the download auto-resume path
     _ftcStartMs = 0;
     _ftcState = FtcIdle;
     // The operation is over -> the scan/ll/ls result is not read again. RELEASE the buffer (swap with an
@@ -2442,7 +2486,9 @@ void FileTransferClient::ftcRetryCmd(const char *sub, const char *val)
                                      (unsigned)_cfgTransferRetries, (unsigned)FTC_TRANSFER_RETRIES_DEF);
         openknx.logger.logWithValues("  backoff   %u   [%u]   ms between transfer retries (let a busy/rebooting target settle)",
                                      (unsigned)_cfgBackoffMs, (unsigned)FTC_RETRY_BACKOFF_MS_DEF);
-        openknx.logger.log("  set: ftc retry <max|transfer|backoff> <value>");
+        openknx.logger.logWithValues("  autoresume %s   [on]  master switch: auto re-trigger + resume an aborted up/download",
+                                     _cfgAutoResume ? "on " : "off");
+        openknx.logger.log("  set: ftc retry <max|transfer|backoff> <value>  |  ftc retry autoresume <on|off>");
         return;
     }
     const bool set = (val && *val);
@@ -2465,8 +2511,13 @@ void FileTransferClient::ftcRetryCmd(const char *sub, const char *val)
                                                                   : v);
         openknx.logger.logWithValues("FTC retry backoff = %u ms", (unsigned)_cfgBackoffMs);
     }
+    else if (strcmp(sub, "autoresume") == 0 || strcmp(sub, "auto") == 0)
+    {
+        if (set) _cfgAutoResume = (strcmp(val, "on") == 0 || strcmp(val, "1") == 0);
+        openknx.logger.logWithValues("FTC retry autoresume = %s", _cfgAutoResume ? "on" : "off");
+    }
     else
-        openknx.logger.logWithValues("FTC retry: unknown '%s' -- try max|transfer|backoff (or 'ftc retry' for help)", sub);
+        openknx.logger.logWithValues("FTC retry: unknown '%s' -- try max|transfer|backoff|autoresume (or 'ftc retry' for help)", sub);
 }
 
 void FileTransferClient::ftcSendFsInfo(uint8_t purpose, const char *path)
@@ -3152,6 +3203,13 @@ void FileTransferClient::ftcResetTransferJob(unsigned pkg, uint8_t mode)
     _activeSrc = nullptr;
 }
 
+void FileTransferClient::ftcArmHardDeadline(uint32_t size)
+{
+    uint32_t sizeTerm = size / FTC_HARD_FLOOR_BPS;      // seconds a legit transfer could plausibly need at the floor rate
+    if (sizeTerm > 2000000u) sizeTerm = 2000000u;       // clamp: keep the whole patience < 2^31 ms so the signed wrap-safe compare stays valid
+    _ftcHardDeadline = millis() + FTC_HARD_BASE_MS + sizeTerm * 1000u;
+}
+
 void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pkg, bool noResume, uint8_t mode, bool apply, const char *target, uint16_t fixedWnd)
 {
     const bool haveTarget = target && *target; // explicit remote path ("sd/foo" / "efc/foo" / "/foo"); else derive it
@@ -3386,6 +3444,36 @@ void FileTransferClient::ftcDlSendChunk()
     ftcSend(FTC_CMD_FILE_DOWNLOAD, 2);
 }
 
+// FtcDownloadCrcPrefix finished: the on-disk prefix is folded into _dlCrc. Close the read source, resume-open
+// the sink at _dlResumeBase (truncated to the whole-chunk boundary, positioned for append), then request the
+// first missing chunk (_dlSeq). If resume-open fails, fall back to a fresh (truncating) download from chunk 1.
+void FileTransferClient::ftcDlAfterPrefixFold()
+{
+    if (_dlBackend && _dlBackend->src.close) _dlBackend->src.close(); // done reading the local prefix
+    const int32_t rz = _activeSink->resumeOpen(_dlLocal, _dlResumeBase);
+    if (rz < 0)
+    {
+        openknx.logger.logWithPrefix("FTC", "resume-open failed -- restarting fresh");
+        _dlResumeBase = 0;
+        _dlWritten = 0;
+        _dlSeq = 1;
+        _dlCrc = 0;
+        _dlCrcOff = 0;
+        _status.done = 0;
+        if (!_activeSink->open(_dlLocal)) // fresh truncate
+        {
+            _status.phase = FtcPhase::Failed;
+            ftcStatusMsg("sink open failed");
+            ftcFinish();
+            return;
+        }
+    }
+    _dlSinkOpen = true;
+    ftcDlSendChunk(); // request _dlSeq (k+1 on resume, 1 on fresh fallback)
+    _ftcState = FtcDownloadChunk;
+    _ftcSince = millis();
+}
+
 /** @brief Framed DOWNLOAD result box (mirrors the upload box) + the Verify line, queued via ftcOut.
  *  statOk=false => the target didn't answer FileInfo (old/silent server) -> "unverified"; ok => size + CRC32 both matched. */
 void FileTransferClient::ftcDownloadPanel(bool ok, bool statOk, uint32_t tcrc)
@@ -3433,7 +3521,7 @@ void FileTransferClient::ftcDownloadPanel(bool ok, bool statOk, uint32_t tcrc)
 }
 
 // `ftc <pa> receive|download <remote> [local]`: pull a file off the target's filesystem onto the local sink (SD).
-void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg)
+void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg, bool noResume)
 {
     _xferSetup.valid = false; _xferResult.valid = false;
     // Client-requested download chunk size (goes into the FileDownload-open request, honored by the server).
@@ -3470,6 +3558,15 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     _ftcPath[sizeof(_ftcPath) - 1] = 0;
     strncpy(_dlLocal, stripped, sizeof(_dlLocal) - 1); // prefix stripped -> the real sink path
     _dlLocal[sizeof(_dlLocal) - 1] = 0;
+    // Stash the request as-received for a possible auto-resume re-trigger. _dlLocalArg keeps the ORIGINAL
+    // (prefixed) local arg so the re-run re-resolves the same backend (sd/efc), not the stripped path.
+    _dlTarget = pa;
+    _dlPkg = pkg;
+    _dlNoResume = noResume;
+    strncpy(_dlRemote, remotePath, sizeof(_dlRemote) - 1);
+    _dlRemote[sizeof(_dlRemote) - 1] = 0;
+    strncpy(_dlLocalArg, localPath, sizeof(_dlLocalArg) - 1);
+    _dlLocalArg[sizeof(_dlLocalArg) - 1] = 0;
 
     knx.bau().ftcSetResponseCallback(ftcOnResponse);
     _ftcTarget = pa;
@@ -3477,6 +3574,8 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     _dlChunks = 0;
     _dlSeq = 0;
     _dlWritten = 0;
+    _dlResumeBase = 0;  // resume base -> decided in FtcDownloadOpen from the local partial
+    _dlCrcOff = 0;
     _dlSinkOpen = false;
     _ftcRetries = 0;
     _ftcRespPending = false;
@@ -3487,7 +3586,12 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     _ftcPeakBps = 0;
     _ftcLastProgMs = 0; // else the DOWNLOAD panel would print a stale peak + the first interval rate is off
     _ftcLastProgDone = 0;
-    _ftcUpload = false; // a download error path must not misfire ftcAbort()'s upload-retry
+    _ftcUpload = false;    // a download error path must not misfire ftcAbort()'s upload-retry
+    _ftcDownload = true;   // arm the download auto-resume path (ftcAbort retry + FtcCancel re-trigger)
+    // Fresh user request -> reset the whole-transfer auto-retry budget. The auto-resume re-trigger in
+    // FtcCancel saves+restores _ftcTransferRetries around this call, so the counter survives a re-run.
+    _ftcTransferRetries = 0;
+    _ftcRetryPending = false;
 
     ftcStatusReset(FtcPhase::Upload, pa, _ftcPath);
     _ftcNextPct = 10;                               // arm the per-decile download progress line
@@ -3562,6 +3666,15 @@ void FileTransferClient::loop(bool configured)
             ftcMaybeProgress(false, _dlSeq, _dlChunks, _dlWritten, _dlSize, _dlStartMs);
             break;
         default: break;
+    }
+
+    // Whole-transfer wedge backstop: a state that stalls without its own watchdog (the 0x02 CRC re-query,
+    // or any future one) still terminates. _ftcHardDeadline is non-zero only inside an up/download, so this
+    // never trips info-ga/scan. Transient reason -> auto-resume gets its attempts, then it fails cleanly.
+    if (_ftcHardDeadline && (int32_t)(millis() - _ftcHardDeadline) >= 0)
+    {
+        ftcAbort("transfer wedged (hard-deadline)");
+        return;
     }
 
     switch (_ftcState)
@@ -3823,8 +3936,11 @@ void FileTransferClient::loop(bool configured)
                     _ftcReportRetries = 0;
                     _ftcPrevMissing = 0xFFFF;
                     _ftcNoProgress = 0;
-                    if (!_ftcWndFix) // fixed window never grows (no AIMD probe-up)
-                        _ftcWnd = (uint16_t)((_ftcWnd + 8u <= FTC_WND_MAX) ? _ftcWnd + 8u : FTC_WND_MAX);
+                    if (!_ftcWndFix && !_ftcWndLocked) // Discover: probe higher only until the first loss locks us (fixed window never probes)
+                    {
+                        _ftcWndClean = _ftcWnd; // this window was clean -> the revert target if the next probe overruns
+                        _ftcWnd = (uint16_t)((_ftcWnd + 8u <= FTC_WND_MAX) ? _ftcWnd + 8u : FTC_WND_MAX); // gentle +8 climb: approaches the edge without an x2 overshoot into the overrun
+                    }
                     if (_ftcReportBase > _ftcChunks)
                     {
                         ftcSendFastClose();
@@ -3858,8 +3974,17 @@ void FileTransferClient::loop(bool configured)
                     ftcAbort("fast: overall deadline exceeded");
                     return;
                 }
-                // multiplicative decrease sizes the NEXT window, not this one
-                _ftcWnd = (uint16_t)((_ftcWnd / 2 >= FTC_WND_MIN) ? _ftcWnd / 2 : FTC_WND_MIN);
+                // Lock (adaptive) or ratchet (fixed / already-locked) -- sizes the NEXT window, not this one.
+                if (!_ftcWndFix && !_ftcWndLocked)
+                {
+                    // First loss -> LOCK: drop to the last proven-clean window and never probe up again. If no
+                    // clean window is below us yet (the very first window overran), halve instead of locking at it.
+                    _ftcWnd = (_ftcWndClean < _ftcWnd) ? _ftcWndClean
+                                                       : (uint16_t)(_ftcWnd / 2 >= FTC_WND_MIN ? _ftcWnd / 2 : FTC_WND_MIN);
+                    _ftcWndLocked = true;
+                }
+                else // fixed window, or already locked + a fresh (congestion) loss -> back off a step, stay put
+                    _ftcWnd = (uint16_t)((_ftcWnd / 2 >= FTC_WND_MIN) ? _ftcWnd / 2 : FTC_WND_MIN);
                 // (the send-rate snap-to-measured already fired via ftcPacingRate above for this lossy report)
                 _status.resends++;               // window had gaps -> retransmit marker on the curve
                 _ftcResendCur = _ftcReportBase;
@@ -3948,6 +4073,9 @@ void FileTransferClient::loop(bool configured)
                 // Keep the no-answer timer fresh; a server that STOPS answering is caught by FTC_TIMEOUT below.
                 if (_ftcRespLen >= 5 && _ftcResp[0] == 0x02)
                 {
+                    // Bound the CRC-compute re-query by the pre-transfer patience (NOT re-armed here, unlike
+                    // _ftcSince below): a target stuck computing forever must terminate, not loop.
+                    if ((int32_t)(millis() - _ftcInfoDeadline) >= 0) { ftcAbort("initial FileInfo: CRC compute timeout"); return; }
                     _ftcSince = millis();
                     ftcSendInfo();          // ftcSendInfo sets FtcVerify -> override back to resume
                     _ftcState = FtcResumeInfo;
@@ -4760,6 +4888,17 @@ void FileTransferClient::loop(bool configured)
                 if (deadBase < _ftcStartMs) deadBase = _ftcStartMs;
                 if (deadBase == 0 || deadBase > _ftcSince) deadBase = _ftcSince;
                 _ftcRetryLostMs += (millis() - deadBase);
+                // Download: re-run requestDownload, which resumes from the local partial. requestDownload
+                // resets _ftcTransferRetries (fresh-request semantics), so save+restore the auto-retry count
+                // across it -- exactly the counter must survive, only a real user request resets it. ALWAYS
+                // resumes (noResume=false), never a fresh truncate, even if the original was no-resume.
+                if (_ftcDownload)
+                {
+                    const uint8_t savedRetries = _ftcTransferRetries;
+                    requestDownload(_dlTarget, _dlRemote, _dlLocalArg, _dlPkg, false);
+                    _ftcTransferRetries = savedRetries;
+                    return;
+                }
                 // pkg-auto degrade is applied in ftcProceedToUpload (fresh-only, offset-safe) -- not here.
                 const bool wasPerf = _ftcIsPerf;
                 ftcStart(_ftcTarget, true, _ftcMode);
@@ -5636,6 +5775,44 @@ void FileTransferClient::loop(bool configured)
                         return;
                     }
                 }
+                // RESUME decision (additive; a fresh download falls straight through to the code below and
+                // stays byte-identical). Resume iff: not forced-fresh, the backend can report the local size
+                // AND resume-open a sink, a matching whole-chunk prefix exists (0 < keepBytes < _dlSize).
+                if (!_dlNoResume && _dlBackend && _dlBackend->src.open != nullptr &&
+                    _activeSink->resumeOpen != nullptr)
+                {
+                    const int32_t have = _dlBackend->src.open(_dlLocal); // local partial size (or <0 = no file)
+                    if (_dlBackend->src.close) _dlBackend->src.close();
+                    if (have > 0 && (uint32_t)have < _dlSize && _dlPayload > 0)
+                    {
+                        const uint32_t keepBytes = ((uint32_t)have / _dlPayload) * _dlPayload; // whole-chunk floor
+                        if (keepBytes > 0)
+                        {
+                            // Reopen the source and cooperatively fold [0,keepBytes) into _dlCrc, then
+                            // resume-open the sink for append. Seed the continuation counters so the %-bar,
+                            // seq and byte count pick up where the partial left off.
+                            if (_dlBackend->src.open(_dlLocal) >= 0)
+                            {
+                                _dlResumeBase = keepBytes;
+                                _dlWritten = keepBytes;
+                                _dlSeq = (uint16_t)(keepBytes / _dlPayload + 1); // first chunk to (re)fetch
+                                _dlCrc = 0;
+                                _dlCrcOff = 0;
+                                _dlStartMs = millis();
+                                ftcArmHardDeadline(_dlSize); // covers the cooperative CRC prefix + the chunks
+                                _status.done = _dlWritten;
+                                openknx.logger.logWithPrefixAndValues("FTC",
+                                    "resuming %u/%u bytes (from chunk %u, %u B/chunk) -- folding local prefix",
+                                    (unsigned)keepBytes, (unsigned)_dlSize, _dlSeq, _dlPayload);
+                                ftcStatusMsg("resuming");
+                                _ftcState = FtcDownloadCrcPrefix;
+                                _ftcSince = millis();
+                                return;
+                            }
+                            // reopen for the fold failed -> fall through to a fresh (truncating) download
+                        }
+                    }
+                }
                 if (!_activeSink->open(_dlLocal))
                 {
                     openknx.logger.logWithPrefixAndValues("FTC", "open failed on '%s' backend: \"%s\"",
@@ -5647,6 +5824,7 @@ void FileTransferClient::loop(bool configured)
                 }
                 _dlSinkOpen = true;
                 _dlStartMs = millis();
+                ftcArmHardDeadline(_dlSize); // wedge backstop for the download
                 openknx.logger.logWithPrefixAndValues("FTC", "downloading %u bytes (%u chunks, %u B/chunk)",
                                                       (unsigned)_dlSize, _dlChunks, _dlPayload);
                 if (_dlSize == 0)
@@ -5663,10 +5841,62 @@ void FileTransferClient::loop(bool configured)
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
-                openknx.logger.logWithPrefix("FTC", "download: no open answer");
-                _status.phase = FtcPhase::Failed;
-                ftcFinish();
+                // Transient (target busy): route through ftcAbort so a download auto-resumes (bounded by
+                // _cfgTransferRetries; a fresh re-run finds no partial and just retries the open).
+                ftcAbort("download: no open answer");
             }
+            return;
+        }
+
+        case FtcDownloadCrcPrefix:
+        {
+            // Cooperative fold of the on-disk prefix [0,keepBytes) into _dlCrc before appending new chunks
+            // (VORGABE non-blocking): a bounded chunk per pass, gated on the loop budget. The whole-transfer
+            // hard-deadline (armed before entering) backstops it -- it has no wire round-trip of its own.
+            if (_dlCrcOff >= _dlResumeBase)
+            {
+                ftcDlAfterPrefixFold();
+                return;
+            }
+            uint8_t buf[240];
+            do
+            {
+                uint32_t want = _dlResumeBase - _dlCrcOff;
+                if (want > sizeof(buf)) want = sizeof(buf);
+                // src read ABI is uint8_t-length; want is <= sizeof(buf) (240) so the cast never truncates.
+                const uint8_t n = (_dlBackend && _dlBackend->src.read)
+                                      ? _dlBackend->src.read(_dlCrcOff, buf, (uint8_t)want)
+                                      : 0;
+                if (n == 0) // < keepBytes <= on-disk size here, so a 0 is a genuine local read failure
+                {
+                    // Cannot fold the partial -> give up the resume, restart this download FRESH (the remote
+                    // file is fine; re-fetching from 0 is always correct). The sink/deadline are already set up.
+                    if (_dlBackend->src.close) _dlBackend->src.close();
+                    openknx.logger.logWithPrefix("FTC", "resume prefix read failed -- restarting fresh");
+                    _dlResumeBase = 0;
+                    _dlWritten = 0;
+                    _dlSeq = 1;
+                    _dlCrc = 0;
+                    _dlCrcOff = 0;
+                    _status.done = 0;
+                    if (!_activeSink->open(_dlLocal)) // fresh (truncating) sink
+                    {
+                        _status.phase = FtcPhase::Failed;
+                        ftcStatusMsg("sink open failed");
+                        ftcFinish();
+                        return;
+                    }
+                    _dlSinkOpen = true;
+                    ftcDlSendChunk();
+                    _ftcState = FtcDownloadChunk;
+                    _ftcSince = millis();
+                    return;
+                }
+                _dlCrc = ftcCrc32Posix(_dlCrc, buf, n, (_dlCrcOff == 0)); // first read seeds the fold
+                _dlCrcOff += n;
+            } while (_dlCrcOff < _dlResumeBase && openknx.freeLoopTime());
+            if (_dlCrcOff < _dlResumeBase) return; // budget spent -> continue next pass
+            ftcDlAfterPrefixFold();
             return;
         }
 
@@ -5762,9 +5992,9 @@ void FileTransferClient::loop(bool configured)
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
                 openknx.logger.logWithPrefixAndValues("FTC", "download: no answer for chunk %u", _dlSeq);
-                ftcCloseSink();
-                _status.phase = FtcPhase::Failed;
-                ftcFinish();
+                // Transient: route through ftcAbort -> auto-resume from the flushed local partial (mid-stream
+                // recovery). ftcAbort's retry branch closes (flushes) the sink first.
+                ftcAbort("download: no chunk answer");
             }
             return;
         }

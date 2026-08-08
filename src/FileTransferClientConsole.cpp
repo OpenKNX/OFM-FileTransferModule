@@ -417,6 +417,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         // chunk size (pkg, helps constrained tunnels); the first remaining non-flag is the local dest (default
         // = same path as remote). So `receive f l 16 v`, `receive f 16 l` and `receive f l` all work.
         bool verbose = false;
+        bool noResume = false; // default: auto-resume a matching local partial
         uint8_t pkg = 0;
         const char *local = rem;
         const char *toks[3] = {a2, a3, a4};
@@ -424,6 +425,8 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         {
             const char *t = toks[i];
             if (strcmp(t, "verbose") == 0 || strcmp(t, "v") == 0) { verbose = true; continue; }
+            if (strcmp(t, "no-resume") == 0 || strcmp(t, "noresume") == 0 || strcmp(t, "nr") == 0 ||
+                strcmp(t, "fresh") == 0) { noResume = true; continue; } // force a fresh (truncating) download
             bool num = t[0] != 0;
             for (const char *p = t; *p; p++)
                 if (!isdigit((unsigned char)*p)) num = false;
@@ -431,7 +434,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             if (local == rem) local = t;
         }
         _client.setVerbose(verbose);
-        _client.requestDownload(pa, rem, local, pkg);
+        _client.requestDownload(pa, rem, local, pkg, noResume);
         return true;
     }
     if (strcmp(sub, "format") == 0)

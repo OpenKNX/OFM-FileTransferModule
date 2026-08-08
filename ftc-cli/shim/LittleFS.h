@@ -23,20 +23,38 @@ class File
   public:
     File() = default;
 
-    // Open backing; write=false -> read binary, write=true -> create/truncate binary.
-    File(const char* path, bool write)
+    // Open backing by Arduino-style mode string:
+    //   "r"       -> read binary
+    //   "w"/"w+"  -> create/truncate binary (write)
+    //   "r+"      -> read+write existing binary, NO truncate (download resume-open)
+    //   "a"/"a+"  -> append (write, positioned at end)
+    File(const char* path, const char* modeStr)
     {
+        _path = path ? path : "";
+        const bool wr = modeStr && std::strchr(modeStr, 'w') != nullptr;
+        const bool plus = modeStr && std::strchr(modeStr, '+') != nullptr;
+        const bool app = modeStr && std::strchr(modeStr, 'a') != nullptr;
+        const bool rplus = modeStr && modeStr[0] == 'r' && plus; // r+ : existing, read+write, no truncate
+
+        std::ios::openmode m = std::ios::binary;
+        if (wr)
+            m |= std::ios::out | std::ios::trunc | (plus ? std::ios::in : std::ios::openmode(0));
+        else if (app)
+            m |= std::ios::out | std::ios::app | (plus ? std::ios::in : std::ios::openmode(0));
+        else if (rplus)
+            m |= std::ios::in | std::ios::out; // NO trunc: keep the existing bytes for a resume
+        else
+            m |= std::ios::in; // "r"
+
         _stream = std::make_shared<std::fstream>();
-        const auto mode = write ? (std::ios::out | std::ios::binary | std::ios::trunc)
-                                : (std::ios::in | std::ios::binary);
-        _stream->open(path ? path : "", mode);
+        _stream->open(_path, m);
         if (!_stream->is_open())
         {
             _stream.reset();
             return;
         }
-        _write = write;
-        if (!write) // cache size for size(); read files are seeked explicitly
+        _write = wr || app || rplus;
+        if (!_write) // cache size for size(); read files are seeked explicitly
         {
             _stream->seekg(0, std::ios::end);
             _size = (uint32_t)_stream->tellg();
@@ -91,21 +109,34 @@ class File
 
     uint32_t size() { return _size; }
 
+    // Cut the backing file to `newSize` (download resume-open: drop the partial last chunk). Flush first so
+    // any buffered bytes land, then resize on the path; the caller re-seeks afterwards. false on failure.
+    bool truncate(uint32_t newSize)
+    {
+        if (!_stream || _path.empty()) return false;
+        _stream->flush();
+        std::error_code ec;
+        std::filesystem::resize_file(_path, (std::uintmax_t)newSize, ec);
+        if (ec) return false;
+        _stream->clear(); // drop any eof/fail from the flush so later seeks are honored
+        return true;
+    }
+
   private:
     std::shared_ptr<std::fstream> _stream;
     bool _write = false;
     uint32_t _size = 0;
+    std::string _path;
 };
 
 /// @brief Host filesystem facade mirroring the Arduino LittleFS global.
 class LittleFSHost
 {
   public:
-    // mode: "r" -> read, anything containing 'w' -> create/truncate write.
+    // mode: "r" read · "w"/"w+" create+truncate · "r+" existing read+write (no truncate) · "a" append.
     File open(const char* path, const char* mode)
     {
-        const bool write = (mode != nullptr) && std::strchr(mode, 'w') != nullptr;
-        return File(path, write);
+        return File(path, mode ? mode : "r");
     }
 
     // Capacity/used of the filesystem holding the working directory (host takes the #else branch).

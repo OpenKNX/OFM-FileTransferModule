@@ -188,6 +188,9 @@ static constexpr uint8_t PRIO_SYSTEM = 0x00;
 static constexpr uint8_t PRIO_LOW = 0x03;
 
 static constexpr uint32_t HEARTBEAT_MS = 60000; // CONNECTIONSTATE_REQUEST cadence
+static constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 15000; // no CONNECTIONSTATE_RESPONSE within this after a heartbeat -> the idle tunnel is dead
+static constexpr uint32_t RECONNECT_BACKOFF_MS = 2000;  // between tunnel re-dial attempts after a drop
+static constexpr uint8_t RECONNECT_MAX = 8;             // consecutive failed re-dials (~16s) before giving up -> the FTC layer then fails the transfer cleanly
 static constexpr int RX_BUF = 1024;
 static constexpr uint32_t TX_ACK_TIMEOUT_MS = 1000; // KNXnet/IP tunneling: TUNNELING_ACK deadline before retransmit (03_08_04 §2.6)
 static constexpr uint8_t TX_ACK_MAX_RETRIES = 5;    // retransmits of the same (seq) frame before the slot is freed
@@ -249,6 +252,7 @@ struct TunnelState
     bool txInflightBusy = false; // true from send until ACK / retry-budget-exhausted
 
     uint32_t lastHeartbeat = 0; // last CONNECTIONSTATE_REQUEST sent
+    bool heartbeatPending = false; // a CONNECTIONSTATE_REQUEST awaits its RESPONSE -> idle-drop detector
 
     // Connection-oriented scan session (§6)
     bool coConnected = false;
@@ -459,6 +463,7 @@ void sendConnectionStateRequest()
     putLocalHpai(&body[2]);
     sendKnxIp(ST_CONNECTIONSTATE_REQUEST, body, sizeof(body));
     s.lastHeartbeat = nowMs();
+    s.heartbeatPending = true; // await the RESPONSE; pump() drops the tunnel if it never comes
 }
 
 /**
@@ -732,6 +737,7 @@ bool KnxIpTunnel::connect(const std::string& ip, uint16_t port)
         s.channelId = channelId;
         s.lastHeartbeat = nowMs();
         _connected = true;
+        _reconnectIp = ip; _reconnectPort = port; _reconnectEnabled = true; _reconnectAttempts = 0; // remember for auto-reconnect
         return true;
     }
 
@@ -745,6 +751,7 @@ bool KnxIpTunnel::connect(const std::string& ip, uint16_t port)
  */
 void KnxIpTunnel::disconnect()
 {
+    _reconnectEnabled = false; // an intentional disconnect must NOT trigger an auto-reconnect
     if (s.sock == SOCK_INVALID)
     {
         _connected = false;
@@ -772,7 +779,7 @@ void KnxIpTunnel::disconnect()
  */
 void KnxIpTunnel::pump()
 {
-    if (!_connected || s.sock == SOCK_INVALID) return;
+    if (!_connected || s.sock == SOCK_INVALID) { maybeReconnect(); return; }
 
     // Drain every currently-available datagram; stop at wouldblock. Safety cap avoids a runaway loop.
     uint8_t buf[RX_BUF];
@@ -833,7 +840,8 @@ void KnxIpTunnel::pump()
                 break;
             }
             case ST_CONNECTIONSTATE_RESPONSE:
-                break; // heartbeat reply — connection alive
+                s.heartbeatPending = false; // heartbeat reply — connection alive
+                break;
             case ST_DISCONNECT_REQUEST:
             {
                 // Server tears us down: reply, then mark closed.
@@ -881,8 +889,30 @@ void KnxIpTunnel::pump()
     // A TUNNELING_ACK this pass may have freed the 1-outstanding slot -> push the next queued frame.
     drainTxQueue();
 
-    // Heartbeat: CONNECTIONSTATE_REQUEST every ~60 s (non-blocking timer).
-    if (_connected && (uint32_t)(nowMs() - s.lastHeartbeat) >= HEARTBEAT_MS) sendConnectionStateRequest();
+    // Heartbeat liveness: a heartbeat with no RESPONSE within the timeout means the (idle) tunnel is dead ->
+    // drop it so the next pump() re-dials. During a transfer the ACK-exhaustion path above trips first.
+    if (_connected && s.heartbeatPending && (uint32_t)(nowMs() - s.lastHeartbeat) >= HEARTBEAT_TIMEOUT_MS)
+    {
+        SOCK_CLOSE(s.sock);
+        s.sock = SOCK_INVALID;
+        _connected = false;
+        return;
+    }
+    // CONNECTIONSTATE_REQUEST every ~60 s (non-blocking timer); not re-sent while one still awaits its reply.
+    if (_connected && !s.heartbeatPending && (uint32_t)(nowMs() - s.lastHeartbeat) >= HEARTBEAT_MS) sendConnectionStateRequest();
+}
+
+void KnxIpTunnel::maybeReconnect()
+{
+    if (!_reconnectEnabled || _reconnectIp.empty()) return;   // never connected -> nothing to re-dial
+    if (_reconnectAttempts >= RECONNECT_MAX) return;          // gave up; the FTC layer aborts the transfer cleanly
+    if ((uint32_t)(nowMs() - _lastReconnectMs) < RECONNECT_BACKOFF_MS) return;
+    _lastReconnectMs = nowMs();
+    _reconnectAttempts++;
+    // connect() resets the transport (fresh channel + seq). On success the embedded FTC auto-resume re-sends the
+    // transfer over this new tunnel -> "reconnect then resume". connect() blocks up to the CONNECT_RESPONSE
+    // (a rare recovery path, not the steady-state pump).
+    if (connect(_reconnectIp, _reconnectPort)) _reconnectAttempts = 0;
 }
 
 /**********************************************************************

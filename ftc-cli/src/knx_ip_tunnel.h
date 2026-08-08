@@ -66,6 +66,7 @@ class KnxIpTunnel
      * @details Never blocks. Call once per main-loop iteration.
      */
     void pump();
+    void maybeReconnect(); // re-dial the tunnel after a drop (backoff, bounded) so the FTC auto-resume can continue
 
     // --- the ftc* seam (mapped 1:1 from knx.bau().ftc*, SecurityControl dropped) -----------------
     // Senders: connectionless T_Data_Individual, LowPriority. Return false if not connected / TX full.
@@ -108,6 +109,11 @@ class KnxIpTunnel
     // impl-owned; declared here only so the header is self-contained for the shim. The .cpp may hold
     // additional private state (socket fd, channel id, seq counters, CO seq, RX buffer) — add as needed.
     bool _connected = false;
+    std::string _reconnectIp;        // endpoint of the last successful connect() -> re-dial target after a drop
+    uint16_t _reconnectPort = 3671;
+    bool _reconnectEnabled = false;  // set once connected -> pump() re-dials on a drop instead of dying
+    uint32_t _lastReconnectMs = 0;   // backoff clock for maybeReconnect()
+    uint8_t _reconnectAttempts = 0;  // consecutive failed re-dials -> give up past RECONNECT_MAX (transfer then fails cleanly)
     uint16_t _assignedPA = 0;
     int _lastConnectStatus = -1; // see lastConnectStatus(); -1 until a CONNECT_RESPONSE arrives
     FtcResponseCb _responseCb = nullptr;
