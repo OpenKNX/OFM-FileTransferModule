@@ -1,8 +1,7 @@
 #pragma once
 /**
  * @file        FileTransferClient.h
- * @brief       KNX file transfer client -- pushes a file to another device's server, PA to PA
- * @version     0.0.1
+ * @brief       KNX file transfer client -- transfers files (push/pull) and manages/queries another device's FTC server, PA to PA
  * @date        2026-07-16
  * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
  *              Licensed under GNU GPL v3.0
@@ -28,8 +27,20 @@ static constexpr size_t FTC_PATH_MAX = 512; // native ftc-cli host: long absolut
         #define FTC_PATH_SCAN "511"
     #endif
 
-// The source is reached through this callback triple so the client needs no storage header: the router
-// registers implementations via registerFileBackend(); everything storage-specific stays router-side.
+// Longest REMOTE (on-the-wire) path that may enter _ftcPath/_ftcListDir. Those buffers are memcpy'd whole
+// into the 256-B _ftcTx frame -- the host's 512-B FTC_PATH_MAX buffer (needed only for the LOCAL source path)
+// would overrun _ftcTx and wrap the uint8_t _ftcTxLen. The worst frame (fast-open: 6-B header + path + NUL +
+// 4-B pre-alloc size) must fit BOTH the 247-B KNX APDU payload and _ftcTx, so a remote path caps at 235.
+static constexpr size_t FTC_REMOTE_PATH_MAX = 235;
+// Effective remote-path cap = the smaller of the path buffer and the wire limit. On embedded this is
+// FTC_PATH_MAX-1 (95) -> identical to the previous `>= sizeof(_ftcPath)` guards (no firmware behaviour change);
+// on the host it clamps the wire path to 235 instead of the 511-B local-path buffer.
+static constexpr size_t FTC_REMOTE_PATH_LIMIT =
+    (FTC_PATH_MAX - 1 < FTC_REMOTE_PATH_MAX) ? (FTC_PATH_MAX - 1) : FTC_REMOTE_PATH_MAX;
+
+// The source is reached through this callback triple so the client needs no storage header: ftcResolveBackend()
+// maps a path prefix ("" LittleFS · "sd/" · "efc/") to an implementation; storage-specifics live in the
+// each provider's own store class (sd::IFileStore / efc::IFileStore) -- self-contained, no bridge.
 struct FtcFileSource
 {
     int32_t (*open)(const char *path); // returns file size, or -1 on failure
@@ -38,7 +49,7 @@ struct FtcFileSource
 };
 
 // The mirror of FtcFileSource for a download: where the pulled bytes are written (a local backend).
-// The router registers implementations via registerFileBackend(); download aborts if none resolves.
+// Resolved by ftcResolveBackend() (see above); download aborts if the prefix has no provider.
 struct FtcFileSink
 {
     bool (*open)(const char *path);                 // create/truncate; false on failure
@@ -83,6 +94,11 @@ struct FtcStatus
     uint16_t bps = 0;              // measured throughput
     uint16_t chunk = 0;            // current chunk (1-based)
     uint16_t chunks = 0;           // total chunks
+    uint16_t window = 0;           // fast: current AIMD window size (grows on clean, halves on loss); 0 = safe/n.a.
+    // Live event counters (monotonic within an op) — a frontend samples the deltas to mark the throughput curve.
+    uint16_t verifies = 0;         // delivery confirmations: safe = per chunk (CRC) · fast = per window (bitmap report)
+    uint16_t crcErrors = 0;        // CRC mismatches encountered (a retry is made for each)
+    uint16_t resends = 0;          // chunk/window retransmits fired
     bool ok = false;               // did the last finished operation verify / succeed?
     uint32_t crc = 0;              // last verify / info CRC-32
     char path[FTC_PATH_MAX] = {0}; // current / last file
@@ -98,7 +114,8 @@ struct FtcEntry
     uint32_t size = 0;
     uint32_t crc = 0;
     bool isDir = false;
-    bool hasInfo = false;   // ll fills size+crc; ls leaves them 0
+    bool hasInfo = false;   // ll fills size (+crc); ls leaves them 0
+    bool hasCrc = false;    // 0x00 answer had a CRC; 0x01 (SD/EFC default) is size-only -> CRC shown as n/a
     bool isOpenKnx = false; // scan `openknx`/`info` probe: this device's manufacturer id == 0x00FA
 };
 
@@ -108,6 +125,92 @@ struct FtcOutLine
 {
     uint8_t color = 0;
     char text[128] = {0};
+};
+
+// --- Structured result surface (the "info API"): every frontend renders from these, no text parsing.
+// Fixed-size, filled cooperatively by the request* handlers; `valid` set false at op start, left valid at
+// finish for a poll (same lifetime as status()/listing()).
+struct FtcFsInfo // `df` (requestFsInfo)
+{
+    uint32_t total = 0, used = 0, free = 0;
+    bool kb = false; // values are KB (sd/efc, >4 GB) vs bytes (LittleFS)
+    bool valid = false;
+};
+struct FtcDeviceInfo // `info` (requestDeviceInfo)
+{
+    uint16_t mask = 0;
+    char cls[24] = {0};        // friendly class from ftcMaskName()
+    uint16_t manufacturer = 0;
+    uint8_t serial[6] = {0};   bool haveSerial = false;
+    char order[12] = {0};      bool haveOrder = false;
+    uint8_t hardware[6] = {0}; bool haveHw = false;
+    uint16_t version = 0;      bool haveVersion = false; // PDT_VERSION [magic:5][ver:5][rev:6]
+    uint16_t ftmVersion = 0;   // (maj<<8)|(min<<4)|rev of the FileTransfer module
+    uint32_t features = 0;     // feature bits: 1 Resume, 2 Update, 4 Fast, 8 Console
+    bool progMode = false;
+    uint8_t appState = 0, addrTableState = 0, assocTableState = 0, goTableState = 0;
+    // BCU1 (mask 0012) memory-map extras (ETS: Ausführungszustand / PEI-Typ / Ausführungsfehler); 0xFF = not read
+    uint8_t bcuRunState = 0xFF, bcuPeiType = 0xFF, bcuRunError = 0xFF;
+    uint16_t busVoltmV = 0;    // bus voltage in mV (A_ADC_Read), 0 = not read
+    bool haveBusVolt = false;
+    uint8_t bcuMfr = 0;        // BCU manufacturer code (0x01 = Siemens)
+    uint8_t bcuApp[3] = {0};   // BCU application id, packed BCD -> the 6-digit ETS number (last pair = version)
+    bool haveBcuApp = false;
+    bool haveBcu1 = false;
+    bool valid = false;
+};
+struct FtcGaEntry // `info ga` (requestGroupComm) -- one association row (structured; renderers turn codes into labels)
+{
+    uint16_t ga = 0;
+    uint16_t co = 0;
+    uint8_t flags = 0;       // bit0 C(K) bit1 R(L) bit2 W(S) bit3 T(Ü) bit4 U(A); valid only if cfgValid
+    uint8_t prio = 0xFF;     // KNX config-octet coding: 0 system, 1 normal, 2 urgent, 3 low; 0xFF = unread
+    uint8_t sizeCode = 0xFF; // group-object value-type 0..12 (03_05_01 §4.18.3) -> object SIZE (not semantic DPT); 0xFF = unread
+    bool cfgValid = false;   // the group-object descriptor (flags/prio/size) was read for this KO
+};
+
+// --- Transfer "info API": upload / perf / download setup + result. Same lifetime + pattern as FtcFsInfo /
+// FtcDeviceInfo (valid=false at op start, filled cooperatively, left valid at finish for a poll). This is the
+// canonical, render-agnostic surface every frontend draws from: the ftc-cli Panel today, the embedded WebConfig
+// tomorrow, the SM console box on-device -- all from these structs, no text parsing. Keep it structured (codes,
+// not pre-formatted strings) so a UI can label/format as it likes.
+enum class FtcXferKind : uint8_t { Upload = 0, Perf = 1, Download = 2 };
+
+struct FtcTransferSetup // filled at the start of an upload / perf / download (alongside the SM config box)
+{
+    bool valid = false;
+    FtcXferKind kind = FtcXferKind::Upload;
+    uint16_t target = 0;                 // target PA
+    char local[FTC_PATH_MAX] = {0};      // host-side path / "generated test pattern"
+    char remote[FTC_PATH_MAX] = {0};     // path on the target device
+    uint32_t size = 0;                   // total bytes to transfer (0 = unknown yet, e.g. download pre-open)
+    bool hasCrc = false; uint32_t crc = 0; // source CRC32 known up-front (perf deterministic pattern)
+    uint8_t mode = 0;                    // FtcMode: 0 safe · 1 fast · 2 forget
+    uint16_t chunkSize = 0;              // payload bytes per chunk
+    uint16_t chunks = 0;                 // total chunks (0 if size not yet known)
+    bool noResume = false;               // upload: fresh (ignore a partial on the target)
+    bool willApply = false;              // upload: flash + reboot after the transfer
+    bool keep = false;                   // perf: keep the generated test file
+    uint32_t resumedBytes = 0;           // upload: bytes already on the target that a resume skips (0 = fresh); set once FtcResumeInfo decided
+};
+
+struct FtcTransferResult // filled at the end of an upload / perf / download (alongside the SM result box)
+{
+    bool valid = false;
+    FtcXferKind kind = FtcXferKind::Upload;
+    bool ok = false;                     // overall success (delivered / verified)
+    uint16_t target = 0;
+    uint32_t bytes = 0;                  // net bytes delivered this run (resume-deduped)
+    uint16_t chunks = 0; uint16_t chunkSize = 0;
+    uint32_t elapsedMs = 0;              // pure data-transfer time (excl. finalisation)
+    uint32_t avgBps = 0; uint32_t peakBps = 0;
+    uint32_t crc = 0;                    // CRC32 of the transferred data (miniz macro-safe name)
+    uint8_t verify = 0;                  // 0 = n/a / no answer · 1 = verified OK · 2 = mismatch
+    uint16_t retries = 0; uint32_t retryLostMs = 0; // upload auto-retry recovery
+    uint32_t resumedBytes = 0;           // bytes already on the target (skipped this run)
+    uint16_t dupes = 0;                  // IP-mirror duplicate answers discarded
+    uint8_t mode = 0;                    // FtcMode actually used (a fast-probe miss downgrades to safe)
+    uint8_t cleanup = 0;                 // perf only: 0 n/a · 1 removed · 2 kept · 3 left behind
 };
 
 class FileTransferClient : public OpenKNX::Module
@@ -124,20 +227,19 @@ class FileTransferClient : public OpenKNX::Module
     void showHelp() override;
     void loop(bool configured) override;
 
-    // Register a local-storage backend under a path prefix ("" = default). Bounded to 4; overflow ignored.
-    // available()=null -> always available; freeBytes()=null -> no space pre-check. Built-ins self-register:
-    // "/"=LittleFS here in setup(), "sd/"=SD and "efc/"=ext flash from their own module setups (OPENKNX_FTC).
-    void registerFileBackend(const char *prefix, const FtcFileSource &src, const FtcFileSink &sink,
-                             bool (*available)() = nullptr, uint64_t (*freeBytes)() = nullptr);
 
     // --- Action API: any front-end (console, WebConfig, DDC) calls these -----------------------
     // Callers must ensure !isBusy() first (cancel excepted); a rejected request logs the reason.
     bool isBusy() const { return _ftcState != FtcIdle; }
+    // Console lockstep state: true when no console command/drain/OPEN is in flight (_conSub == 0). The host
+    // auto-command scheduler gates on this so a scheduled line is sent ONLY when the previous round-trip is done
+    // (never overlaps -> 1-outstanding, bus-friendly). Read-only; no behaviour change.
+    bool consoleIdle() const { return _conSub == 0; }
     void requestCancel();
     void requestPing(uint16_t pa);
     void requestList(uint16_t pa, const char *dir, bool detailed); // ll = detailed, ls = names only
     void requestInfo(uint16_t pa, const char *remotePath);
-    void requestFsInfo(uint16_t pa);                    // `ftc df` -- target LittleFS total/used/free with a usage bar
+    void requestFsInfo(uint16_t pa, const char *path = "");                    // `ftc df` -- target LittleFS total/used/free with a usage bar
     void ftcRetryCmd(const char *sub, const char *val); // `ftc retry ...` -- show/set retry tuning (help/get/set)
     void requestDeviceInfo(uint16_t pa);                // `ftc <pa> info` with no file: mask/class + FTM version + features
     void requestGroupComm(uint16_t pa);                 // `ftc <pa> info ga`: GA table + com-object links (ETS-style), via A_Memory_Read
@@ -161,8 +263,8 @@ class FileTransferClient : public OpenKNX::Module
     // server's FAST capability first and silently falls back to classic if missing (ftcBeginFeatureProbe).
     // apply (opt-in, default false): after a verified upload, trigger the target to self-apply the image
     // (fwupdate -> reboot). Forced false for the perf/test sources so /ftctest.bin is never flashed.
-    void requestUpload(uint16_t pa, const char *src, unsigned pkg, bool noResume, uint8_t mode = 0, bool apply = false);
-    void requestPerf(uint16_t pa, uint32_t sizeBytes, unsigned pkg, uint8_t mode = 0, bool keep = false); // upload a test pattern, report B/s (keep = leave it as /ftcperf_<crc>.bin)
+    void requestUpload(uint16_t pa, const char *src, unsigned pkg, bool noResume, uint8_t mode = 0, bool apply = false, const char *target = "", uint16_t fixedWnd = 0);
+    void requestPerf(uint16_t pa, uint32_t sizeBytes, unsigned pkg, uint8_t mode = 0, bool keep = false, uint16_t fixedWnd = 0, const char *drive = ""); // upload a test pattern, report B/s (keep = leave it as /ftcperf_<crc>.bin; fixedWnd>0 pins the fast window)
     void requestDownload(uint16_t pa, const char *remotePath, const char *localPath, uint8_t pkg = 0);    // pull to a local backend; pkg 0 = default chunk size
     // `ftc <pa> fwupdate <remote>`: trigger the target to apply an already-uploaded firmware (reboots it).
     // FileInfo existence pre-check first, so a mistyped path cannot reboot a live coupler.
@@ -177,7 +279,16 @@ class FileTransferClient : public OpenKNX::Module
 
     // --- Read API: poll these from a UI (progress bar, result, file list) -----------------------
     const FtcStatus &status() const { return _status; }
+    uint16_t scanCurrentPa() const { return (uint16_t)_scanNext; } // live: the PA currently being probed (for a progress line)
+    uint16_t scanFound() const { return _scanFound; }              // live: devices found so far
     const std::vector<FtcEntry> &listing() const { return _ftcListing; } // ll/ls/scan result -- valid only WHILE the op runs; ftcFinish() releases it (poll from a live UI, not after completion)
+    const FtcFsInfo &fsInfo() const { return _fsInfo; }                  // filled by requestFsInfo (`df`)
+    const FtcDeviceInfo &deviceInfo() const { return _deviceInfo; }      // filled by requestDeviceInfo (`info`)
+    const FtcTransferSetup &transferSetup() const { return _xferSetup; }   // filled at the start of send/get/perf
+    const FtcTransferResult &transferResult() const { return _xferResult; } // filled at the end of send/get/perf
+    uint8_t transferRetries() const { return _ftcTransferRetries; }        // live transfer-level auto-retry count (survives a retry-restart)
+    uint8_t transferRetryMax() const { return _cfgTransferRetries; }       // configured auto-retry budget
+    const FtcGaEntry *groupObjects(uint16_t &count) const { count = _gaObjectsN; return _gaObjects; } // filled by requestGroupComm (`info ga`)
 
     // Cooperative console-output primitive (drained one budget/loop in ftcDrainOut): also used by the
     // console for the framed `ftc ?` help so a ~40-line block never blocks the loop. Formats + enqueues one line.
@@ -216,6 +327,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcSent,             // ping: ModuleVersion sent, waiting for the answer
         FtcInfo,             // FileInfo(43) sent by "ftc info" -- just report what comes back
         FtcVerify,           // FileInfo(43) sent right after an upload -- compare against _ftcSrcCrc
+        FtcInfoSend,         // verify FileInfo(43) could not be queued (TX congested) -- retry the send until the queue drains
         FtcFeatureProbe,     // fast/forget only: CheckFeatures(102) sent, short 800ms gate before start
         FtcFastOpen,         // fast: cmd44 open sent, waiting for the open ack (0x00 / 0x42 / 0x4A)
         FtcFastStream,       // fast: the pump -- burst DATA frames (silent), gated by the TP FIFO + window
@@ -226,7 +338,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcCrcPrefix,        // cooperative prefix CRC-32 (resume seed / perf precompute) -- a chunk per loop() pass
         FtcDirList,          // DirList(80) iterating -- collect one directory's entries
         FtcDirInfo,          // FileInfo(43) per collected file -- fill in its size + CRC32 (ll only)
-        FtcFsInfo,           // FilesystemInfo(46) sent -- LittleFS total/used for `df`, the ll footer, or the pre-upload space check
+        FtcFsInfoReq,        // FilesystemInfo(46) sent -- LittleFS total/used for `df`, the ll footer, or the pre-upload space check
         FtcDelete,           // FileDelete(42) sent -- waiting for the result byte
         FtcUploadOpen,       // FileUpload sequence 0 sent, waiting for the "file opened" result
         FtcUploadChunk,      // FileUpload sequence n sent, waiting for the echoed sequence + CRC
@@ -236,6 +348,11 @@ class FileTransferClient : public OpenKNX::Module
         FtcScan,             // sweeping a PA range: pace probes, collect answers by their PA
         FtcScanCo,           // ETS-parity scan (`ets`): T_Connect per address, CO read -- finds BCU1/BCU2
         FtcDevDescr,         // device info: DeviceDescriptor_Read sent, waiting for the mask
+        FtcDevCoConn,        // device info: connectionless DD got no answer -> T_Connect opening for a CO retry (reaches BCU1/old masks)
+        FtcDevCoDescr,       // device info: CO DeviceDescriptor_Read sent over the T_Connect, waiting for the mask
+        FtcBcuConn,          // device info (BCU2 memory-mapped): T_Connect opening before the fixed identity block read
+        FtcBcu1Mem,          // device info (BCU1/BCU2): A_Memory_Read of the fixed identity block (0x0100..) -> Bcu*::decode
+        FtcBcuAdc,           // device info (BCU1/BCU2): A_ADC_Read of the bus-voltage channel, waiting for the response
         FtcDevVer,           // device info: ModuleVersion(100) sent, waiting for the FTM version
         FtcDevFeat,          // device info: CheckFeatures(102) sent, waiting for the feature flags
         FtcDevProp,          // device info: reading Device-Object properties (serial/order/hardware)
@@ -243,6 +360,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcDevLoad,          // device info: reading load states + app version from the found objects
         FtcGaConnect,        // group comm: T_Connect opening -- wait for the CO link before the memory walk (ETS reads memory connection-oriented)
         FtcGaRef,            // group comm: PropertyValue_Read PID_TABLE_REFERENCE of the current table
+        FtcGaPtr,            // group comm (BCU1): A_Memory_Read of the 1-byte table pointer (0x0111/0x0112) -> table at 0x100 + pointer
         FtcGaMem,            // group comm: A_Memory_Read walking the current table's blob
         FtcDownloadOpen,     // download: FileDownload open sent, waiting for the file size
         FtcDownloadChunk,    // download: FileDownload chunk sent, waiting for the data + CRC16
@@ -271,6 +389,7 @@ class FileTransferClient : public OpenKNX::Module
     static void ftcOnPropertyValue(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, const uint8_t *data, uint8_t length);
     // Same rule for a MemoryResponse (group comm): place the table chunk at its true offset, act in loop().
     static void ftcOnMemory(uint16_t pa, uint16_t addr, const uint8_t *data, uint8_t len);
+    static void ftcOnAdc(uint16_t pa, uint8_t channel, uint8_t count, int16_t value); // A_ADC_Response (bus voltage)
     void ftcDevSendProp();                         // send the property read for the current _devPropStep
     void scanRecord(uint16_t pa, uint16_t mask);   // one responder -> log line + bounded listing
     void scanReport();                             // footer with counts when the sweep is done
@@ -321,7 +440,10 @@ class FileTransferClient : public OpenKNX::Module
     void ftcApplyDecide();     // feature byte known -> trigger self-apply (Update bit set) or log a skip; finishes
     void ftcTriggerFwUpdate(); // send FwUpdate(101) with the remote path (fire-and-forget) + loud log; finishes
     void ftcCloseSource();
-    uint8_t ftcReadSource(uint32_t offset, uint8_t *buffer, uint8_t maxLength);
+    // Reads up to maxLength source bytes at offset. Returns: >0 = bytes read, 0 = clean EOF (offset at/after
+    // the source size), <0 = a real backend READ error (distinct from EOF -> the caller retries transiently
+    // instead of closing the transfer as if it were complete).
+    int ftcReadSource(uint32_t offset, uint8_t *buffer, uint8_t maxLength);
 
     FtcState _ftcState = FtcIdle;
     uint16_t _ftcTarget = 0;
@@ -350,6 +472,7 @@ class FileTransferClient : public OpenKNX::Module
     bool _ftcTestSource = false;       // true = generated RAM pattern instead of the SD file
     bool _ftcResume = false;           // FtcResumeInfo decided to pick up where a previous run left off
     bool _ftcNoResume = false;         // send no-resume: discard any target partial, upload fresh (truncate)
+    bool _ftcNoTargetCrc = false;      // SD/EFC target answered size-only (0x01) -> summary shows "not verified" not "verified OK"
     bool _ftcPkgAuto = false;          // pkg auto: start at FTC_PKG_MAX (degrade one notch per fresh link-retry)
     bool _ftcIsPerf = false;           // perf test -> delete /ftcperf.bin from the target after verify
     bool _ftcPerfRemoved = false;      // perf: did the cleanup delete succeed (for the summary box)
@@ -372,6 +495,9 @@ class FileTransferClient : public OpenKNX::Module
     // the NEXT window; _ftcWndEnd freezes the CURRENT high edge so halving on loss can't orphan tail seqs.
     static constexpr uint16_t FTC_BMP_BYTES = 1024; // = FTM_FAST_MAX_CHUNKS/8; mirror of the server bitmap
     uint16_t _ftcWnd = 8;                           // AIMD window size (grows +8 clean, halves on loss), bounded [MIN,MAX]
+    uint16_t _ftcWndFix = 0;                        // fast: fixed window (0 = adaptive AIMD). >0 pins the ceiling: NO grow (no
+                                                    // "feel-its-way-up" that floods at the end); loss still ratchets it down one
+                                                    // step and it STAYS there. Set per-request (perf `w<N>`); 0 for uploads.
     uint16_t _ftcWndEnd = 0;                        // frozen high edge (exclusive) of the current window: [base, wndEnd)
     uint16_t _ftcNextSeq = 0;                       // next seq the stream pump will send
     uint16_t _ftcReportBase = 0;                    // low edge (1-based, inclusive) of the current window
@@ -385,6 +511,8 @@ class FileTransferClient : public OpenKNX::Module
     uint32_t _ftcRepWaitStart = 0;                  // [dbg] millis() of the first query of the current report round (retry re-sends keep it) -> per-window answer latency
     uint8_t _ftcReportNonce = 0;                    // bumped on every report send; the answer must echo it (staleness)
     uint32_t _ftcDeadline = 0;                      // wall-clock overall guard (millis()) -- backstop behind no-progress
+    uint32_t _ftcInfoDeadline = 0;                  // patience window for the pre-transfer FileInfo on a busy target
+    uint8_t _ftcInfoLen = 0;                         // FileInfo(43) payload length -- kept so a congested send can be re-tried
     uint32_t _ftcPaceNext = 0;                      // forget (mode 2): millis() gate for the next send burst. forget has no
                                                     // per-chunk report and no backpressure over IP -> without pacing it blasts ~94 KB/s, target drops chunks.
     uint8_t _ftcTransferRetries = 0;                // whole-transfer auto-retries spent (bounded by _cfgTransferRetries); reset only on a fresh request
@@ -432,7 +560,9 @@ class FileTransferClient : public OpenKNX::Module
                       uint32_t size, bool hasCrc, uint32_t crc,
                       const char *mode, const char *framing, const char *options);
     uint16_t _ftcTxCrc = 0;  // CRC16/Modbus of the frame in flight, compared against the echo
-    uint8_t _ftcRetries = 0; // attempts spent on the CURRENT chunk (see FTC_MAX_RETRIES)
+    uint8_t _ftcRetries = 0;         // attempts spent on the CURRENT chunk (see FTC_MAX_RETRIES)
+    bool _ftcRereadChunk = false;    // classic: the last attempt failed to READ the source -> FtcUploadChunkRetry re-reads (not re-sends stale _ftcTx)
+    bool _ftcChunkFolded = false;    // classic: this chunk's payload is already folded into _ftcSrcCrc (fold-once; survives a read-error re-read / resend)
     uint8_t _ftcTxLen = 0;
     uint8_t _ftcTx[256] = {0}; // holds [seq:2][len:1][payload:<=247] and the longer open frame
 
@@ -497,6 +627,8 @@ class FileTransferClient : public OpenKNX::Module
     bool _scanCo = false;       // this sweep is connection-oriented
     uint8_t _scanCoPhase = 0;   // 0 Connect, 1 WaitConnect, 2 WaitResp
     uint32_t _scanCoT0 = 0;     // per-phase deadline (connect ack / read answer)
+    uint32_t _scanCoAckT0 = 0;  // instant the device T_ACKed our CO read (presence-on-ACK) -> short grace for the DeviceDescriptor (class), then advance
+    static constexpr uint32_t FTC_CO_ACK_GRACE = 140; // ms to wait after the presence T_ACK for the DD response (class); then record + advance
     bool _scanCoGot = false;    // the address in flight answered -> present
     uint32_t _scanCoBusyT0 = 0; // phase-0 first "TP busy" instant -> abort the CO scan if the link stays owned (FTC_CO_BUSY_TMO)
 
@@ -527,7 +659,8 @@ class FileTransferClient : public OpenKNX::Module
     // Shared device-info kickoff. fromScan = quiet (no standalone log/status) + the chain hands the
     // identity back to FtcScanPost after the 5 Device-Object PIDs instead of running the phase-2 enum.
     void ftcDevInfoBegin(uint16_t pa, bool fromScan);
-    void ftcDevReport(); // print the assembled device-info block
+    void ftcDevReport();        // print the assembled device-info block
+    void ftcBcuStartBlockRead(); // BCU1/BCU2: A_Memory_Read the fixed identity block (0x0100..) over the open CO link -> FtcBcu1Mem
     // --- group communication (ftc <pa> info ga): reuse the device-info discovery, then A_Memory_Read walk ---
     void ftcGaBeginWalk();     // open a T_Connect for the walk (ETS reads memory CO); connectionless fallback if it can't
     void ftcGaAdvance();       // send the next present table's PID_TABLE_REFERENCE read, or emit the report + finish
@@ -544,7 +677,15 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t _devFw[4] = {0};     // PID_VERSION raw
     uint8_t _devFwLen = 0;
     uint8_t _devProgMode = 0; // PID_PROG_MODE (0 = off, 1 = on)
+    uint8_t _devBcuRunState = 0xFF, _devBcuPei = 0xFF, _devBcuRunError = 0xFF; // BCU1/BCU2 memory-map identity
+    uint8_t _devBcuMfr = 0, _devBcuApp[3] = {0};                               // BCU manufacturer + application id (BCD)
+    bool _devHasBcuApp = false;
+    bool _devHasBcu1 = false;                                                  // the BCU identity block was decoded
     bool _devHasSerial = false, _devHasOrder = false, _devHasHw = false, _devHasFw = false, _devHasProg = false;
+
+    // device-info: connection-oriented DeviceDescriptor fallback (BCU1/old masks answer only CO)
+    bool _devCoTried = false; // the CO DeviceDescriptor retry has been attempted (once)
+    bool _devCoConn = false;  // a T_Connect we opened for the CO fallback is up -> ours to close in ftcFinish()
 
     // device-info phase 2: object enumeration + load states
     uint8_t _devObjProbe = 1;                                                     // object index being probed for its type
@@ -561,19 +702,31 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t _propData[16] = {0};
 
     // --- group communication (ftc <pa> info ga): walk the GA + association tables via A_Memory_Read (ETS path) ---
-    static constexpr uint16_t FTC_GA_MAX_BYTES = 256; // bounded table-memory accumulator (per table)
-    static constexpr uint8_t FTC_GA_MAX = 127;        // max GAs / association entries parsed (bounds every buffer write)
+    static constexpr uint16_t FTC_GA_MAX_BYTES = 640; // bounded table-memory accumulator (per table); 640 covers a big System-2 assoc/GrOT (e.g. 1.1.20: ~250 assoc, ~148-obj GrOT)
+    static constexpr uint16_t FTC_GA_MAX = 300;       // max GAs / association entries parsed (bounds every buffer write); large enough for a fully-loaded System-2 device
     bool _gaMode = false;                             // requestGroupComm (true) vs requestDeviceInfo (false): shares the discovery chain
-    uint8_t _gaWhich = 0;                             // table being walked: 0 = address, 1 = association
+    bool _gaClassic = false;                          // table family: true = BCU realisation type 1/2 (1B count, 2B entries, 8b ASAP); false = System B (2B count, 4B assoc entries, 16b ASAP)
+    uint8_t _gaWhich = 0;                             // table being walked: 0 = address, 1 = association, 2 = group-object descriptors (flags/prio/size)
     uint16_t _gaRef = 0;                              // current table's memory base (PID_TABLE_REFERENCE, low word)
     uint16_t _gaGot = 0;                              // bytes accumulated for the current table
     uint16_t _gaExpect = 0;                           // total bytes to read (from the leading count), clamped to FTC_GA_MAX_BYTES
     bool _gaAssocValid = false;                       // the association walk left valid bytes in _memBuf -> gate the report's KO section
     volatile bool _memPending = false;                // a MemoryResponse is parked (stack ctx) -> consumed in loop()
+    volatile bool _adcPending = false;                // an ADCResponse is parked (stack ctx) -> consumed in loop()
+    int16_t _adcVal = 0; uint8_t _adcCnt = 0;         // parked A_ADC_Response: raw sum + sample count
+    uint16_t _devBusVoltmV = 0; bool _devHasBusVolt = false; // decoded bus voltage (mV) for the report
     uint8_t _memBuf[FTC_GA_MAX_BYTES];                // current table's raw blob; ftcOnMemory writes each chunk at its true offset
     uint8_t _memLen = 0;                              // length of the chunk ftcOnMemory just parked
     uint16_t _gaList[FTC_GA_MAX];                     // resolved GAs from the address table (0-based: _gaList[t-1] = TSAP t, TSAP is 1-based)
     uint16_t _gaN = 0;                                // count in _gaList
+
+    // --- structured result storage (getters above) ---
+    FtcFsInfo _fsInfo;
+    FtcDeviceInfo _deviceInfo;
+    FtcTransferSetup _xferSetup;   // canonical setup surface (send/get/perf) -- CLI Panel + future WebConfig
+    FtcTransferResult _xferResult; // canonical result surface (send/get/perf) -- CLI Panel + future WebConfig
+    FtcGaEntry _gaObjects[FTC_GA_MAX]; // one row per association pair (co -> ga)
+    uint16_t _gaObjectsN = 0;
 
     // --- locate (ftc <pa> led): drive the target's prog-mode LED; blink toggles from loop() while idle ---
     static constexpr uint32_t FTC_LED_BLINK_MS = 700; // half-period of the locate blink
@@ -592,6 +745,7 @@ class FileTransferClient : public OpenKNX::Module
     // FilesystemInfo(46): target LittleFS capacity for `df`, the `ll` footer, and the pre-upload space gate.
     uint32_t _ftcFsTotal = 0, _ftcFsUsed = 0; // last FilesystemInfo answer (total, used bytes)
     uint8_t _ftcFsPurpose = 0;                // 0 = df, 1 = pre-upload space check, 2 = ll footer
+    bool _ftcFsKb = false;                    // last answer was in KB (provider, status 0x01) vs bytes (LittleFS)
     uint32_t _ftcTargetHave = 0;              // existing target file's size (FtcResumeInfo) -> overwrite credit for the space check
     // Cooperative prefix-CRC (FtcCrcPrefix) state -- CRC a chunk per loop() pass, never one blocking read:
     uint32_t _crcOff = 0;             // bytes CRC'd so far
@@ -604,8 +758,9 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t _crcPerfMode = 0;
     bool _crcPerfKeep = false;
     uint16_t _crcPerfPkg = 0;
+    char _crcPerfDrive[8] = {0};      // perf target drive: "sd" / "efc" (empty = LittleFS)
     bool _ftcSpaceChecked = false;                                       // the pre-upload space check has run for THIS transfer (once; survives a retry)
-    void ftcSendFsInfo(uint8_t purpose);                                 // send FilesystemInfo(46) -> FtcFsInfo, remembering why
+    void ftcSendFsInfo(uint8_t purpose, const char *path = "");                                 // send FilesystemInfo(46) -> FtcFsInfo, remembering why
     void ftcPrintFsBar(uint32_t total, uint32_t used, bool full = true); // df=full block; ll footer=just the two bars
     bool _ftcListDetailed = true;                                        // ll -> per-file size+CRC; ls -> names only
 
@@ -636,10 +791,8 @@ class FileTransferClient : public OpenKNX::Module
     bool _dlSinkOpen = false;
     char _dlLocal[FTC_PATH_MAX] = {0}; // local (resolved) destination path, prefix already stripped
 
-    // Local-storage backends self-registered in setup() (LittleFS default + optional sd/efc). One transfer
-    // at a time -> a single active source/sink pair remembered for this transfer's read/write/close.
-    FtcBackend _backends[4]{};
-    uint8_t _backendN = 0;
+    // Backends are resolved directly (ftcResolveBackend): LittleFS default + optional sd/efc bridges. One
+    // transfer at a time -> a single active source/sink pair remembered for this transfer's read/write/close.
     const FtcFileSource *_activeSrc = nullptr; // resolved source for the current upload
     const FtcFileSink *_activeSink = nullptr;  // resolved sink for the current download
     const FtcBackend *_dlBackend = nullptr;    // resolved backend for the active download (space gate + messages)

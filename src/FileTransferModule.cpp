@@ -1,6 +1,12 @@
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
 #include "FileTransferModule.h"
 #include "versions.h"
+#ifdef OPENKNX_SDCARD
+    #include "SdFileStore.h" // sd::fileStore for the server-side `ll sd/…` listing (SdFat-free header)
+#endif
+#ifdef OPENKNX_EXTFLASH
+    #include "EfcFileStore.h" // efc::fileStore for the server-side `ll efc/…` listing
+#endif
 #ifdef ARDUINO_ARCH_RP2040
 #include <PicoOTA.h>
 #elif defined(ARDUINO_ARCH_ESP32)
@@ -48,8 +54,7 @@ void FileTransferModule::loop(bool configured)
     // Auto-close file/dir after HEARTBEAT_INTERVAL with no heartbeat.
     if (_fileOpen && delayCheck(_heartbeat, HEARTBEAT_INTERVAL))
     {
-        _file.flush();
-        _file.close();
+        ftmXferClose();
         _fileOpen = false;
         logErrorP("File closed due no heartbeat");
     }
@@ -68,6 +73,9 @@ void FileTransferModule::loop(bool configured)
 
 #ifdef OPENKNX_FTC_CONSOLE
     conLoop();
+#endif
+#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
+    crcLoop(); // advance a cooperative SD/EFC file-CRC job, if one is running (non-blocking)
 #endif
 }
 
@@ -94,6 +102,113 @@ enum class FtmCommands
     AuthResponse = 104,  // FTC access control: submit the MAC over the nonce
     AuthLogout = 105     // FTC access control: close the authorized window immediately
 };
+
+// --- Drive routing: a path targets LittleFS (default), the SD card ("sd/…") or ext-flash ("efc/…"). Each op
+// strips the prefix and routes to that provider's identical-API store. Everything compiles to LittleFS-only
+// when neither module is present, so the default behaviour is byte-for-byte unchanged. ---
+namespace
+{
+enum FtmDrive
+{
+    FD_INT = 0,
+    FD_SD = 1,
+    FD_EFC = 2
+};
+
+// Classify @p path; on a match, advance @p rel past the prefix (keeping the leading '/') and return the drive.
+uint8_t ftmDrive(const char *path, const char **rel)
+{
+    *rel = path;
+#ifdef OPENKNX_SDCARD
+    if (strncmp(path, "sd", 2) == 0 && path[2] == '/')
+    {
+        *rel = path + 2;
+        return FD_SD;
+    }
+#endif
+#ifdef OPENKNX_EXTFLASH
+    if (strncmp(path, "efc", 3) == 0 && path[3] == '/')
+    {
+        *rel = path + 3;
+        return FD_EFC;
+    }
+#endif
+    return FD_INT;
+}
+
+bool ftmExists(const char *path)
+{
+    const char *r;
+    switch (ftmDrive(path, &r))
+    {
+#ifdef OPENKNX_SDCARD
+        case FD_SD: return sd::fileStore.exists(r);
+#endif
+#ifdef OPENKNX_EXTFLASH
+        case FD_EFC: return efc::fileStore.exists(r);
+#endif
+        default: return LittleFS.exists(r);
+    }
+}
+bool ftmRemove(const char *path)
+{
+    const char *r;
+    switch (ftmDrive(path, &r))
+    {
+#ifdef OPENKNX_SDCARD
+        case FD_SD: return sd::fileStore.remove(r);
+#endif
+#ifdef OPENKNX_EXTFLASH
+        case FD_EFC: return efc::fileStore.remove(r);
+#endif
+        default: return LittleFS.remove(r);
+    }
+}
+bool ftmMkdir(const char *path)
+{
+    const char *r;
+    switch (ftmDrive(path, &r))
+    {
+#ifdef OPENKNX_SDCARD
+        case FD_SD: return sd::fileStore.mkdir(r);
+#endif
+#ifdef OPENKNX_EXTFLASH
+        case FD_EFC: return efc::fileStore.mkdir(r);
+#endif
+        default: return LittleFS.mkdir(r);
+    }
+}
+bool ftmRmdir(const char *path)
+{
+    const char *r;
+    switch (ftmDrive(path, &r))
+    {
+#ifdef OPENKNX_SDCARD
+        case FD_SD: return sd::fileStore.rmdir(r);
+#endif
+#ifdef OPENKNX_EXTFLASH
+        case FD_EFC: return efc::fileStore.rmdir(r);
+#endif
+        default: return LittleFS.rmdir(r);
+    }
+}
+bool ftmRename(const char *oldPath, const char *newPath)
+{
+    const char *ro, *rn;
+    const uint8_t d = ftmDrive(oldPath, &ro);
+    ftmDrive(newPath, &rn); // same drive assumed; use the stripped new-path
+    switch (d)
+    {
+#ifdef OPENKNX_SDCARD
+        case FD_SD: return sd::fileStore.rename(ro, rn);
+#endif
+#ifdef OPENKNX_EXTFLASH
+        case FD_EFC: return efc::fileStore.rename(ro, rn);
+#endif
+        default: return LittleFS.rename(ro, rn);
+    }
+}
+} // namespace
 
 bool FileTransferModule::checkOpenFile(uint8_t *resultData, uint8_t &resultLength)
 {
@@ -143,22 +258,113 @@ bool FileTransferModule::checkOpenedDir(uint8_t *resultData, uint8_t &resultLeng
     return true;
 }
 
+// Open the download source on the drive named by the path prefix. Returns the file size, or -1.
+int32_t FileTransferModule::ftmXferOpenRead(const char *path)
+{
+    const char *rel;
+    _xferDrive = ftmDrive(path, &rel);
+    _xferWrite = false;
+    _xferSize = 0;
+    if (_xferDrive == FD_INT)
+    {
+        _file = LittleFS.open(path, "r");
+        if (!_file) return -1;
+        _xferSize = (uint32_t)_file.size();
+        return (int32_t)_xferSize;
+    }
+    int32_t sz = -1;
+#ifdef OPENKNX_SDCARD
+    if (_xferDrive == FD_SD) sz = sd::fileStore.open(rel);
+#endif
+#ifdef OPENKNX_EXTFLASH
+    if (_xferDrive == FD_EFC) sz = efc::fileStore.open(rel);
+#endif
+    if (sz < 0) return -1;
+    _xferSize = (uint32_t)sz;
+    return sz;
+}
+
+// Open the upload sink on the named drive. resume -> open existing (r+, no truncate); else create/truncate.
+// sizeHint (exact total size, 0 = unknown) -> the SD store pre-allocates the whole file on a fresh write so
+// exFAT never allocates a cluster mid-transfer (no loop-blocking 128 KB boundary stall). Internal LittleFS
+// and efc ignore it (small blocks, no contiguous preAllocate).
+bool FileTransferModule::ftmXferOpenWrite(const char *path, bool resume, uint32_t sizeHint)
+{
+    const char *rel;
+    _xferDrive = ftmDrive(path, &rel);
+    _xferWrite = true;
+    if (_xferDrive == FD_INT)
+    {
+        _file = LittleFS.open(path, resume ? "r+" : "w");
+        return (bool)_file;
+    }
+#ifdef OPENKNX_SDCARD
+    if (_xferDrive == FD_SD) return sd::fileStore.sinkOpen(rel, resume ? 1u : 0u, sizeHint);
+#endif
+#ifdef OPENKNX_EXTFLASH
+    if (_xferDrive == FD_EFC) return efc::fileStore.sinkOpen(rel, resume ? 1u : 0u, sizeHint);
+#endif
+    return false;
+}
+
+// Close the active transfer handle (LittleFS _file, or the store's src/sink) for the current drive.
+void FileTransferModule::ftmXferClose()
+{
+    if (_xferDrive == FD_INT)
+    {
+        if (_xferWrite) _file.flush();
+        _file.close();
+        return;
+    }
+#ifdef OPENKNX_SDCARD
+    if (_xferDrive == FD_SD)
+    {
+        if (_xferWrite) sd::fileStore.sinkClose();
+        else sd::fileStore.close();
+        return;
+    }
+#endif
+#ifdef OPENKNX_EXTFLASH
+    if (_xferDrive == FD_EFC)
+    {
+        if (_xferWrite) efc::fileStore.sinkClose();
+        else efc::fileStore.close();
+    }
+#endif
+}
+
 void FileTransferModule::readFile(uint16_t sequence, uint8_t *resultData, uint8_t &resultLength)
 {
     logIndentUp();
 
-    if (_lastSequence + 1 != sequence)
-        _file.seek((sequence - 1) * (_size));
-
     pushByte(0x0, resultData);
     pushWord(sequence, resultData + 1);
-    uint8_t readed = _file.readBytes((char *)resultData + 4, _size);
+    uint8_t readed = 0;
+    bool done = true;
+    if (_xferDrive == FD_INT)
+    {
+        if (_lastSequence + 1 != sequence)
+            _file.seek((sequence - 1) * (_size));
+        readed = _file.readBytes((char *)resultData + 4, _size);
+        done = (readed == 0 || !_file.available());
+    }
+    else
+    {
+        const uint32_t off = (uint32_t)(sequence - 1) * _size;
+#ifdef OPENKNX_SDCARD
+        if (_xferDrive == FD_SD) readed = sd::fileStore.read(off, resultData + 4, _size);
+#endif
+#ifdef OPENKNX_EXTFLASH
+        if (_xferDrive == FD_EFC) readed = efc::fileStore.read(off, resultData + 4, _size);
+#endif
+        done = (readed == 0 || off + readed >= _xferSize);
+    }
     pushByte(readed, resultData + 3);
 
     logDebugP("Readed sequence %i (%i/%i bytes)", sequence, readed, _size);
-    if (readed == 0 || !_file.available())
+    if (done)
     {
-        _file.close();
+        ftmXferClose();
         _fileOpen = false;
         logInfoP("The file download was successfully completed");
     }
@@ -181,13 +387,36 @@ void FileTransferModule::readFile(uint16_t sequence, uint8_t *resultData, uint8_
  */
 bool FileTransferModule::writeChunk(uint16_t sequence, const uint8_t *payload, uint8_t n)
 {
-    if (!_file.seek((uint32_t)(sequence - 1) * _size)) return false;
-    return _file.write(payload, n) == n;
+    const uint32_t off = (uint32_t)(sequence - 1) * _size;
+    if (_xferDrive == FD_INT)
+    {
+        if (!_file.seek(off)) return false;
+        return _file.write(payload, n) == n;
+    }
+#ifdef OPENKNX_SDCARD
+    if (_xferDrive == FD_SD) return sd::fileStore.sinkWriteAt(off, payload, n) == n;
+#endif
+#ifdef OPENKNX_EXTFLASH
+    if (_xferDrive == FD_EFC) return efc::fileStore.sinkWriteAt(off, payload, n) == n;
+#endif
+    return false;
 }
 
 void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength)
 {
     logIndentUp();
+
+    // Reject a frame whose claimed chunk length (data[2]) runs past the received APDU (3-byte header + payload).
+    // The fast DATA path guards this; the classic path did not -> writeChunk would read up to 255 B of adjacent
+    // memory into the file. length is the on-wire APDU octet count.
+    if ((uint16_t)3 + data[2] > length)
+    {
+        pushByte(0x47, resultData);
+        resultLength = 1;
+        logErrorP("Chunk length exceeds the received frame");
+        logIndentDown();
+        return;
+    }
 
     #ifdef OPENKNX_DEBUG
     if (_lastSequence + 1 != sequence)
@@ -200,7 +429,7 @@ void FileTransferModule::writeFile(uint16_t sequence, uint8_t *data, uint8_t len
     // keeps the exact two codes it always had: 0x46 = seek failed, 0x47 = short write (fs full).
     if (!writeChunk(sequence, (const uint8_t *)data + 3, data[2]))
     {
-        if (!_file.seek((uint32_t)(sequence - 1) * _size))
+        if (_xferDrive == FD_INT && !_file.seek((uint32_t)(sequence - 1) * _size))
         {
             pushByte(0x46, resultData);
             resultLength = 1;
@@ -553,6 +782,49 @@ void FileTransferModule::conLoop()
 }
 #endif
 
+#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
+// Advance the cooperative SD/EFC file CRC by a bounded slice per loop() pass -> NEVER a whole-file read in the
+// dispatch (that reboots on a large file). The read handle (_src) was opened by cmdFileInfo when the job
+// started and stays open until the answer flips to 0x00. A stranded job (client stopped polling) is reaped
+// after HEARTBEAT_INTERVAL so it can never hold the drive's single handle forever.
+void FileTransferModule::crcLoop()
+{
+    if (!_crcActive) return;
+    uint8_t buf[64];
+    while (_crcOff < _crcSize && openknx.common.freeLoopTime())
+    {
+        const uint8_t want = (uint8_t)MIN((uint32_t)sizeof(buf), _crcSize - _crcOff);
+        uint8_t got = 0;
+    #ifdef OPENKNX_SDCARD
+        if (_crcDrive == FD_SD) got = sd::fileStore.read(_crcOff, buf, want);
+    #endif
+    #ifdef OPENKNX_EXTFLASH
+        if (_crcDrive == FD_EFC) got = efc::fileStore.read(_crcOff, buf, want);
+    #endif
+        if (got == 0) { _crcOff = _crcSize; break; } // read error/short -> stop; a wrong CRC then trips the client verify
+        _crcVal = _crcFirst ? _crc32.cksum(buf, got) : _crc32.cksum_upd(buf, got);
+        _crcFirst = false;
+        _crcOff += got;
+    }
+    if (delayCheck(_crcLastAccess, HEARTBEAT_INTERVAL)) crcCancel(); // client vanished -> release the handle
+}
+
+void FileTransferModule::crcCancel()
+{
+    if (!_crcActive) return;
+    #ifdef OPENKNX_SDCARD
+    if (_crcDrive == FD_SD) sd::fileStore.close();
+    #endif
+    #ifdef OPENKNX_EXTFLASH
+    if (_crcDrive == FD_EFC) efc::fileStore.close();
+    #endif
+    _crcActive = false;
+    _crcOff = 0;
+    _crcSize = 0;
+    _crcFirst = true;
+}
+#endif
+
 void FileTransferModule::cmdFormat(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     resultLength = 1;
@@ -570,7 +842,7 @@ void FileTransferModule::cmdFormat(uint8_t length, uint8_t *data, uint8_t *resul
 
 void FileTransferModule::cmdExists(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    bool exists = LittleFS.exists((char *)data);
+    bool exists = ftmExists((char *)data);
     if (exists)
         logDebugP("The file or directory \"%s\" exists", data);
     else
@@ -588,7 +860,7 @@ void FileTransferModule::cmdCancel(uint8_t length, uint8_t *data, uint8_t *resul
     // Close file
     if (_fileOpen)
     {
-        _file.close();
+        ftmXferClose();
         _fileOpen = false;
     }
 
@@ -610,9 +882,18 @@ void FileTransferModule::cmdRename(uint8_t length, uint8_t *data, uint8_t *resul
         }
     }
 
-    if (!LittleFS.rename((char *)data, (char *)(data + offset)))
+    // No NUL separator within the frame -> the two names aren't delimited (a self-rename + a %s read past the
+    // frame). Reject rather than act on unterminated data.
+    if (offset == 0)
     {
-        logErrorP("Renaming of the file \"%s\" to \"%s\" failed %i", data, data + offset);
+        pushByte(0x45, resultData);
+        logErrorP("Rename frame has no name separator");
+        return;
+    }
+
+    if (!ftmRename((char *)data, (char *)(data + offset)))
+    {
+        logErrorP("Renaming of the file \"%s\" to \"%s\" failed", data, data + offset);
         pushByte(0x45, resultData);
         return;
     }
@@ -665,8 +946,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     const char *path = (const char *)data; // NUL-terminated staged remote path from the client
     if (_fileOpen)                          // release any open transfer file before re-opening it read-only
     {
-        _file.flush();
-        _file.close();
+        ftmXferClose();
         _fileOpen = false;
     }
     File img = LittleFS.open(path, "r");
@@ -705,10 +985,102 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
     if(_fileOpen)
     {
         logInfoP("Closed open file");
-        _file.flush();
-        _file.close();
+        ftmXferClose();
         _fileOpen = false;
     }
+
+#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
+    {
+        const char *rel;
+        const uint8_t drive = ftmDrive(filename, &rel);
+        if (drive != FD_INT)
+        {
+            // Optional trailing flag byte AFTER the NUL path: bit0 = compute the whole-file CRC cooperatively
+            // (non-blocking, spread over loop() passes) so SD/EFC gets resume + a real verify. Old clients send
+            // no flag -> size-only (0x01); old servers ignore the trailing byte -> also 0x01. Fully compatible.
+            const size_t plen = strnlen(filename, length);
+            const bool wantCrc = (plen + 1 < (size_t)length) && (data[plen + 1] & 0x01);
+            if (wantCrc)
+            {
+                const bool sameJob = _crcActive && _crcDrive == drive &&
+                                     strncmp(_crcPath, rel, sizeof(_crcPath) - 1) == 0;
+                if (sameJob && _crcOff >= _crcSize) // CRC done -> answer size + crc, release the read handle
+                {
+                    pushByte(0x00, resultData);
+                    pushInt(_crcSize, resultData + 1);
+                    pushInt(_crcVal, resultData + 5);
+                    resultLength = 9;
+                    crcCancel();
+                    return;
+                }
+                if (sameJob) // still computing -> tell the client to poll again
+                {
+                    _crcLastAccess = millis();
+                    pushByte(0x02, resultData);
+                    pushInt(_crcSize, resultData + 1);
+                    resultLength = 5;
+                    return;
+                }
+                // a new (or switched) path: cancel any prior job, open + init this one
+                crcCancel();
+                int32_t csz = -1;
+    #ifdef OPENKNX_SDCARD
+                if (drive == FD_SD) csz = sd::fileStore.open(rel);
+    #endif
+    #ifdef OPENKNX_EXTFLASH
+                if (drive == FD_EFC) csz = efc::fileStore.open(rel);
+    #endif
+                if (csz < 0)
+                {
+                    pushByte(0x42, resultData);
+                    resultLength = 1;
+                    _dirOpen = false;
+                    return;
+                }
+                _crcActive = true;
+                _crcDrive = drive;
+                _crcSize = (uint32_t)csz;
+                _crcOff = 0;
+                _crcFirst = true;
+                _crcVal = 0;
+                _crcLastAccess = millis();
+                strncpy(_crcPath, rel, sizeof(_crcPath) - 1);
+                _crcPath[sizeof(_crcPath) - 1] = 0;
+                pushByte(0x02, resultData); // 0x02: CRC computing; size is known now
+                pushInt(_crcSize, resultData + 1);
+                resultLength = 5;
+                return;
+            }
+
+            int32_t sz = -1;
+    #ifdef OPENKNX_SDCARD
+            if (drive == FD_SD) sz = sd::fileStore.open(rel);
+    #endif
+    #ifdef OPENKNX_EXTFLASH
+            if (drive == FD_EFC) sz = efc::fileStore.open(rel);
+    #endif
+            // Size comes from open() (a stat) -> close at once, do NOT read the content (a whole-file read
+            // here blocks the KNX dispatch and reboots on a large file). Default answer 0x01 = size, CRC n/a.
+    #ifdef OPENKNX_SDCARD
+            if (drive == FD_SD) sd::fileStore.close();
+    #endif
+    #ifdef OPENKNX_EXTFLASH
+            if (drive == FD_EFC) efc::fileStore.close();
+    #endif
+            if (sz < 0)
+            {
+                pushByte(0x42, resultData);
+                resultLength = 1;
+                _dirOpen = false;
+                return;
+            }
+            pushByte(0x01, resultData); // 0x01: size valid, CRC not computed (SD/EFC default)
+            pushInt((uint32_t)sz, resultData + 1);
+            resultLength = 5;
+            return;
+        }
+    }
+#endif
 
     _file = LittleFS.open(filename, "r");
 
@@ -739,6 +1111,7 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
             crc = crc32.cksum_upd((uint8_t *)buf, readed);
         first = false;
     }
+    _file.close(); // close the CRC-loop handle; this path leaves _fileOpen false, so nothing auto-closes it later
 
     logInfoP("Read file info of \"%s\"", filename);
     logIndentUp();
@@ -761,31 +1134,44 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
  */
 void FileTransferModule::cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    #ifdef ARDUINO_ARCH_RP2040
-    FSInfo fsinfo = {0};
-    LittleFS.info(fsinfo);
-    const uint32_t total = (uint32_t)fsinfo.totalBytes;
-    const uint32_t used = (uint32_t)fsinfo.usedBytes;
-    #else
-    const uint32_t total = (uint32_t)LittleFS.totalBytes();
-    const uint32_t used = (uint32_t)LittleFS.usedBytes();
+    // A path ("sd/" / "efc/") selects that provider; no path -> LittleFS (unchanged). LittleFS reports BYTES
+    // (status 0x00); a provider reports KILOBYTES (status 0x01) because a >4 GB card overflows the 32-bit field.
+    uint32_t total = 0, used = 0;
+    uint8_t status = 0x00;
+#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
+    const char *rel;
+    const uint8_t drive = (length > 0 && data && data[0]) ? ftmDrive((const char *)data, &rel) : FD_INT;
+    if (drive != FD_INT)
+    {
+        uint64_t t = 0, f = 0;
+    #ifdef OPENKNX_SDCARD
+        if (drive == FD_SD) { t = sd::fileStore.totalBytes(); f = sd::fileStore.freeBytes(); }
     #endif
-    pushByte(0x0, resultData);
+    #ifdef OPENKNX_EXTFLASH
+        if (drive == FD_EFC) { t = efc::fileStore.totalBytes(); f = efc::fileStore.freeBytes(); }
+    #endif
+        total = (uint32_t)(t / 1024);
+        used = (uint32_t)((t >= f ? t - f : 0) / 1024);
+        status = 0x01; // values are KB
+    }
+    else
+#endif
+    {
+    #ifdef ARDUINO_ARCH_RP2040
+        FSInfo fsinfo = {0};
+        LittleFS.info(fsinfo);
+        total = (uint32_t)fsinfo.totalBytes;
+        used = (uint32_t)fsinfo.usedBytes;
+    #else
+        total = (uint32_t)LittleFS.totalBytes();
+        used = (uint32_t)LittleFS.usedBytes();
+    #endif
+    }
+    pushByte(status, resultData);
     pushInt(total, resultData + 1);
     pushInt(used, resultData + 5);
     resultLength = 9;
-    logInfoP("Filesystem: total %u B, used %u B, free %u B", (unsigned)total, (unsigned)used, (unsigned)(total >= used ? total - used : 0));
-}
-
-// Server-side directory-listing backend registry (default: none -> LittleFS only, unchanged behaviour).
-FileTransferModule::DirBackend FileTransferModule::_dirBackends[2];
-uint8_t FileTransferModule::_dirBackendN = 0;
-
-void FileTransferModule::registerDirBackend(const char *prefix, FtcDirOpen open, FtcDirNext next, FtcDirClose close)
-{
-    if (_dirBackendN >= 2 || prefix == nullptr || prefix[0] == '\0') return;
-    _dirBackends[_dirBackendN] = {prefix, open, next, close};
-    _dirBackendN++;
+    logInfoP("Filesystem: total %u, used %u, free %u (%s)", (unsigned)total, (unsigned)used, (unsigned)(total >= used ? total - used : 0), status ? "KB" : "B");
 }
 
 void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -796,40 +1182,51 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
     {
         const char *path = (char *)data;
         logDebugP("List directory \"%s\"", path);
-        // Resolve a registered prefix backend ("sd/…", "efc/…"); else the LittleFS default (unchanged).
-        if (_activeDirBe && _activeDirBe->close) _activeDirBe->close(); // close any stale iteration first
-        _activeDirBe = nullptr;
-        for (uint8_t i = 0; i < _dirBackendN; i++)
-        {
-            const char *p = _dirBackends[i].prefix;
-            const size_t L = strlen(p);
-            if (strncmp(path, p, L) == 0 && path[L] == '/') // "sd/x" -> backend "sd", stripped "/x"
-            {
-                _activeDirBe = &_dirBackends[i];
-                if (_activeDirBe->open) _activeDirBe->open(path + L);
-                break;
-            }
-        }
-        if (_activeDirBe == nullptr) _dir = LittleFS.open(path, "r");
+        // "sd/…" -> sd::fileStore · "efc/…" -> efc::fileStore · else the LittleFS default (unchanged).
+        bool routed = false;
+    #ifdef OPENKNX_SDCARD
+        if (_sdDirActive) sd::fileStore.dirClose(); // close any stale iteration first
+        _sdDirActive = false;
+        if (strncmp(path, "sd", 2) == 0 && path[2] == '/') routed = _sdDirActive = sd::fileStore.dirOpen(path + 2);
+    #endif
+    #ifdef OPENKNX_EXTFLASH
+        if (_efcDirActive) efc::fileStore.dirClose();
+        _efcDirActive = false;
+        if (!routed && strncmp(path, "efc", 3) == 0 && path[3] == '/') routed = _efcDirActive = efc::fileStore.dirOpen(path + 3);
+    #endif
+        if (!routed) _dir = LittleFS.open(path, "r");
         _dirOpen = true;
     }
 
     if (!checkOpenedDir(resultData, resultLength)) return;
 
-    // --- backend-served root (SD / ExtFlash): one entry per round-trip via the registered iterator ---
-    if (_activeDirBe != nullptr)
+    // --- Provider-served (sd/efc): one entry per round-trip; both expose the same dirNext ---
+    #if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH) || defined(OPENKNX_EXTFLASH)
+    if (_sdDirActive || _efcDirActive)
     {
         char name[64];
         name[0] = '\0';
-        const uint8_t type = _activeDirBe->next ? _activeDirBe->next(name, sizeof(name)) : 0;
+        uint8_t type = 0;
+        #ifdef OPENKNX_SDCARD
+        if (_sdDirActive) type = sd::fileStore.dirNext(name, sizeof(name));
+        #endif
+        #ifdef OPENKNX_EXTFLASH
+        if (_efcDirActive) type = efc::fileStore.dirNext(name, sizeof(name));
+        #endif
         if (type == 0)
         {
             resultLength = 2;
             pushByte(0x0, resultData);
             pushByte(0x0, resultData + 1);
             logDebugP("List directory completed");
-            if (_activeDirBe->close) _activeDirBe->close();
-            _activeDirBe = nullptr;
+        #ifdef OPENKNX_SDCARD
+            if (_sdDirActive) sd::fileStore.dirClose();
+        #endif
+        #ifdef OPENKNX_EXTFLASH
+            if (_efcDirActive) efc::fileStore.dirClose();
+        #endif
+            _sdDirActive = false;
+            _efcDirActive = false;
             _dirOpen = false;
             return;
         }
@@ -841,6 +1238,7 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
         resultLength = (uint8_t)(nlen + 2);
         return;
     }
+    #endif
 
     // --- LittleFS default (unchanged) ---
     File subDirectory = _dir.openNextFile();
@@ -869,7 +1267,7 @@ void FileTransferModule::cmdDirCreate(uint8_t length, uint8_t *data, uint8_t *re
     if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
     resultLength = 1;
 
-    if (!LittleFS.mkdir((char *)data))
+    if (!ftmMkdir((char *)data))
     {
         pushByte(0x85, resultData);
 
@@ -886,7 +1284,7 @@ void FileTransferModule::cmdDirDelete(uint8_t length, uint8_t *data, uint8_t *re
     if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
     resultLength = 1;
 
-    if (!LittleFS.rmdir((char *)data))
+    if (!ftmRmdir((char *)data))
     {
         pushByte(0x84, resultData);
         logInfoP("Deleting of the folder \"%s\" failed", data);
@@ -902,7 +1300,7 @@ void FileTransferModule::cmdFileDelete(uint8_t length, uint8_t *data, uint8_t *r
     if (checkOpenFile(resultData, resultLength) || checkOpenDir(resultData, resultLength)) return;
     resultLength = 1;
 
-    if (!LittleFS.remove((char *)data))
+    if (!ftmRemove((char *)data))
     {
         pushByte(0x44, resultData);
         logErrorP("Deleting of the file \"%s\" failed", data);
@@ -923,8 +1321,8 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         if (_fileOpen)
         {
             logInfoP("Closed open file");
-            _file.flush();
-            _file.close();
+            ftmXferClose();
+            _fileOpen = false; // handle is closed -> clear the flag so an early-return below leaves clean state
         }
         if (checkOpenDir(resultData, resultLength)) return;
 
@@ -946,9 +1344,19 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         } else {
             logInfoP("Truncate file upload");
         }
-        
-        _file = LittleFS.open(filename, isResume ? "r+" : "w");
-        if (!_file)
+
+        // Optional exact total size (LE uint32) appended AFTER the NUL-terminated name -> SD preAllocate.
+        // Bounds-checked within `length`; absent (older client) -> 0 = no preAllocate (legacy behaviour).
+        uint32_t sizeHint = 0;
+        for (uint8_t i = 4; i < length; i++)
+            if (data[i] == '\0')
+            {
+                if ((size_t)i + 5 <= (size_t)length)
+                    sizeHint = (uint32_t)data[i + 1] | ((uint32_t)data[i + 2] << 8) | ((uint32_t)data[i + 3] << 16) | ((uint32_t)data[i + 4] << 24);
+                break;
+            }
+
+        if (!ftmXferOpenWrite(filename, isResume, sizeHint))
         {
             pushByte(0x42, resultData);
             logErrorP("Start file upload to \"%s\" is failed", filename);
@@ -956,7 +1364,6 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         }
 
         logInfoP("Start file upload to \"%s\"", filename);
-        logDebugP("File Size: %d", _file.size());
         _heartbeat = millis();
         _fileOpen = true;
         _lastSequence = 0;
@@ -967,9 +1374,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
     if (data[0] == 0xFF && data[1] == 0xFF)
     {
         logInfoP("The file upload was successfully completed");
-        _file.flush();
-        logDebugP("File Size: %d", _file.size());
-        _file.close();
+        ftmXferClose();
         _fileOpen = false;
         resultLength = 0;
         return;
@@ -1008,8 +1413,7 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
         const char *filename = (const char *)(data + 6);
         if (_fileOpen)
         {
-            _file.flush();
-            _file.close();
+            ftmXferClose();
             _fileOpen = false;
         }
         if (checkOpenDir(resultData, resultLength)) return true;
@@ -1025,8 +1429,16 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
 
         _size = data[2];               // payload B/chunk -> seek stride ((seq-1)*_size)
         const uint8_t flags = data[3]; // bit0 resume (r+ vs w), bit1 keepBitmap (recovery re-open)
-        _file = LittleFS.open(filename, (flags & 0x01) ? "r+" : "w");
-        if (!_file)
+        // Optional exact total size (LE uint32) after the NUL name (from data+6) -> SD preAllocate; else 0 (legacy).
+        uint32_t sizeHint = 0;
+        for (uint8_t i = 6; i < length; i++)
+            if (data[i] == '\0')
+            {
+                if ((size_t)i + 5 <= (size_t)length)
+                    sizeHint = (uint32_t)data[i + 1] | ((uint32_t)data[i + 2] << 8) | ((uint32_t)data[i + 3] << 16) | ((uint32_t)data[i + 4] << 24);
+                break;
+            }
+        if (!ftmXferOpenWrite(filename, flags & 0x01, sizeHint))
         {
             pushByte(0x42, resultData);
             logErrorP("Start fast upload to \"%s\" failed", filename);
@@ -1035,6 +1447,8 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
         _fileOpen = true;
         _lastSequence = 0;
         _fastExpectedChunks = exp;
+        _fastRateBytes = 0;
+        _fastRateMs = millis(); // start the ingest-rate interval at the open
         if (!(flags & 0x02)) memset(_fastBitmap, 0, sizeof(_fastBitmap)); // clear unless keepBitmap (fixes S2)
         logInfoP("Start fast upload to \"%s\" (%s, %u chunks, %u B/chunk)", filename,
                  (flags & 0x01) ? "resume" : "truncate", exp, _size);
@@ -1047,8 +1461,7 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
     {
         if (_fileOpen)
         {
-            _file.flush();
-            _file.close();
+            ftmXferClose();
             _fileOpen = false;
         }
         logInfoP("Fast upload completed");
@@ -1070,7 +1483,12 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
     // wild nor index the bitmap out of bounds. Bit set <=> the correct bytes are on disk.
     if (seq >= 1 && seq <= _fastExpectedChunks && n <= _size && (uint32_t)(seq - 1) / 8 < sizeof(_fastBitmap) &&
         writeChunk(seq, data + 3, n)) // n <= _size: a chunk never overruns its ((seq-1)*_size) slot into the next
-        _fastBitmap[(seq - 1) >> 3] |= (uint8_t)(1u << ((seq - 1) & 7));
+    {
+        const uint8_t mask = (uint8_t)(1u << ((seq - 1) & 7));
+        uint8_t &cell = _fastBitmap[(seq - 1) >> 3];
+        if (!(cell & mask)) _fastRateBytes += n; // count NEW chunks only -> true forward-progress ingest rate
+        cell |= mask;
+    }
     return false; // SILENT (no L7 answer). L2 still ACKs -- the client sends fast DATA AckRequested.
 }
 
@@ -1120,6 +1538,22 @@ void FileTransferModule::cmdFileReport(uint8_t length, uint8_t *data, uint8_t *r
             resultData[6 + (i >> 3)] |= (uint8_t)(1u << (i & 7));
     }
     resultLength = (uint8_t)(6 + bmp);
+
+    // Append the target's MEASURED ingest rate (new bytes written / interval, B/s) so the client paces to the
+    // real ceiling instead of guessing. Two trailing bytes, BE. Backward-compatible: an old client stops at the
+    // bitmap; a new one reads them when resultLength > 6 + bmp. Skipped only when a huge bitmap leaves no room.
+    if ((uint16_t)(resultLength + 2) <= 247)
+    {
+        const uint32_t now = millis();
+        const uint32_t dt = (_fastRateMs && now > _fastRateMs) ? (now - _fastRateMs) : 0;
+        uint32_t bps = dt ? (uint32_t)(((uint64_t)_fastRateBytes * 1000ULL) / dt) : 0;
+        if (bps > 0xFFFF) bps = 0xFFFF;
+        resultData[resultLength] = (uint8_t)(bps >> 8);
+        resultData[resultLength + 1] = (uint8_t)(bps & 0xFF);
+        resultLength = (uint8_t)(resultLength + 2);
+        _fastRateBytes = 0;
+        _fastRateMs = now;
+    }
 }
 
 void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -1133,7 +1567,9 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
 
         _size = data[2];
 
-        if (data[2] > resultLength)
+        // -6 = the 4-byte header (result/seq) + 2-byte CRC readFile() appends after the payload; without it a
+        // 250..255 pkg overruns the fixed result buffer (bau resultData[0xFF]).
+        if (data[2] > resultLength - 6)
         {
             logIndentUp();
             logErrorP("Requested pkg is greater than max resultLength");
@@ -1143,8 +1579,8 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
             return;
         }
 
-        _file = LittleFS.open((char *)(data + 3), "r");
-        if (!_file)
+        int32_t fileSize = ftmXferOpenRead((char *)(data + 3));
+        if (fileSize < 0)
         {
             logIndentUp();
             logErrorP("File can't be opened");
@@ -1157,7 +1593,6 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
         _fileOpen = true;
 
         _lastSequence = 0;
-        int fileSize = _file.size();
         pushByte(0x0, resultData);
         pushInt(fileSize, resultData + 1);
         pushByte(0x0, resultData);

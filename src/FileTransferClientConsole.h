@@ -2,7 +2,6 @@
 /**
  * @file        FileTransferClientConsole.h
  * @brief       "ftc" console: command parsing, validation and the colored help
- * @version     0.0.1
  * @date        2026-07-16
  * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
  *              Licensed under GNU GPL v3.0

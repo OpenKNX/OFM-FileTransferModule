@@ -6,15 +6,6 @@
 
 #define HEARTBEAT_INTERVAL 30000
 
-// A directory-listing backend for a non-LittleFS root ("sd/", "efc/"). The storage module registers one
-// (e.g. SDCardModule, SdFat-based), so the server can list/df those roots on a remote `ll`/`df` — LittleFS
-// stays the default (no backend registered -> unchanged behaviour). Stateful iterator: open() begins the
-// listing of `path` (the prefix already stripped, e.g. "/"), next() yields ONE entry (0 = end, 1 = file,
-// 2 = dir; the name is written to nameOut, NUL-terminated), close() ends the iteration.
-typedef bool (*FtcDirOpen)(const char *path);
-typedef uint8_t (*FtcDirNext)(char *nameOut, uint16_t nameCap);
-typedef void (*FtcDirClose)();
-
 class FileTransferModule : public OpenKNX::Module
 {
   public:
@@ -29,21 +20,11 @@ class FileTransferModule : public OpenKNX::Module
     const uint8_t _revision = MODULE_FileTransferModule_Version_Revision;
     void loop(bool configured) override;
 
-    // Register a directory-listing backend for a path prefix (e.g. "sd"). Bounded to 2 (sd + efc).
-    // Backward-compatible: with none registered, remote listing stays LittleFS-only.
-    static void registerDirBackend(const char *prefix, FtcDirOpen open, FtcDirNext next, FtcDirClose close);
-
   private:
-    struct DirBackend
-    {
-        const char *prefix = nullptr;
-        FtcDirOpen open = nullptr;
-        FtcDirNext next = nullptr;
-        FtcDirClose close = nullptr;
-    };
-    static DirBackend _dirBackends[2];
-    static uint8_t _dirBackendN;
-    DirBackend *_activeDirBe = nullptr; // non-null while iterating a backend dir (instead of the LittleFS _dir)
+    // Remote `ll sd/…` / `ll efc/…` are served directly from sd::/efc::fileStore (guarded); LittleFS uses
+    // the default _dir path. True while iterating that provider's listing instead of the LittleFS _dir.
+    bool _sdDirActive = false;
+    bool _efcDirActive = false;
 
     uint32_t _rebootRequested = 0;
     uint32_t _heartbeat = 0;
@@ -54,6 +35,16 @@ class FileTransferModule : public OpenKNX::Module
     bool _fileOpen = false;
     bool _dirOpen = false;
     uint16_t _lastSequence = 0;
+
+    // Active transfer target: LittleFS (_file) by default, or the SD / ext-flash provider store for a
+    // "sd/…" / "efc/…" path. The store's src/sink is stateful (one transfer at a time), like _file.
+    uint8_t _xferDrive = 0;  // 0 LittleFS · 1 sd · 2 efc
+    uint32_t _xferSize = 0;  // active download size (drives have no _file.available())
+    bool _xferWrite = false; // active transfer writes a sink (upload) vs reads a src (download)
+    // Open the transfer source/sink on the right drive (path prefix); read/write/close route by _xferDrive.
+    int32_t ftmXferOpenRead(const char *path);         // -> size, or -1
+    bool ftmXferOpenWrite(const char *path, bool resume, uint32_t sizeHint = 0);
+    void ftmXferClose();
 
 #ifdef OPENKNX_FTC_CONSOLE
     // --- Console-tunnel server (obj 160, separate from the FTC-159 command table). Single logical
@@ -78,11 +69,32 @@ class FileTransferModule : public OpenKNX::Module
     void conLoop(); // run a parked command under freeLoopTime() + reap idle sessions
 #endif
 
+    // Cooperative (non-blocking) SD/EFC whole-file CRC for FileInfo with the CRC-request flag. Reads a bounded
+    // slice per loop() pass under freeLoopTime(); the client polls FileInfo until the answer flips from
+    // 0x02 (computing) to 0x00 + size + crc. Enables SD/EFC resume + a real verify without a blocking read.
+    // MUST live OUTSIDE the OPENKNX_FTC_CONSOLE guard above: the .cpp references these under the independent
+    // OPENKNX_SDCARD/OPENKNX_EXTFLASH guard, so a console-less build would otherwise drop the declarations.
+    // Also left unguarded here (the macros are defined by a header included after this one); the crcLoop/
+    // crcCancel bodies + call sites stay guarded, so a non-SD/EFC build never defines nor references them.
+    bool _crcActive = false;
+    uint8_t _crcDrive = 0;       // FD_SD / FD_EFC
+    char _crcPath[64] = {};      // rel path the job CRCs (identifies a re-poll vs a new request)
+    uint32_t _crcSize = 0;
+    uint32_t _crcOff = 0;
+    uint32_t _crcVal = 0;        // running CRC32; final once _crcOff >= _crcSize
+    bool _crcFirst = true;
+    uint32_t _crcLastAccess = 0; // last FileInfo(flag) poll -> idle-cancel a stranded job
+    FastCRC32 _crc32;
+    void crcLoop();              // advance the CRC by a bounded slice; called from loop() (SD/EFC builds)
+    void crcCancel();            // close the read handle + clear the job state
+
     // Fast-transfer server state, STATIC (no malloc). Received-bitmap indexed by (seq-1); a bit is set
     // only after the per-chunk CRC verifies AND the write succeeds. Over FTM_FAST_MAX_CHUNKS -> 0x4A -> classic.
     static constexpr uint16_t FTM_FAST_MAX_CHUNKS = 8192;
     uint8_t _fastBitmap[FTM_FAST_MAX_CHUNKS / 8]; // 1024 B, absolute, seq-1 indexed (global => zero-init)
     uint16_t _fastExpectedChunks = 0;             // chunk count from the fast open; sizes the report + bounds
+    uint32_t _fastRateBytes = 0;                  // new (non-resend) bytes written since the last cmd45 -> ingest rate
+    uint32_t _fastRateMs = 0;                     // millis() of the last cmd45; the interval for the reported rate
 
 #ifdef OPENKNX_FTC_SECURITY
     // --- FTC access control (opt-in via -D OPENKNX_FTC_SECURITY + FileTransfer.share.xml). Gates every FTC

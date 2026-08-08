@@ -1,7 +1,6 @@
 /**
  * @file        FileTransferClientConsole.cpp
  * @brief       "ftc" console: command parsing, validation and the colored help
- * @version     0.0.1
  * @date        2026-07-16
  * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
  *              Licensed under GNU GPL v3.0
@@ -18,12 +17,13 @@
 /**
  * @brief Transfer-mode keyword -> 0 safe/classic, 1 fast/windowed, 2 forget.
  *
- * Aliases: win/windowed -> fast, ff/faf -> forget; any unrecognised token -> safe.
+ * Aliases: win/windowed -> fast, ff -> forget; anything unrecognised -> safe.
+ * any unrecognised token -> safe.
  */
 static uint8_t ftcParseModeWord(const char *t)
 {
     if (strcmp(t, "fast") == 0 || strcmp(t, "win") == 0 || strcmp(t, "windowed") == 0) return 1;
-    if (strcmp(t, "forget") == 0 || strcmp(t, "ff") == 0 || strcmp(t, "faf") == 0) return 2;
+    if (strcmp(t, "forget") == 0 || strcmp(t, "ff") == 0) return 2;
     return 0; // "safe" and anything unrecognised
 }
 
@@ -46,7 +46,7 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "  %-33s  %s", "info | i", "Device fingerprint: mask/class, FTM version, features");
     c.ftcOut(0, "  %-33s  %s", "info ga", "Group communication: GA table + com-object links (not on BCU1 / mask 0x0012)");
     c.ftcOut(0, "  %-33s  %s", "info <file>", "Size + CRC32 of one file");
-    c.ftcOut(0, "  %-33s  %s", "df", "Filesystem: total / used / free + usage bar");
+    c.ftcOut(0, "  %-33s  %s", "df [sd|efc]", "Filesystem: total / used / free + usage bar (drive optional)");
     c.ftcOut(0, "  %-33s  %s", "ll [dir]", "List a directory: name, size, CRC32 (+ usage bar)");
     c.ftcOut(0, "  %-33s  %s", "ls [dir]", "List a directory: names only");
     c.ftcOut(0, "");
@@ -67,9 +67,9 @@ void FileTransferClientConsole::showUsage()
 #endif
 
     c.ftcOut(H, "Transfer");
-    c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; flags below");
+    c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; mode safe|fast, fast w<N> pins the window; flags below");
     c.ftcOut(0, "  %-33s  %s", "get | receive | download <rem> [local]", "Download a file (always fresh)");
-    c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [flags]", "Speed test: push a pattern, report B/s");
+    c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [sd|efc] [w<N>]", "Speed test: push a pattern, report B/s (sd|efc = target drive; fast w<N> = fixed window; keep = leave file)");
     c.ftcOut(0, "");
 
     c.ftcOut(H, "Locate & firmware");
@@ -88,9 +88,10 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "  %-33s  %s", "?", "This help");
     c.ftcOut(0, "");
 
-    c.ftcOut(0, "  [mode]  = safe (default) | fast | faf (experimental)       [pkg] = auto (default, starts 254 + degrades) or 16..254");
+    c.ftcOut(0, "  [mode]  = safe (default) | fast      perf only: fast w<N> pins the AIMD window (no end-burst overrun)   [pkg] = auto (default, 254 + degrades) or 16..254");
     c.ftcOut(0, "  [flags] = apply . verbose . no-resume (send) . keep (default) . verbose (perf | receive)");
-    c.ftcOut(0, "  local path: / (LittleFS) | sd/ (SD) | efc/ (ExtFlash)");
+    c.ftcOut(0, "  remote drive prefix (routed at the target): / (LittleFS) | sd/ (SD) | efc/ (ExtFlash) - df ll ls rm mkdir rmdir mv info get perf");
+    c.ftcOut(0, "  send <src> / get <rem> [local]: the SOURCE / local-sink path takes the same prefix; send's remote name is always /<basename>");
     c.ftcOut(0, "");
     c.ftcOut(H, "Examples:");
     c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 send sd/app.bin.gz apply", "Upload from SD + auto-apply (RP target)");
@@ -384,7 +385,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
     if (strcmp(sub, "df") == 0) // filesystem: total / used / free + usage bar
     {
-        _client.requestFsInfo(pa);
+        _client.requestFsInfo(pa, argc >= 3 ? arg : ""); // "sd/" / "efc/" -> that provider; else LittleFS
         return true;
     }
     if (strcmp(sub, "info") == 0 || strcmp(sub, "i") == 0)
@@ -503,12 +504,13 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         // ftc <pa> perf [kb] [pkg] [mode] [flags] -- upload a generated pattern, report throughput. Trailing
         // tokens are order-tolerant: numbers fill kb then pkg, `auto` = pkg auto, a keyword sets the mode,
-        // "keep" leaves the file (/ftcperf_<crc>.bin), "verbose"/"v" = 1 Hz progress.
-        char t[5][24] = {{0}};
-        const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %23s %23s %23s %23s %23s", t[0], t[1], t[2], t[3], t[4]);
-        unsigned kb = 0, pk = 0, seenNum = 0;
+        // "keep" leaves the file (/ftcperf_<crc>.bin), "verbose"/"v" = 1 Hz progress, `w<N>` pins the fast window.
+        char t[6][24] = {{0}};
+        const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %23s %23s %23s %23s %23s %23s", t[0], t[1], t[2], t[3], t[4], t[5]);
+        unsigned kb = 0, pk = 0, seenNum = 0, fixedWnd = 0;
         uint8_t mode = 0;
         bool keep = false, verbose = false;
+        char pdrive[8] = {0}; // "sd" / "efc" target drive (empty = LittleFS)
         for (int i = 0; i < nt; i++)
         {
             if (isdigit((unsigned char)t[i][0]))
@@ -518,18 +520,34 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
                 else
                     pk = (unsigned)atoi(t[i]);
             }
+            else if ((t[i][0] == 'w' || t[i][0] == 'W') && isdigit((unsigned char)t[i][1]))
+                fixedWnd = (unsigned)atoi(t[i] + 1); // w<N>: pin the fast window (no AIMD probe-up; loss still ratchets down)
             else if (strcmp(t[i], "keep") == 0)
                 keep = true;
             else if (strcmp(t[i], "verbose") == 0 || strcmp(t[i], "v") == 0)
                 verbose = true;
             else if (strcmp(t[i], "auto") == 0)
                 pk = 0; // pkg auto (default) -- explicit token, leave pk at 0
+            else if (strcmp(t[i], "nr") == 0 || strcmp(t[i], "no-resume") == 0 ||
+                     strcmp(t[i], "noresume") == 0 || strcmp(t[i], "fresh") == 0)
+                ; // no-resume: perf regenerates the pattern (fresh by default) -- accept the token, don't let it reset the mode
+            else if (strcmp(t[i], "sd") == 0 || strcmp(t[i], "sd/") == 0 || strcmp(t[i], "efc") == 0 || strcmp(t[i], "efc/") == 0)
+            {
+                strncpy(pdrive, t[i], sizeof(pdrive) - 1); // perf target drive -> sd/ftcperf.bin etc. (accept "sd" or "sd/")
+                char *sl = strchr(pdrive, '/');
+                if (sl) *sl = '\0'; // "sd/" -> "sd" (ftcPerfCrcDone re-adds the slash)
+            }
             else
-                mode = ftcParseModeWord(t[i]);
+            {
+                // Only a RECOGNISED mode word (fast/forget) or an explicit "safe" sets the mode -- otherwise a
+                // stray trailing token (previously "nr") would silently reset a just-parsed mode to 0 (=safe).
+                const uint8_t m = ftcParseModeWord(t[i]);
+                if (m != 0 || strcmp(t[i], "safe") == 0) mode = m;
+            }
         }
         if (kb == 0) kb = 16;
         _client.setVerbose(verbose);
-        _client.requestPerf(pa, kb * 1024u, pk, mode, keep); // pk 0 -> auto (fastest frame); the CONFIG box echoes it
+        _client.requestPerf(pa, kb * 1024u, pk, mode, keep, (uint16_t)fixedWnd, pdrive); // pk 0 -> auto; w<N> pins the fast window; pdrive = sd/efc
         return true;
     }
 
@@ -554,11 +572,18 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     bool apply = false;    // opt-in (default off): never reboot a target unless explicitly asked
     bool noResume = false; // default: auto-resume a matching partial
     bool verbose = false;
+    unsigned fixedWnd = 0; // fast w<N>: pin the fast window (0 = adaptive AIMD)
+    char target[32] = {0}; // explicit remote target ("sd/foo", "efc/foo", "/foo"); empty -> /<basename>
     const char *rest[5] = {t1, t2, t3, t4, t5};
     for (int i = 0; i < nt - 1; i++) // tokens after src
     {
         const char *tk = rest[i];
-        if (isdigit((unsigned char)tk[0]))
+        if (strchr(tk, '/') != nullptr && target[0] == '\0') // a token with '/' is the remote path, not an option
+        {
+            strncpy(target, tk, sizeof(target) - 1);
+            target[sizeof(target) - 1] = '\0';
+        }
+        else if (isdigit((unsigned char)tk[0]))
             pk = (unsigned)atoi(tk);
         else if (strcmp(tk, "auto") == 0)
             pk = 0; // pkg auto (default)
@@ -570,13 +595,18 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             noResume = true;
         else if (strcmp(tk, "verbose") == 0 || strcmp(tk, "v") == 0)
             verbose = true;
+        else if ((tk[0] == 'w' || tk[0] == 'W') && isdigit((unsigned char)tk[1]))
+            fixedWnd = (unsigned)atoi(tk + 1); // fast w<N>: pin the fast window (no AIMD probe-up; loss still ratchets down)
         else
-            mode = ftcParseModeWord(tk);
+        {
+            const uint8_t m = ftcParseModeWord(tk); // only a recognised mode word / explicit "safe" sets the mode
+            if (m != 0 || strcmp(tk, "safe") == 0) mode = m;
+        }
     }
     // mode + apply + resume are echoed by the CONFIG box (Mode / Options rows) that requestUpload prints.
     // The client range-checks pkg and the path length against its own constants/buffers.
     _client.setVerbose(verbose);
-    _client.requestUpload(pa, src, pk, noResume, mode, apply);
+    _client.requestUpload(pa, src, pk, noResume, mode, apply, target, (uint16_t)fixedWnd); // fast w<N> pins the window
     return true;
 }
 
