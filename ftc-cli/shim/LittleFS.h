@@ -1,13 +1,14 @@
-// ┬────┴  OFM-FileTransferModule / ftc-cli
-// ■ KNX   2026 OpenKNX - Erkan Çolak
-//
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) 2026, Erkan Çolak
-//
-// Host LittleFS shim (contract §1.3): File over std::fstream + a global LittleFS backed by the host
-// filesystem. Exactly the surface the built-in default backend uses. No FSInfo (host takes the #else
-// branch since no ARDUINO_ARCH_* is defined).
 #pragma once
+/**
+ * @file        LittleFS.h
+ * @brief       Host LittleFS shim — File over std::fstream + a host-filesystem-backed LittleFS global.
+ * @details     Exactly the surface the built-in default backend uses. No FSInfo: with no ARDUINO_ARCH_*
+ *              defined the client takes the #else branch, so LittleFS exposes totalBytes()/usedBytes().
+ *              Contract §1.3.
+ * @date        2026-07-25
+ * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
+ *              Licensed under GNU GPL v3.0
+ */
 #include <cstdint>
 #include <cstring>
 #include <filesystem>

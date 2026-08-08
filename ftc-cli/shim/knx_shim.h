@@ -1,13 +1,14 @@
-// ┬────┴  OFM-FileTransferModule / ftc-cli
-// ■ KNX   2026 OpenKNX - Erkan Çolak
-//
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) 2026, Erkan Çolak
-//
-// Host stand-in for the knx-lib slice the four FTC files touch (shim contract §2, §3, §4).
-// HostBau reproduces the 14 knx.bau().ftc* signatures byte-exact and forwards each to g_knxTunnel
-// (SecurityControl dropped; asap -> pa). No knx template or deep type crosses this boundary.
 #pragma once
+/**
+ * @file        knx_shim.h
+ * @brief       Host stand-in for the knx-lib slice the four FTC files touch (shim contract §2, §3, §4).
+ * @details     HostBau reproduces the knx.bau().ftc* method surface (§2) byte-exact and forwards each to
+ *              g_knxTunnel (SecurityControl dropped; asap -> pa). No knx template or deep type crosses
+ *              this boundary. HostKnxFacade wraps it as the `knx` global (bau() + individualAddress()).
+ * @date        2026-07-25
+ * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
+ *              Licensed under GNU GPL v3.0
+ */
 #include <cstdint>
 
 #include "knx_ip_tunnel.h" // the transport seam (global g_knxTunnel)
@@ -26,7 +27,7 @@ struct SecurityControl
     DataSecurity dataSecurity;
 };
 
-/// @brief Host BAU: the 14 ftc* methods from contract §2, each forwarding to the tunnel seam.
+/// @brief Host BAU: the ftc* methods of contract §2, each forwarding to the tunnel seam.
 class HostBau
 {
   public:
@@ -61,10 +62,16 @@ class HostBau
         (void)secCtrl;
         return g_knxTunnel.sendMemoryRead(asap, number, memoryAddress);
     }
+    bool ftcSendAdcRead(uint16_t asap, const SecurityControl secCtrl, uint8_t channelNr, uint8_t readCount)
+    {
+        (void)secCtrl;
+        return g_knxTunnel.sendAdcRead(asap, channelNr, readCount);
+    }
 
     // --- connection-oriented (ETS-parity) scan ---------------------------------------------------
     bool ftcScanConnect(uint16_t pa) { return g_knxTunnel.scanConnect(pa); }
     bool ftcScanConnected() { return g_knxTunnel.scanConnected(); }
+    bool ftcScanReadAcked() { return g_knxTunnel.scanReadAcked(); }
     // SecurityControl by const ref here (overload identity differs from the senders).
     void ftcScanReadDescriptor(const SecurityControl& sec)
     {
@@ -93,6 +100,10 @@ class HostBau
                                          uint8_t len))
     {
         g_knxTunnel.setMemoryCallback(cb);
+    }
+    void ftcSetAdcCallback(void (*cb)(uint16_t pa, uint8_t channel, uint8_t count, int16_t value))
+    {
+        g_knxTunnel.setAdcCallback(cb);
     }
 
     // --- flow control ----------------------------------------------------------------------------
