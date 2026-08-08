@@ -89,7 +89,7 @@ flowchart TD
     end
     subgraph BAU["KNX stack (lib/knx)"]
         TX["BauSystemB::ftcSendCommand()<br/>connectionless FunctionProperty<br/>AckRequested + LowPriority<br/>length &gt; 251 rejected"]
-        CB["callbacks (stack dispatch context):<br/>ftcOnResponse / ftcOnDeviceDescriptor / ftcOnPropertyValue<br/>-> only park bytes, loop() acts"]
+        CB["callbacks (stack dispatch context):<br/>ftcOnResponse / ftcOnDeviceDescriptor / ftcOnPropertyValue / ftcOnMemory / ftcOnAdc<br/>-> only park bytes, loop() acts"]
     end
     subgraph WIRE["NCN5130 host-UART driver (lib/TPUart)"]
         DLL["DataLinkLayer — 50-deep TX FIFO<br/>baud auto-probe {19200, 38400}"]
@@ -127,8 +127,8 @@ Key transport facts (`bau_systemB.cpp`):
 
 ### 2.2 Dispatch-context rule
 
-The three response callbacks (`ftcOnResponse`, `ftcOnDeviceDescriptor`, `ftcOnPropertyValue`) fire
-**inside the KNX stack's own dispatch**. They do the absolute minimum — copy the bytes into a buffer
+The five response callbacks (`ftcOnResponse`, `ftcOnDeviceDescriptor`, `ftcOnPropertyValue`, `ftcOnMemory`,
+`ftcOnAdc`) fire **inside the KNX stack's own dispatch**. They do the absolute minimum — copy the bytes into a buffer
 and set a `volatile` flag — and return. The state machine reads that flag in the next `loop()` tick
 and does the file I/O and the follow-up send there. Doing I/O or a send from inside the callback would
 re-enter the application layer from within its own callback. Scan answers use a small
@@ -953,7 +953,7 @@ target changes less often than the command.
 - `<pa>` — `a.l.d`, e.g. `5.0.3` (comes first).
 - `<src>` — `test` = built-in 2 KB RAM pattern (→ written to `/ftctest.bin` on the target), or a local SD path.
 - `[pkg]` — 16..254, default 64. **Bigger = faster; 254 = max** (§6.4).
-- `[mode]` — `safe` | `fast` | `forget` (aliases: `win`/`windowed` = fast, `ff`/`faf` = forget). Order-tolerant with `pkg`.
+- `[mode]` — `safe` | `fast` | `forget` (aliases: `win`/`windowed` = fast, `ff` = forget). Order-tolerant with `pkg`.
 
 **Examples:**
 

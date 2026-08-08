@@ -351,3 +351,6 @@ MigrationBackup/
 
 # PlatformIO build tree (ftc-cli native build output)
 .pio/
+
+# macOS Finder metadata
+.DS_Store

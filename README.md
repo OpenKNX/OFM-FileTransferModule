@@ -82,4 +82,7 @@ These may not used by any other module.
 |159|100|Get Version|
 |159|101|Firmware Update|
 |159|102|Check Features|
+|159|103|Auth Challenge (with `OPENKNX_FTC_SECURITY`)|
+|159|104|Auth Response (with `OPENKNX_FTC_SECURITY`)|
+|159|105|Auth Logout (with `OPENKNX_FTC_SECURITY`)|
 |160|1 / 2|Interactive console (with `OPENKNX_FTC_CONSOLE`)|
