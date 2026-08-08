@@ -1,8 +1,7 @@
-# ┬────┴  OFM-FileTransferModule / ftc-cli
+#!/usr/bin/env python3
+# Open ■
+# ┬────┴  pio_zig_cross
 # ■ KNX   2026 OpenKNX - Erkan Çolak
-#
-# SPDX-License-Identifier: GPL-3.0-or-later
-# Copyright (c) 2026, Erkan Çolak
 #
 # PlatformIO pre-build hook: make ONE `pio run` cross-build the whole desktop matrix.
 #
@@ -33,6 +32,7 @@ TARGETS = {
     "macos-x64":     ("macos",   "clang", "x86_64", None,                             []),
     "linux-x64":     ("linux",   "zig",   None,     "x86_64-linux-gnu." + GLIBC_PIN,  []),
     "linux-arm64":   ("linux",   "zig",   None,     "aarch64-linux-gnu." + GLIBC_PIN, []),
+    "linux-armhf":   ("linux",   "zig",   None,     "arm-linux-gnueabihf." + GLIBC_PIN, []), # 32-bit ARM hard-float: Raspberry Pi OS 32-bit (armv7)
     "windows-x86":   ("windows", "zig",   None,     "x86-windows-gnu",                WINSOCK),
     "windows-x64":   ("windows", "zig",   None,     "x86_64-windows-gnu",             WINSOCK),
     "windows-arm64": ("windows", "zig",   None,     "aarch64-windows-gnu",            WINSOCK),
@@ -136,10 +136,21 @@ def mac_sdk_path():
 
 # ---- resolve this env's target from its name ----------------------------------------------------
 name = env["PIOENV"]
-target = name[len("ftc-cli-"):] if name.startswith("ftc-cli-") else name
+# The env NAME selects the target: "ftc-cli-<target>" (the CLI exe) or "libftc-<target>" (the shared lib).
+if name.startswith("ftc-cli-"):
+    target = name[len("ftc-cli-"):]
+elif name.startswith("libftc-"):
+    target = name[len("libftc-"):]
+else:
+    target = name
 if target not in TARGETS:
     die("env '%s' is not a known target; expected ftc-cli-<%s>" % (name, "|".join(TARGETS)))
 os_token, engine, mac_arch, triple, link_flags = TARGETS[target]
+
+# The libftc-* envs build a SHARED library (not an executable): -shared is a LINK flag, so it must go to
+# LINKFLAGS (build_flags would only reach the compile step -> the linker would still demand main()).
+if name.startswith("libftc-"):
+    env.Append(LINKFLAGS=["-shared"])
 
 if engine == "clang":
     # macOS: host clang, target arch + Xcode SDK (safe -isysroot; no libc++ override).
@@ -160,6 +171,9 @@ else:
     wrap = write_wrappers(os.path.join(tools_dir, "wrap", target), zig, triple)
     env.PrependENVPath("PATH", wrap)
     env.Replace(CC="cc", CXX="c++", LINK="c++", AR="ar", RANLIB="ranlib")
+    # Strip symbols at link time: the zig linux/windows exes are ~10 MB unstripped (debug/symbol
+    # tables) vs ~1 MB stripped; these binaries are checked in under release/Tools, so keep them lean.
+    env.Append(LINKFLAGS=["-s"])
     if link_flags:
         env.Append(LINKFLAGS=link_flags)
 

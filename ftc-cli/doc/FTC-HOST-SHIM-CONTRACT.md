@@ -80,15 +80,15 @@ All satisfied by the host libc / libstdc++.
 
 ---
 
-## 2. The 14 `knx.bau().ftc*` methods — exact signatures
+## 2. The 18 `knx.bau().ftc*` methods — exact signatures
 
 Declared in `knx/src/knx/bau_systemB.h` (class `BauSystemB`, `#ifdef OPENKNX_FTC` block lines 34-64).
 Definitions in `knx/src/knx/bau_systemB.cpp:599-704`. `ftcTxQueueSize` is `virtual` in the base
 (`bau_systemB.h:63`) and `override`n in `bau07B0_ip.cpp:214` (and `bau091A.cpp:269`).
 
 `knx.bau()` returns `BauSystemB&`-compatible; on the real build the static type is `Bau07B0IP&`
-(`bau07B0_ip.h:18`, `class Bau07B0IP : public BauSystemBDevice`), which inherits all 14 from `BauSystemB`.
-**The shim's bau class must expose all 14 with these exact signatures** (this is the transport seam —
+(`bau07B0_ip.h:18`, `class Bau07B0IP : public BauSystemBDevice`), which inherits all 18 from `BauSystemB`.
+**The shim's bau class must expose all 18 with these exact signatures** (this is the transport seam —
 implementations are backed by a KNXnet/IP tunnel, out of scope here).
 
 ```cpp
@@ -103,10 +103,13 @@ bool ftcSendPropertyValueWrite(uint16_t asap, const SecurityControl secCtrl, uin
                     uint8_t* data, uint8_t length);                               // bau_systemB.h:50-51
 bool ftcSendMemoryRead(uint16_t asap, const SecurityControl secCtrl, uint8_t number,
                     uint16_t memoryAddress);                                       // bau_systemB.h:53
+bool ftcSendAdcRead(uint16_t asap, const SecurityControl secCtrl, uint8_t channelNr,
+                    uint8_t readCount);                                            // A_ADC_Read (BCU bus voltage)
 
 // --- connection-oriented (ETS-parity) scan shims ---
 bool ftcScanConnect(uint16_t pa);                                                 // bau_systemB.h:57
 bool ftcScanConnected();                                                          // bau_systemB.h:58
+bool ftcScanReadAcked();                                                          // present once the device T_ACKed the CO read
 void ftcScanReadDescriptor(const SecurityControl& sec);                          // bau_systemB.h:59
 void ftcScanDisconnect();                                                        // bau_systemB.h:60
 
@@ -119,9 +122,11 @@ void ftcSetPropertyCallback(void (*cb)(uint16_t pa, uint8_t objectIndex, uint8_t
                     const uint8_t* data, uint8_t length));                        // bau_systemB.h:47
 void ftcSetMemoryCallback(void (*cb)(uint16_t pa, uint16_t addr, const uint8_t* data,
                     uint8_t len));                                                // bau_systemB.h:54
+void ftcSetAdcCallback(void (*cb)(uint16_t pa, uint8_t channel, uint8_t count, int16_t value));
 
 // --- flow control ---
 virtual uint16_t ftcTxQueueSize();  // base returns 0 (bau_systemB.h:63); Bau07B0IP overrides (bau07B0_ip.h:37)
+virtual void ftcPacingRate(uint32_t deliveredBps, bool clean);  // host BBR-style pacing feedback (no-op on TP)
 ```
 
 **Const/param exactness notes (do not drift — the source relies on overload identity):**
@@ -129,17 +134,17 @@ virtual uint16_t ftcTxQueueSize();  // base returns 0 (bau_systemB.h:63); Bau07B
   const ref** (`const SecurityControl&`) on `ftcScanReadDescriptor`.
 - `data` on the two **senders** is `uint8_t*` (non-const); on the **callbacks** it is `const uint8_t*`
   for Dd/Prop/Memory but **non-const `uint8_t*`** for the Response callback (see §3).
-- All four setters take a bare C function pointer (not `std::function`); the client passes `static`
+- All five setters take a bare C function pointer (not `std::function`); the client passes `static`
   member functions (§3).
 
-Call-site inventory (proof the shim needs no more than these 14): `knx.bau().ftc*` appears at
+Call-site inventory (proof the shim needs no more than these 18): `knx.bau().ftc*` appears at
 `FileTransferClient.cpp` lines 523, 592, 593, 735, 788, 845, 851, 1274, 1575, 1596, 1644, 1729, 1811,
 1895, 1933, 1952, 2016, 2135, 2159, 2330-2332, 2363, 2379, 2388, 2415, 2535, 2561, 2582, 2966, 3001,
-3032, 4094, 4158, 4183, 4186, 4192, 4203, 4583, 4590, 4613, 4652 — all resolve to the 14 above.
+3032, 4094, 4158, 4183, 4186, 4192, 4203, 4583, 4590, 4613, 4652 — all resolve to the 18 above.
 
 ---
 
-## 3. The four `ftcSet*Callback` callback types
+## 3. The five `ftcSet*Callback` callback types
 
 These are **not named typedefs** in knx — they are inline function-pointer types in the setter parameter
 and in the private member field. The shim must reproduce them byte-exact (member fields cited for the
@@ -151,6 +156,7 @@ canonical type):
 | `ftcSetDeviceDescriptorCallback` | `_ftcDdCb` `bau_systemB.h:179` | `void (*)(uint16_t pa, uint8_t descriptorType, const uint8_t* data)` |
 | `ftcSetPropertyCallback` | `_ftcPropCb` `bau_systemB.h:180` | `void (*)(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, const uint8_t* data, uint8_t length)` |
 | `ftcSetMemoryCallback` | `_ftcMemCb` `bau_systemB.h:181` | `void (*)(uint16_t pa, uint16_t addr, const uint8_t* data, uint8_t len)` |
+| `ftcSetAdcCallback` | `_ftcAdcCb` | `void (*)(uint16_t pa, uint8_t channel, uint8_t count, int16_t value)` |
 
 **Where knx invokes them** (the transport seam must call these exact prototypes when a tunnel reply
 arrives):
@@ -160,6 +166,7 @@ arrives):
 - `_ftcPropCb(asap, objectIndex, propertyId, data, length)` — `bau_systemB.cpp:652`
 - `_ftcMemCb(asap, memoryAddress, data, number)` — `bau_systemB.cpp:676` (note: `addr`←`memoryAddress`,
   `len`←`number`)
+- `_ftcAdcCb(asap, channel, count, value)` — from the A_ADC_Response decode (BCU bus-voltage read)
 
 **Where the client defines & registers them** (the functions the shim's bau will call back):
 - `ftcOnResponse` — decl `FileTransferClient.h:249`
@@ -174,6 +181,7 @@ arrives):
 - `ftcOnMemory` — decl `FileTransferClient.h:255`
   `static void ftcOnMemory(uint16_t pa, uint16_t addr, const uint8_t* data, uint8_t len);`
   registered `FileTransferClient.cpp:2535`
+- `ftcOnAdc` — `static void ftcOnAdc(uint16_t pa, uint8_t channel, uint8_t count, int16_t value);` (bus-voltage read)
 
 The response callback's "byte buffer + length + PA + object index" that the prompt asked about: the buffer
 is `uint8_t* data`, length `uint8_t length`, PA `uint16_t pa` (the responder's source address, `asap` on
@@ -192,7 +200,7 @@ ESP32). The four files use **only two** facade members plus the two knx value-ty
 | `knx.individualAddress()` | `uint16_t individualAddress()` `knx_facade.h:215-218` | `FileTransferClient.cpp:558,1998,2050,4091,4152`; `FileTransferClientConsole.cpp:165` |
 
 **Exact type `knx.bau()` returns:** `Bau07B0IP&` (`bau07B0_ip.h:18`). For the shim you do **not** need
-`Bau07B0IP`; you need a host class (any name) exposing the 14 methods of §2, and `knx.bau()` returning a
+`Bau07B0IP`; you need a host class (any name) exposing the 18 methods of §2, and `knx.bau()` returning a
 reference to it. `knx.freeLoopTime()` is **NOT** used — every `freeLoopTime()` call is `openknx.freeLoopTime()`
 (§5); the earlier-looking `knx.freeLoopTime` is the tail of `openknx.freeLoopTime` (verified:
 `FileTransferClient.cpp:2270,3423,4249`).
@@ -364,7 +372,7 @@ compiled set** at `FileTransferClient.cpp:4986` — the ftc-cli does **not** nee
 |-------------|-----------|-----------|-------|
 | `OpenKNX.h` (umbrella) | ~40-80 LOC | Easy | Just `#include`s the sub-shims + the `CONSOLE_HEADLINE_COLOR` / `MODULE_FileTransferModule_Version` macros + pulls `millis()`. |
 | `Arduino.h`/runtime (or folded into umbrella) | ~10 LOC | Trivial | Only `millis()`. No `delay`, no `String`. |
-| `knx` facade + `SecurityControl`/`DataSecurity` + bau class | ~60-120 LOC | **Medium — the real work** | The 14 methods of §2 are the transport seam (KNXnet/IP tunnel). Signatures are flat POD/function-pointer — **no knx templates, no deep types** leak into the four files. `knx.bau()` returns a plain host class ref. |
+| `knx` facade + `SecurityControl`/`DataSecurity` + bau class | ~60-120 LOC | **Medium — the real work** | The 18 methods of §2 are the transport seam (KNXnet/IP tunnel). Signatures are flat POD/function-pointer — **no knx templates, no deep types** leak into the four files. `knx.bau()` returns a plain host class ref. |
 | `OpenKNX::Module`/`Base` | ~30 LOC | Easy | 6 abstract virtuals (§4); no `GroupObject`, no `Param*`. |
 | `OpenKNX::Facade` (`openknx`) — Logger + Console + `freeLoopTime` | ~60-90 LOC | Easy | 5 logger methods (variadic → vprintf), 2 console methods, 1 bool. |
 | `LittleFS.h` (`File`/`FSInfo`/`LittleFS`) | ~50-80 LOC | Easy-Medium | `std::fstream` backing; watch the `explicit operator bool` on `File`. `FSInfo` branch is dead on host. |
@@ -372,7 +380,7 @@ compiled set** at `FileTransferClient.cpp:4986` — the ftc-cli does **not** nee
 **Overall verdict: byte-identical compile is FEASIBLE. No blocker symbol.** The four files were written
 against a deliberately narrow slice of the stack (flat integer/pointer types, function-pointer callbacks,
 locally-owned constants). Specifically:
-- **No heavy/templated knx type crosses the boundary.** `knx.bau()` is used only to call the 14 flat
+- **No heavy/templated knx type crosses the boundary.** `knx.bau()` is used only to call the 18 flat
   methods; `SecurityControl`/`DataSecurity` are two trivial PODs. The real `KnxFacade<P,B>` template does
   **not** need reproducing — the shim's `knx` is a hand-written object.
 - **No macro pulls in the world.** `OPENKNX_FTC`/`OPENKNX_FTC_CONSOLE` are simple gates; the logger

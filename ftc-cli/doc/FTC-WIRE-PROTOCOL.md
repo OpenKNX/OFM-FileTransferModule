@@ -2,7 +2,7 @@
 
 Definitive, byte-exact description of the OpenKNX **FileTransferClient (FTC)** wire protocol, extracted from
 the firmware sources so a **native desktop KNXnet/IP tunnel client** can drive it byte-correct: inject cEMI
-`L_Data.req` with the right APDU, and parse incoming `L_Data.ind` into the four client callbacks.
+`L_Data.req` with the right APDU, and parse incoming `L_Data.ind` into the five client callbacks.
 
 Every claim carries a `file:line` and/or a `README_FTC.md §` citation. Line numbers are as of the sources
 read for this spec; if code shifts, re-verify against the cited symbol name.
@@ -11,7 +11,7 @@ read for this spec; if code shifts, re-verify against the cited symbol name.
 - `lib/OFM-FileTransferModule/src/FileTransferModule.cpp` — the SERVER (authoritative for answer layout).
 - `lib/OFM-FileTransferModule/src/FileTransferClient.cpp` — the CLIENT (send building + callback decode).
 - `lib/OFM-FileTransferModule/src/FileTransferClientConsole.cpp` / `.h` — the console front-end.
-- `knx/src/knx/bau_systemB.cpp` — the 5 `ftcSend*` + 4 scan shims + the 4 response callbacks.
+- `knx/src/knx/bau_systemB.cpp` — the 6 `ftcSend*` + 5 scan shims + the 5 response callbacks.
 - `knx/src/knx/application_layer.cpp` — APDU assembly + response-indication parsing.
 - `knx/src/knx/{apdu,tpdu,npdu,cemi_frame,transport_layer,bits}.cpp` + `knx_types.h` — framing + APCI/TPCI.
 - `lib/OFM-FileTransferModule/README_FTC.md`, `doc/errorcodes.txt`.
@@ -42,9 +42,9 @@ for the FunctionProperty path (`application_layer.cpp:686-703`).
 
 ---
 
-## 1. The five send methods → exact APDU produced
+## 1. The six send methods → exact APDU produced
 
-All five are connectionless (`T_Data_Individual`, unnumbered) **except** the scan descriptor read (§6, CO).
+All six are connectionless (`T_Data_Individual`, unnumbered) **except** the scan descriptor read (§6, CO).
 All are **`LowPriority`** and (except scan) **`AckRequested`** (`bau_systemB.cpp:614-668`, README §2.1).
 
 ### 1.0 How the APCI/TPCI/object bytes are laid down
@@ -131,7 +131,17 @@ APCI `0x3D7`. Header identical to Read, then `length` data bytes appended:
   (`FileTransferClient.cpp:4613,4652` "CO over the open T_Connect"). See §6. `individualSend` auto-routes
   CO when `asap == _connectedTsap` (`application_layer.cpp:1455-1462`).
 
-### 1.6 Worked hexdumps (APDU only — the FTC bytes inside the cEMI)
+### 1.6 `ftcSendAdcRead(asap, sec, channelNr, readCount)` — A_ADC_Read (BCU bus voltage)
+APCI `0x180`, connectionless, `LowPriority`, `AckRequested` (`bau_systemB.cpp` `ftcSendAdcRead`; host builder
+`buildAdcRead`, `knx_ip_tunnel.cpp`).
+```
+[0x01][ 0x80 | (channelNr & 0x3F) ][ readCount ]
+```
+- `channelNr` in the low 6 bits of byte 1 (same packing as §1.5 `number`).
+- `readCount` = number of A/D conversions the device averages before answering.
+- Used by `info` to read a BCU's bus voltage; the answer arrives on `ftcOnAdc` (§5.5).
+
+### 1.7 Worked hexdumps (APDU only — the FTC bytes inside the cEMI)
 
 **(a) CheckFeatures(102) command** — `ftcSendCommand(pa, sec, 159, 102, _ftcTx, 0)` (`FileTransferClient.cpp:879`):
 ```
@@ -352,7 +362,7 @@ go classic · `0x81` dir already open · `0x82` dir can't open · `0x83` dir not
 
 ## 5. Response decoding — what the transport hands each callback
 
-Four callbacks are registered in the BAU and fire **inside the KNX stack dispatch** — they only park bytes;
+Five callbacks are registered in the BAU and fire **inside the KNX stack dispatch** — they only park bytes;
 the client `loop()` acts (README §2.2). The transport must call the equivalent of these with exactly the bytes
 below. **All are parsed from the incoming `L_Data.ind` APDU** as follows.
 
@@ -399,7 +409,15 @@ number(count) = data[0] & 0x3F;  memoryAddress = getWord(data+1) (BIG-endian);  
 Callback places `len` bytes at `_memBuf[addr - _gaRef]` (idempotent on IP-mirror dup), PA-filtered
 (`FileTransferClient.cpp:369-388`). Used for the `info ga` GA/association-table walk over a T_Connect (§6).
 
-### 5.5 Console answers (obj 160) also arrive on `ftcOnResponse`
+### 5.5 `ftcOnAdc(pa, channel, count, value)` ← A_ADC_Response
+APCI `0x1C0`. Parsed from the indication APDU (guard `apdu.length() >= 4`):
+```
+channel = data[0] & 0x3F;  count = data[1];  value = (int16_t)(data[2] << 8 | data[3])   // 2-byte big-endian
+```
+Fed to the Adc callback (`knx_ip_tunnel.cpp` dispatch, `APCI_ADC_RESP`). Used by `info` for a BCU's
+bus-voltage read.
+
+### 5.6 Console answers (obj 160) also arrive on `ftcOnResponse`
 `CON_PID_IN` ack: `[status]` — `0x00` ok, `0x01` BUSY, `0x43` no session (`FileTransferModule.cpp:336-388`;
 decode `FileTransferClient.cpp:4905-4919`). `CON_PID_OUT` drain answer:
 `[status][more][overflow][text... ≤247]` — `res[1]=more`(1=more pending), `res[2]=overflow`(1=ring wrapped),
