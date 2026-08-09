@@ -14,18 +14,57 @@ throughput, and — most importantly — *why* it runs at the speed it does.
 > (host UART baud / SPI) and the setup — it can be **faster or slower** on any given system (the TP1 bus is
 > the ~650 B/s host-side ceiling).
 
+---
+
+## TL;DR (for the impatient)
+
+- **What:** copy a file **device → device over the KNX bus, no PC in the middle** — one OpenKNX device
+  (the *client*) pushes or pulls a file to/from another device's *server*, plus a firmware update and an
+  optional remote console. Everything runs from `loop()`; nothing blocks and nothing calls `delay()`.
+- **Two modes:** `safe` (stop-and-wait, one answer per chunk — always correct, the default) and `fast`
+  (a windowed stream with gap reports — fewer round trips on a clean link). Use `safe` unless you know the
+  link is quiet; `fast` transparently falls back to classic against an old server or an oversized file.
+- **~350–480 B/s over TP1 is normal — the wire and the chip link are the limit, not the code.** TP1 is a
+  fixed 9600-baud bus, and the MCU↔NCN5130 host UART is *store-and-forward*: at 19200 host baud the NCN
+  needs **~80 ms just to push a normal telegram into the chip** *before* it reaches the bus, ~40 ms at
+  38400 — and that time adds **in series** with the bus time (§7). The only faster host links are a
+  **38400 strap** or **SPI**, both hardware — there is **nothing to change in firmware**. For real KB/s,
+  use KNXnet/IP, not TP.
+- **Integrity:** every frame carries a CRC16; the whole file is proven with a CRC32/POSIX verify at the
+  end. Resume, per-chunk retry and transient whole-transfer auto-retry are built in — a bad file is never
+  accepted silently.
+- **Bigger `pkg` = faster.** `pkg 254` (the spec-legal APDU max) is the sweet spot; only go smaller for a
+  device on the path that advertises a smaller max-APDU.
+- **Build:** add the module → the device is a *target*. `-D OPENKNX_FTC` adds the on-device `ftc` client,
+  `-D OPENKNX_FTC_CONSOLE` the remote console (pulls in access control). Strip to the FW-update+transfer
+  core with `-D OPENKNX_FTC_MINIMAL`. The full switch table is in the
+  **[README](README.md#build-switches-feature-gates)** (§10).
+- **The red "Ungültiger Frame" flood in the ETS busmonitor during a transfer is harmless** — a passive
+  sniffer cannot decode the long private frames; nothing is mis-written (§4.7).
+
+---
+
 - **Client:** `src/FileTransferClient.{h,cpp}` (+ `FileTransferClientConsole.{h,cpp}` for the `ftc` console) — behind `-D OPENKNX_FTC`.
 - **Server:** `src/FileTransferModule.{h,cpp}` — compiled on any RP2040/ESP32 target (writes to LittleFS).
 - **Transport:** `lib/knx/src/knx/bau_systemB.cpp` (`ftcSendCommand` + response callbacks) and `lib/knx/src/knx/bau091A.cpp` (`ftcTxQueueSize`).
 - **Wire driver:** `lib/TPUart/src/TPUart/{Transmitter,DataLinkLayer}.cpp` (NCN5130 host-UART).
 
+**Related docs:** the interactive console tunnel has its own page —
+[`FTC-Console.md`](FTC-Console.md); access control / password gate —
+[`FTC-Security.md`](FTC-Security.md); the native desktop client —
+[`../ftc-cli/README.md`](../ftc-cli/README.md); the build-switch table —
+[`../README.md`](../README.md#build-switches-feature-gates).
+
 ---
 
 ## Table of contents
 
+- [TL;DR (for the impatient)](#tldr-for-the-impatient)
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
 3. [Transfer modes](#3-transfer-modes)
+   - [3.1 `safe` vs `fast` in detail — and under bus load](#31-safe-vs-fast-in-detail--and-how-each-behaves-under-bus-load)
+   - [3.2 The console tunnel in one paragraph](#32-the-console-tunnel-in-one-paragraph-detail-in-111)
 4. [Wire protocol](#4-wire-protocol)
 5. [Resume, recovery & auto-retry](#5-resume-recovery--auto-retry)
 6. [Throughput & measurements](#6-throughput--measurements)
@@ -45,13 +84,13 @@ FTC is two halves of the same OFM:
 
 | Role | Class | Runs on | Responsibility |
 |---|---|---|---|
-| **Client** | `FileTransferClient` | the IP-Router / IP-Interface | Drives the transfer: opens, streams chunks, reports progress, verifies, resumes, retries. Reads the source locally (SD via a callback, or a built-in RAM test pattern). |
-| **Server** | `FileTransferModule` | the target (e.g. a KNeoPix) | Receives the frames, writes them to **its own** LittleFS, answers CRCs, gap reports and filesystem capacity. The client never touches the target's filesystem directly. |
+| **Client** | `FileTransferClient` | any OpenKNX device built with `-D OPENKNX_FTC` (e.g. an IP-Interface / IP-Router, but not limited to them) | Drives the transfer: opens, streams chunks, reports progress, verifies, resumes, retries. Reads the source locally (SD via a callback, or a built-in RAM test pattern). |
+| **Server** | `FileTransferModule` | any OpenKNX device with the module added (e.g. a KNeoPix) | Receives the frames, writes them to **its own** LittleFS, answers CRCs, gap reports and filesystem capacity. The client never touches the target's filesystem directly. |
 
 The client speaks a **connectionless** dialect of the KNX *FunctionProperty* command
 (`T_Data_Individual`, no connection is ever opened — see §2). Everything is driven from `loop()`;
-**nothing blocks and nothing calls `delay()`**, because the router must keep routing bus traffic
-and feeding its 16 s watchdog while a multi-minute upload is in flight.
+**nothing blocks and nothing calls `delay()`**, because the device must keep serving the bus
+and feeding its watchdog while a multi-minute upload is in flight.
 
 The source is reached through a callback triple so the client needs no SD header
 (`FileTransferClient.h`):
@@ -69,8 +108,8 @@ struct FtcFileSink {                                      // download sink (writ
 };
 ```
 
-On the IP-Router / IP-Interface build there is **no SD card**, so only the RAM test pattern
-(`ftc <pa> send test`, `ftc <pa> perf`) is used — which is exactly what the throughput A/B needs.
+On a device with **no SD card** (a typical interface / router build) only the RAM test pattern
+(`ftc <pa> send test`, `ftc <pa> perf`) is available — which is exactly what the throughput A/B needs.
 
 ---
 
@@ -80,7 +119,7 @@ On the IP-Router / IP-Interface build there is **no SD card**, so only the RAM t
 
 ```mermaid
 flowchart TD
-    subgraph CLIENT["CLIENT — IP-Router/IP-Interface (PA a.b.c)"]
+    subgraph CLIENT["CLIENT — any OpenKNX device with -D OPENKNX_FTC (PA a.b.c)"]
         CON["FileTransferClientConsole<br/>parses 'ftc ...' commands"]
         FSM["FileTransferClient<br/>FtcState machine, driven from loop()<br/>upload / perf / resume / retry / scan / device-info / download<br/>login / logout (OPENKNX_FTC_SECURITY, §4.8)"]
         SRC["FtcFileSource / FtcFileSink<br/>(SD callback or RAM test pattern)"]
@@ -93,7 +132,7 @@ flowchart TD
     end
     subgraph WIRE["NCN5130 host-UART driver (lib/TPUart)"]
         DLL["DataLinkLayer — 50-deep TX FIFO<br/>baud auto-probe {19200, 38400}"]
-        TR["Transmitter — U_L_Data* services<br/>sticky offset (TPUART_TX_STICKY_OFFSET)"]
+        TR["Transmitter — U_L_Data* services<br/>sticky offset (always on)"]
     end
     TP(["KNX TP1 bus — fixed 9600 baud"])
     subgraph SERVER["SERVER — target device (PA x.y.z)"]
@@ -146,10 +185,10 @@ between two `loop()` ticks and a single slot would drop one.
       ping ──────────────────┘           │          │          │         │
         FtcSent                          │          │          │         │
                                          │          │          │         │
-     upload/perf (mode 1|2) ── FtcFeatureProbe ──┐  │          │         │
+     upload/perf (mode 1)   ── FtcFeatureProbe ──┐  │          │         │
      upload/perf (all modes) ─────────── FtcResumeInfo (pre-upload FileInfo -> resume decision)
                                               │
-                   ┌── mode 0 (classic) ──────┤────── mode 1|2 (fast/forget) ──┐
+                   ┌── mode 0 (classic) ──────┤────── mode 1 (fast / windowed) ──┐
                    │                          │                                │
         FtcUploadOpen                         │                        FtcFastOpen
         FtcUploadChunk  <──┐                  │                        FtcFastStream  (pump, SILENT data)
@@ -175,26 +214,37 @@ the fast path uses tighter, purpose-built deadlines (§3, §5). The two auth cha
 `FTC_TIMEOUT`; the login pre-flight (`FtcAuthProbe`) uses the short `FTC_FEATURE_TIMEOUT` like the other
 CheckFeatures probes.
 
+`loop()` itself is a thin dispatcher: a common preamble (pending-response validation, timeouts) + the
+core stop-and-wait transfer inline, then it hands off to one **per-feature handler** per job group —
+`loopDownload` / `loopFast` / `loopDirOps` / `loopScan` / `loopDeviceInfo` / `loopSecurity` / `loopConsole`.
+The split is pure code motion (behaviour-identical); it also lets the client sub-gates (`OPENKNX_FTC_SCAN`
+/ `_DEVICEINFO`, §10) compile a whole handler in or out cleanly.
+
 ---
 
 ## 3. Transfer modes
 
-The upload command takes a **mode** (`ftc <pa> send <src> [pkg] [mode]`), 0/1/2:
+The upload command takes a **mode** (`ftc <pa> send <src> [pkg] [mode]`), `safe` (0) or `fast` (1):
 
-| | **mode 0 — safe / classic** | **mode 1 — fast / windowed** | **mode 2 — forget** |
-|---|---|---|---|
-| Command | `FileUpload` (40) | `FileUploadFast` (44) | `FileUploadFast` (44) |
-| Flow control | stop-and-wait: one request → one answer **per chunk** | AIMD window `[4..64]`, per-window gap report | one giant window (whole file), millis()-paced |
-| Answer per DATA frame | yes (5-byte `[result][seq][crc16]`) | **none** (silent; L2 ACK only) | **none** (silent) |
-| Mid-stream reports | — | `FileReport` (45) after each window | none — verify only at close |
-| Integrity per frame | CRC16 echoed & compared | trailing CRC16 in the frame, checked on target | trailing CRC16 in the frame, checked on target |
-| Payload/chunk | `pkg − 6` | `pkg − 8` (2 B reserved for in-frame CRC16) | `pkg − 8` |
-| Pacing | implicit (waits for each answer) | TP-FIFO high/low water (`FTC_TX_HIGH=30`, `FTC_TX_LOW=1`) | `FTC_FORGET_BURST=4` / `FTC_FORGET_PACE_MS=25` + FIFO |
-| Recovery | per-chunk retry (`_cfgMaxRetries`, default 3) | resend the window's missing seqs | escalate: report-recovery → classic full resend → abort |
-| When to use | always correct; the safe default | reliable link, want fewer round trips | fastest over a **paced** path; best over TP; needs recovery net |
-| Measured @19200 (50 KB) \* | **349 B/s** | **366 B/s** | **368 B/s** |
+| | **mode 0 — safe / classic** | **mode 1 — fast / windowed** |
+|---|---|---|
+| Command | `FileUpload` (40) | `FileUploadFast` (44) |
+| Flow control | stop-and-wait: one request → one answer **per chunk** | AIMD window `[4..64]`, per-window gap report |
+| Answer per DATA frame | yes (5-byte `[result][seq][crc16]`) | **none** (silent; L2 ACK only) |
+| Mid-stream reports | — | `FileReport` (45) after each window |
+| Integrity per frame | CRC16 echoed & compared | trailing CRC16 in the frame, checked on target |
+| Payload/chunk | `pkg − 6` | `pkg − 8` (2 B reserved for in-frame CRC16) |
+| Pacing | implicit (waits for each answer) | TP-FIFO high/low water (`FTC_TX_HIGH=30`, `FTC_TX_LOW=1`); per-`loop()` burst `FTC_FAST_BURST_RAM=16` / `_SD=4` |
+| Recovery | per-chunk retry (`_cfgMaxRetries`, default 3) | resend the window's missing seqs (per-window gap report) |
+| When to use | always correct; the safe default | quiet link, want fewer round trips; pin the window with `fast w<N>` |
+| Measured @19200 (50 KB) \* | **349 B/s** | **366 B/s** |
 
-**Negotiation.** A non-zero mode is not blind. The client first sends `CheckFeatures` (102) with a
+> An earlier third mode ("forget" — one giant silent window) was **removed**: on a real bus it needs a
+> whole-file recovery net, wins nothing over `fast`, and only adds crash risk under a burst. `fast` (a
+> paced, windowed stream that recovers per window) is its safe replacement. `ftc <pa> send … fast w<N>`
+> pins the AIMD window to a fixed `N` so an end-of-transfer burst can't overrun a slow sink.
+
+**Negotiation.** A non-classic mode is not blind. The client first sends `CheckFeatures` (102) with a
 short **800 ms** window (`FTC_FEATURE_TIMEOUT`, *not* the 6 s `FTC_TIMEOUT`, so an old server that
 never answers cmd102 falls back fast). It gates on:
 
@@ -210,6 +260,84 @@ Because a fast frame reserves 2 bytes for its in-frame CRC16, the *wire* frame i
 in all modes: classic `pkg−6` payload + 6 overhead, fast `pkg−8` payload + 6 + 2 CRC. If a fast request
 is downgraded, the classic path just runs with 2 fewer payload bytes — still 100 % correct, marginally
 less efficient (`FileTransferClient.cpp`).
+
+### 3.1 `safe` vs `fast` in detail — and how each behaves under bus load
+
+At a glance:
+
+| | **`safe` (mode 0)** | **`fast` (mode 1)** |
+|---|---|---|
+| Flow control | stop-and-wait: send 1 chunk, wait for its answer | burst a window (silent), then one `FileReport` reconciles it |
+| Outstanding at once | exactly 1 | a whole window (`FTC_WND` 4..64, AIMD) |
+| Answer per DATA frame | yes (`[result][seq][crc16]`) | none (silent; only the TP1 L2 ACK) |
+| Pacing | implicit — waits for each answer | window water-marks + the target's reported ingest rate |
+| Recovery grain | per **chunk** (retry on the spot) | per **window** (resend the reported gaps) |
+| On a **quiet** bus | steady ~350 B/s | slightly faster (fewer round trips) |
+| On a **flooded** bus | **grinds through** (self-paces, chunk-granular retry) | fragile — the burst overruns → lossy windows → resend rounds |
+| Speed ceiling | the wire (§7) | the wire (§7) — same ceiling, `fast` just hides answer latency |
+| Integrity per frame | CRC16 echoed & compared | trailing CRC16 checked on the target |
+| Final proof | whole-file CRC32 verify | whole-file CRC32 verify (identical) |
+| Knobs | `retry max/transfer/backoff` | + `fast w<N>` (pin the window) |
+| Best for | shared / noisy bus, slow SD/EFC sink, the default | a quiet link you control, fewer round trips |
+
+The detail behind that table:
+
+Both modes move the *same* frames and end with the *same* whole-file CRC32 verify (§4.4). The only
+difference is **when the client waits**, and that single choice decides how each behaves when the bus
+gets busy.
+
+**`safe` (classic, mode 0) — one chunk, one answer, repeat.**
+The client sends chunk *n*, then **waits for that chunk's answer** (`[result][seq][crc16]`) before it
+sends chunk *n+1*. It is a strict stop-and-wait lockstep:
+
+- **Self-pacing.** Because it never sends ahead, it automatically runs at exactly the rate the bus + the
+  target's flash write can sustain — there is no window to overrun. On an idle bus and a busy bus it does
+  the same thing, just slower on the busy one.
+- **Chunk-granular recovery.** A lost or CRC-bad frame is caught by *its own* answer and re-sent on the
+  spot (`_cfgMaxRetries`, default 3); nothing downstream is affected.
+- **Survives a flooded bus.** When a third device floods the line (e.g. non-stop group writes), `safe`
+  simply takes longer per chunk and **grinds through** — it was measured to complete on a bus busy enough
+  to break the windowed path.
+- **Cost:** one full bus round-trip per chunk → the ~350 B/s floor. This is the right default and the
+  right tool whenever the bus is shared/noisy or the sink is slow (SD/EFC).
+
+**`fast` (windowed, mode 1) — burst a window, then reconcile.**
+The client streams a whole **window** of chunks back-to-back (**silent** DATA frames — no per-chunk L7
+answer, only the TP1 L2 ACK), then sends **one** `FileReport` (45) and gets back a received-bitmap naming
+exactly which seqs of that window landed. It re-sends only the gaps, then opens the next window:
+
+- **AIMD window.** A clean window grows `+8` (up to `FTC_WND_MAX=64`); any loss **halves** it (down to
+  `FTC_WND_MIN=4`). So on a good link it climbs to few round-trips-per-many-chunks; on a lossy link it
+  backs off toward small windows automatically.
+- **Fewer round trips = faster on a quiet link** — but only marginally over TP (§6): the wire, not the
+  round-trip count, is the ceiling. `fast` mainly helps by hiding the per-chunk answer latency.
+- **Fragile to a flooded bus — by nature.** A burst assumes the window will mostly arrive. When another
+  device is already saturating the line, the burst **overruns delivery** → lossy windows → repeated resend
+  rounds. Progress still happens, just inefficiently. Pin the window (`fast w<N>`) to cap the burst so its
+  tail can't pile onto a slow sink.
+- **Guarded against a genuine wedge, not against slowness.** Two independent guards keep it honest without
+  false-aborting a slow-but-progressing transfer:
+  - a **no-progress** guard (`FTC_NOPROGRESS_MAX=4`): the received-bitmap is monotonic, so the missing
+    count can only shrink; if it fails to shrink across 4 reports the seqs are persistently dead → abort;
+  - a **progress-based stall deadline** (`FTC_FAST_STALL_MS=30 s`), **re-armed on every advancing chunk
+    *and* on every report that shows the missing count shrinking** — so a lossy-but-progressing window on a
+    congested bus is never killed, while a fully-silent target still hits the bounded report timeout.
+
+**Rule of thumb.** `safe` = correctness and robustness under load (the default, and the only sane choice
+over a busy/shared bus or a slow SD/EFC sink). `fast` = fewer round trips on a **quiet** link you control;
+pin it with `w<N>` if the tail overruns. Neither can beat the ~350–480 B/s TP ceiling (§7) — that is the
+wire, not the mode. Both prove the file with the same CRC32 verify, so **`fast` is never *less safe* than
+`safe`** — a mismatch is reported as FAILED, never accepted.
+
+### 3.2 The console tunnel in one paragraph (detail in §11.1)
+
+`ftc <pa> console` is a *separate* channel (object 160, not the 159 command table) that mirrors the
+remote device's own OpenKNX console over the bus: you type `mem`/`fs`/`info`/… locally, the target runs
+them and streams its output back until `quit`. It is strict lockstep too — the client parks one input line
+(`PID_IN`) and drains the target's bounded log ring one bounded chunk per `loop()` pass (`PID_OUT`), so it
+**tolerates a congested bus** the same way `safe` does (it just drains slower) and never blocks either
+device's `loop()`. One logical session at a time; an idle session is reaped; the remote command itself runs
+under the target's `freeLoopTime()`. Opt-in behind `OPENKNX_FTC_CONSOLE` (which pulls in access control).
 
 ---
 
@@ -248,9 +376,10 @@ tunnel (§11.1, `OPENKNX_FTC_CONSOLE`) — it does **not** extend this 159 comma
 Commands 103–105 and the CheckFeatures bits 4/5 exist only when the server is built with
 `-D OPENKNX_FTC_SECURITY`; an older/unflagged server ignores 103–105 (§4.8) and never sets bits 4/5.
 
-Two more commands ride the KNX application layer directly (**not** object 159), used by scan and
-device-info: `DeviceDescriptor_Read` (2-byte mask → device class) and `PropertyValue_Read`
-(Device-Object identity properties). See `bau_systemB.cpp`.
+A few operations ride the KNX application layer directly (**not** object 159): `DeviceDescriptor_Read`
+(2-byte mask → device class) and `PropertyValue_Read` (Device-Object identity properties) for scan +
+device-info, and a `PropertyValue_Write` to the Device Object's prog-mode property for the `led` locate
+command (§11). See `bau_systemB.cpp`.
 
 ### 4.2 Endianness — the one real trap
 
@@ -298,20 +427,34 @@ A malformed/short frame, a CRC miss, or an out-of-range seq leaves the bit clear
 
 ```
 req : [baseLo][baseHi][cntLo][cntHi][nonce]                base/count little-endian
-ans : [00][baseHi][baseLo][cntHi][cntLo][nonce][bitmap...] base/count big-endian echo; nonce echoed
+ans : [00][baseHi][baseLo][cntHi][cntLo][nonce][bitmap...][bpsHi][bpsLo]
+      base/count big-endian echo; nonce echoed
       bitmap = ceil(count/8) bytes, bit i (LSB-first) = seq (base+i) received
+      [bpsHi][bpsLo] = the target's MEASURED ingest rate (new bytes written / interval, B/s, big-endian),
+                       appended only when it still fits the frame; the client uses it to pace the next window
 ```
 
 `count` is clamped so the answer stays in one frame: `resultLength = 6 + ceil(count/8) ≤ 247`
-⇒ **`count ≤ 1928`**. The nonce lets the client reject a stale/mirrored report.
+⇒ **`count ≤ 1928`**. The nonce lets the client reject a stale/mirrored report. The 2-byte ingest-rate
+trailer is **backward-compatible** — an old client simply stops reading at the bitmap.
 
 **FileInfo — (43)** (`FileTransferModule.cpp`)
 
 ```
 req : [path... 00]
-ans : [00][sizeB3][sizeB2][sizeB1][sizeB0][crcB3][crcB2][crcB1][crcB0]   9 bytes, big-endian
-    | [42]                                                               1 byte -> file not found
+ans : [00][sizeB3..sizeB0][crcB3..crcB0]   9 bytes, big-endian: status 0x00 = size + whole-file CRC32
+    | [02][sizeB3..sizeB0]                 5 bytes: CRC still computing (LittleFS, cooperative) -> poll again
+    | [01][sizeB3..sizeB0]                 5 bytes: size only, no whole-file CRC (SD / ext-flash target)
+    | [42]                                 1 byte -> file not found
 ```
+
+The whole-file CRC32 on LittleFS is computed **cooperatively** (a few KB per `loop()` pass, never a
+blocking whole-file read in the KNX dispatch — a VORGABE, and it stops a large file from tripping the
+watchdog). So FileInfo first answers `0x02` (**computing**, size already known) and the client re-queries
+until it flips to `0x00` (size + CRC). On an **SD / external-flash** target the whole-file CRC is skipped
+(too slow to scan on demand) and FileInfo answers `0x01` (**size only**); the client then verifies by size
+and reports "size OK, not verified (SD/EFC)" instead of a CRC match (§5.1, §9). An old server answers a
+plain `0x00`/`0x42` and the client handles it unchanged.
 
 **FilesystemInfo — (46)** (`FileTransferModule.cpp`)
 
@@ -327,7 +470,7 @@ open file/dir, safe any time. The client derives `free = total − used`.
 **Download — `FileDownload` (41)** (`FileTransferClient.cpp`, `FileTransferModule.cpp`)
 
 ```
-OPEN  req : [00][00][pkg][path... 00]        pkg = FTC_DL_PAYLOAD = 240
+OPEN  req : [00][00][pkg][path... 00]        pkg default = FTC_DL_PAYLOAD = 240 (get can override 16..240)
       ans : [00][sizeB3..sizeB0]             size big-endian (5 bytes on the wire)
 CHUNK req : [seqLo][seqHi]                   seq little-endian
       ans : [00][seqHi][seqLo][readed][data:readed][crcHi][crcLo]   seq & CRC16 big-endian; readed<pkg = last chunk
@@ -400,7 +543,7 @@ For a passive sniffer like the ETS monitor, two things follow:
 
 1. It **cannot decode** the long FTC payload (a private FunctionProperty on obj 159 with 240 B of file
    data) as any standard KNX service → it flags the frame **"Ungültiger Frame"**.
-2. In **fast/forget** mode the data frames are **silent, back-to-back bursts** (§3 — no per-frame answer).
+2. In **fast** mode the data frames are **silent, back-to-back bursts** (§3 — no per-frame answer).
    A monitor that delimits the wire by *timing* can slip its frame boundary inside a burst and parse
    **mid-telegram**, reading file bytes as a frame header. Firmware (`.gz`) bytes are high-entropy, so once
    in a while they line up into a **valid-looking** standard telegram → the **phantom** Memory_Write /
@@ -432,43 +575,15 @@ exception to "standard KNX services only" (§4.1), and this monitor cosmetics is
 
 ### 4.8 Access control (`OPENKNX_FTC_SECURITY`, opt-in)
 
-A **coarse deterrent** — a lock, not an alarm system — that gates the FTC **write** surface (upload,
-format, rm, mkdir, rmdir, mv, fw-update) and the console take-over, so an unauthorized user on the network
-cannot write without a password. Reads stay open (except stage "Off"). Motivation: gate writes remotely when
-the programming button is not reachable. It is **not** KNX Secure and does not resist a tunnel sniffer /
-offline brute-force — those are out of scope by design. Everything is behind `-D OPENKNX_FTC_SECURITY`;
-without the flag the module + client compile byte-identical (the OAM-IP-Router relies on this). Full
-motivation, threat model, and the ETS parameters live in **`OAM-IP-Interface/doc/FTC-SECURITY.md`**.
+A **coarse deterrent** — a lock, not an alarm system — that gates the FTC **write** surface (upload, format,
+rm, mkdir, rmdir, mv, fw-update) and the console take-over, so an unauthorized user on the network cannot
+write without a password. Reads stay open (except stage "Off"). It is **not** KNX Secure. Wire-level: cmds
+103/104/105 (§4.1), CheckFeatures bits 4/5, and result codes `0xA0`/`0xA1`/`0xA2` (§4.5). Everything is
+behind `-D OPENKNX_FTC_SECURITY`; without the flag the module + client compile byte-identical.
 
-**Model — login with auto-logout.** One device-global, best-effort authorized window (not PA-bound):
-
-- Client command `login <pw>` runs a challenge-response and opens the window; `logout` (cmd 105) closes it.
-- While open, all writes/console pass with **no per-write handshake** (the client just sends; a closed
-  window answers `0xA0`). Every accepted write **refreshes** the window; it idles closed after the ETS
-  `FTM_AuthTimeout` (default 240 s, 30–3600, read live) — auto-logout. The window opens **only** on a
-  verified login, never via an accepted write (a stale window would otherwise leak across an Always→Password
-  stage change).
-
-**Crypto (reuses the AES already linked by knx — `#include "knx/aes.hpp"`, zero extra flash).**
-`key = pad16(password)` (≤16 chars == the 16-byte AES key, no KDF). `MAC = first 4 bytes of AES_ECB(key,
-nonce)` (a CBC-MAC over one block). Nonce = one seeded AES-CTR block (monotonic counter → single-use; seed
-never on the wire). The password is turned into the MAC **at the point of entry** and **never** travels on
-the bus in clear (only nonce + 4-byte MAC do) — from any client, "egal von wo".
-
-**Client flow (`FileTransferClient`).** `login` first probes `CheckFeatures` (bit4): a target that is not
-password-protected reports it immediately instead of timing out. Then `FtcAuthChallenge` (send 103, receive
-nonce) → compute MAC → `FtcAuthResponse` (send 104, receive `0x00`/`0xA1`). `logout` sends 105. The `ftc-cli`
-console mode **never relays** a `login`/`logout` line (it would leak the password as plaintext over obj 160)
-— run login as a separate one-shot instead.
-
-**Stages (ETS `FTM_Security`):** 0 Off (all locked, only CheckFeatures answers) · 1 ProgMode (writes only in
-programming mode) · 2 Always (legacy, no protection — beta default) · 3 Password. Unconfigured → treated as
-Always (nothing to protect; avoids a lock-out).
-
-**Backward compatibility** is guaranteed by the additive protocol + try-and-error, both directions: a new
-client → old server never sees `0xA0` (old server has no gate) so writes work unchanged; an old client → new
-server has its writes correctly blocked with a generic rejection (no crash), reads still work; unknown
-CheckFeatures bits are ignored by old readers.
+> **Full detail — the login/auto-logout model, the AES challenge-response, the four stages and backward
+> compatibility — is in [`FTC-Security.md`](FTC-Security.md).** Product-side ETS parameters + threat model:
+> `OAM-IP-Interface/doc/FTC-SECURITY.md`.
 
 ---
 
@@ -501,31 +616,30 @@ The prefix check matters: without it, a partial of a *different* file would tran
 only fail at the final verify — wasting the whole run and repeating on every retry. Resume continues at
 the last **whole-chunk** boundary (`have / payloadSize`), never mid-chunk, so the seek stride stays exact.
 
-### 5.2 Fast/forget recovery (never accept a silently-bad file)
+### 5.2 Fast recovery (never accept a silently-bad file)
 
-The forget mode has no per-chunk answer, so a bad file can only be caught at the end. On a verify
-mismatch it escalates (`FileTransferClient.cpp`):
-
-1. **Report-based gap recovery.** Re-open with `resume + keepBitmap` (flags `0x03`) so the server keeps
-   its received-bitmap, page the whole file with `FileReport` queries (`FTC_FAST_PAGE = 1024` seqs per
-   report), resend only the still-missing seqs, re-verify. The whole file was already folded into the
-   source CRC during the stream (fold-once), so resends don't corrupt the CRC (watermark pinned at
-   `_ftcChunks`).
-2. **One classic full resend.** If recovery still mismatches: truncate and resend the whole file over
-   the classic stop-and-wait path (the most robust path there is), then re-verify.
-3. **Clean reported abort.** If even that mismatches, abort with a clear message — never a silent bad file.
-
-The windowed mode (mode 1) recovers inline: each `FileReport` names the missing seqs of the current
-window; `FtcFastResend` re-sends exactly those, then re-reports the same window with a fresh nonce.
+The fast mode's DATA frames are silent, so it recovers **inline, per window** rather than only at the end
+(`FileTransferClient.cpp`): after each streamed window the client sends a `FileReport` (45); the answer's
+received-bitmap names exactly which seqs of that window landed. `FtcFastResend` re-sends only those, then
+re-reports the same window with a fresh nonce; only when the window is clean does it advance. The whole
+file is folded into the source CRC once during the stream (fold-once via a watermark), so a resend never
+double-counts the CRC.
 
 **AIMD window** (`FileTransferClient.cpp`): a clean window grows `+8` (up to
 `FTC_WND_MAX=64`); any loss halves it (down to `FTC_WND_MIN=4`). The halving sizes the *next* window —
 the current window's high edge is frozen (`_ftcWndEnd`) when it opens, so halving can never orphan
-already-streamed tail seqs.
+already-streamed tail seqs. `fast w<N>` pins the window at a fixed `N` (loss still ratchets it down) so an
+end-of-transfer burst cannot overrun a slow sink.
 
 **No-progress guard** (`FTC_NOPROGRESS_MAX = 4`): the received-bitmap is monotonic, so the missing count
 is non-increasing; if it fails to shrink across 4 reports the seqs are persistently dead → abort. This
 replaced a fixed wall-clock deadline that false-aborted a slow-but-steady TP transfer (§8).
+
+**Final gate.** At close the whole file is proven with the CRC32/POSIX verify (§4.4, `FtcVerify`). A
+mismatch — in *either* mode — falls through to the summary with `ok = false` → the result box shows
+**FAILED**; a bad file is never accepted silently, and self-apply (§9) is gated on a clean verify. A
+*transient* abort before that (busy target, lost report/close) is picked up by the transfer-level
+auto-retry (§5.3), which re-runs the whole transfer and resumes from the partial already on the target.
 
 ### 5.3 Transfer-level auto-retry
 
@@ -534,14 +648,14 @@ a lost report or close. `ftcAbort()` (`FileTransferClient.cpp`) classifies the r
 
 - **Permanent** (fail immediately): contains `source` · `cannot read` · `refused` · `recovery failed` ·
   `no progress` · `too many` · `full` · `space` · `cancel`.
-- **Transient** (everything else): if `_ftcUpload` and `_ftcTransferRetries < _cfgTransferRetries`,
-  send `Cancel` (90) to close the target's partial, wait `_cfgBackoffMs` for a busy/rebooting target to
-  settle, then **re-run the whole transfer** — which re-runs `FileInfo` and resumes from the partial
-  already on the target.
+- **Transient** (everything else): if `_ftcUpload` **or `_ftcDownload`** and `_ftcTransferRetries <
+  _cfgTransferRetries`, send `Cancel` (90) to close the target's partial, wait `_cfgBackoffMs` for a
+  busy/rebooting target to settle, then **re-run the whole transfer** — which re-runs `FileInfo` and
+  resumes from the partial already on the target.
 
 Both bounds are **runtime-settable** (RAM-only, reset to the defaults on reboot) via
 `ftc retry transfer <n>` / `ftc retry backoff <ms>` — see §11. Also `ftc retry max <n>` for the
-**per-chunk** budget `_cfgMaxRetries` (§5.2). Defaults: `max 3`, `transfer 8`, `backoff 3000 ms`
+**per-chunk** budget `_cfgMaxRetries` (§5.2). Defaults: `max 3`, `transfer 3`, `backoff 3000 ms`
 (`FTC_MAX_RETRIES_DEF` / `FTC_TRANSFER_RETRIES_DEF` / `FTC_RETRY_BACKOFF_MS_DEF`). Setting `transfer 0`
 disables the whole-transfer auto-retry.
 
@@ -587,15 +701,15 @@ a 50 KB `/ftcperf.bin` ramp, verified `CRC32/POSIX = 0x6F8129C7`.
 |---|---|---:|---:|---|
 | classic (mode 0, stop-and-wait, per-chunk answer) | 50 KB | 19200 | **349 B/s** | 146.4 s, payload 247, 208 chunks |
 | fast (mode 1, AIMD 8..64 + cmd45 gap reports) | 50 KB | 19200 | **366 B/s** | 139.8 s, payload 245, 209 chunks |
-| forget (mode 2, one window, paced, no mid-stream reports) | 50 KB | 19200 | **368 B/s** | 139.1 s |
-| forget | 50 KB | **38400** | **478 B/s** | 107.0 s — **+30 %**, a 38400-strapped board |
+| fast (silent windowed stream) | 50 KB | **38400** | **478 B/s** | 107.0 s — **+30 %**, a 38400-strapped board |
 
-The three modes land within ~5 % of each other at 19200 because **the wire, not the protocol, is the
-limit** (§7). The jump to 478 B/s comes purely from doubling the *sender's* host-UART baud.
+The two modes land within ~5 % of each other at 19200 because **the wire, not the protocol, is the
+limit** (§7). The jump to 478 B/s comes purely from doubling the *sender's* host-UART baud — nothing in the
+protocol changed.
 
 ### 6.2 Numbers that will fool you (read this before quoting a speed)
 
-- **forget 16 KB "@26 KB/s" was the IP path, not TP.** That run went over KNXnet/IP routing
+- **A 16 KB windowed run "@26 KB/s" was the IP path, not TP.** That run went over KNXnet/IP routing
   (~75× faster than TP), not the TP1 bus. It is not a TP measurement.
 - **fast 4 KB "@981 B/s" was a TX-FIFO-fill artifact.** The whole 4 KB file fit inside the 50-deep TP
   transmit FIFO, so the client "finished" queuing before the wire had drained. Any file smaller than the
@@ -676,6 +790,28 @@ is exactly the `2.45 ms/octet` in the model (§6.3).
                   └───────────────── ~666 ms/frame @ pkg 253 ──────────────┘
 ```
 
+**Why "~80 ms just to push a frame @19200" (and ~40 ms @38400).** The store-and-forward push is the part
+of the frame time firmware people feel first — it is the delay *before the frame even starts on the bus*.
+On-device timing instrumentation on a real interface, forwarding a normal-size telegram (a **57-octet**
+frame, tunnel → TP), broke the per-frame time down like this (RP2040 @19200 host baud):
+
+```
+  push  ~77 ms  = octets MCU -> NCN over the host UART.  2 host bytes/octet (U_L_Data* cmd + data)
+                  = ~114 bytes; at 19200, 8E1 = 11 bit-times/byte -> ~65 ms line + ~12 ms gaps.
+  con   ~92 ms  = last-octet-pushed -> L_Data.con.  TP1 wire (~65 ms @9600) + the KNX ACK window + con byte.
+  gap    ~2 ms  = re-arm to the next frame  (negligible -- the TX fast path works, this is NOT the limit).
+  ----   ------
+  per  ~170 ms  = push + con + gap  (matches the on-TP ~168 ms).  push and wire are ADDITIVE (store-and-forward).
+```
+
+**The `push` half halves at 38400** (~77 → ~38 ms), because it is pure host-UART time — so `per` drops to
+~130 ms and the sustained forwarding rate climbs by ~30 % (measured, apples-to-apples: same chip, same
+driver, a **19200-strapped** RP board forwarded **235 B/s**, a **38400-strapped** ESP board **303 B/s**, a
+15-year-old Siemens interface **369 B/s** — the Siemens is not smarter, it just runs its TP chip at 38400).
+So the concrete take-away: **~80 ms/frame push @19200, ~40 ms @38400, and it adds on top of the bus time.**
+A full 245-B FTC data frame is bigger (~290 ms push @19200), but the ratio is identical — halve the host
+baud time, keep the bus time. The `con` overhead above the wire (~27 ms) is the KNX ACK floor; no knob.
+
 ### 7.3 Send ≠ Receive — the asymmetry that decides which baud matters
 
 The two directions are **not** symmetric:
@@ -721,7 +857,7 @@ firmware project (new strap, new wiring, a new driver), not a config change — 
 At a given baud, the one thing firmware *can* do is stop re-sending the `U_L_DataOffset` byte on every
 octet. The NCN "stores [the offset] internally until a new offset is provided" (datasheet p.42), so it
 only needs to be sent when the 6-bit position offset **changes** — 3 times per 253-octet frame instead
-of ~189 (`Transmitter.cpp`, flag `TPUART_TX_STICKY_OFFSET`):
+of ~189 (`Transmitter.cpp`; **always on** now — the resend-only-on-change is unconditional, no build flag):
 
 ```
 253-octet frame, host bytes:  without sticky ≈ 698   →   with sticky ≈ 509   (saves ~189)
@@ -777,9 +913,9 @@ arrived over the host link, so host time and bus time are **sequential, not over
 | SPI 500 kbps | ~16 ms | 342 ms | 34 ms | ~392 ms | **~625** | practical max; needs a new interface + driver |
 | bus-only ceiling | ~0 ms | 342 ms | 34 ms | ~376 ms | **~650** | hard TP1 wall — unbeatable host-side |
 
-The firmware levers are already applied — sticky-offset (§7.6) and the ESP32 `TPUART_TX_FAST` fast
-forward path (`DataLinkLayer.cpp`). Everything beyond ~478 B/s is **hardware**: the 38400 strap
-(§7.4) or the SPI link (§7.5, §12). **For real KB/s, use KNXnet/IP, not TP.**
+The firmware levers are already applied (both unconditional now) — sticky-offset (§7.6) and the TP TX
+fast-forward path (`Transmitter.cpp` / `DataLinkLayer.cpp`). Everything beyond ~478 B/s is **hardware**:
+the 38400 strap (§7.4) or the SPI link (§7.5, §12). **For real KB/s, use KNXnet/IP, not TP.**
 
 ---
 
@@ -790,16 +926,16 @@ Each entry: **what** · **why** · **impact**.
 | # | Fix | Why | Impact |
 |---|---|---|---|
 | 1 | **FS partition sector-alignment** (`LittleFS block_size = 4096`, aligned in `lib/OFM-UsbExchange/platformio.exchange.ini`) | A non-4096-aligned filesystem partition corrupted every write that crossed a block boundary. | Root cause of a long-hunted corruption bug: **every multi-block file ≥ 8 KB** was corrupted. The write path itself (`writeChunk`) was never the culprit (`FileTransferModule.cpp`). |
-| 2 | **TP transmit-queue print-storm reboot fix** (`KNX_FIXES_EC`, `tpuart_data_link_layer.cpp`) | Under an IP→TP routing flood (a forget upload = ~370 frames/s vs a 9600-baud wire), the TX FIFO stays full and a **per-dropped-frame USB-CDC print** stalls `loop()` past the 16 s watchdog → reboot. | Rate-limited the "queue full" log to ~1-in-1024 drops. A real problem is still visible; the self-DoS reboot is gone. |
-| 3 | **Forget pacing** (`FTC_FORGET_BURST = 4`, `FTC_FORGET_PACE_MS = 25`) | Forget has no per-chunk report and, over IP, no TP-FIFO backpressure — it would blast ~94 KB/s, far past the target's RX socket + flash, dropping most chunks (16 KB → only ~6/67 landed). | A small burst that fits the target's ~2 KB RX socket, spaced by a `millis()` gate (~160 chunks/s ≈ 39 KB/s over IP; TP is slower still and FIFO-gated). |
-| 4 | **Forget-recovery hardening** (`FileTransferClient.cpp`, `1847-1867`) | The report-retry counter reset only on a *whole-window advance*, which forget (one big page) never hits mid-recovery → scattered timeouts summed to a false abort. And an un-paced resend re-blasted the gaps and re-dropped them. | Retry counter now resets on **any** valid matching report (consecutive-not-cumulative); the resend is paced exactly like the initial stream. |
-| 5 | **Progress-based deadline** (`FTC_FAST_STALL_MS = 30000`) | The old fixed "60 s + 100 ms/chunk" wall clock assumed a fast link and **false-aborted a slow-but-steady TP upload** mid-transfer. | The overall guard now aborts only if **no chunk makes forward progress** for 30 s (re-armed on every advancing chunk). A legitimately slow transfer is never killed. |
-| 6 | **Transfer-level auto-retry** (`_cfgTransferRetries` default 8, `_cfgBackoffMs` default 3000 ms — runtime-settable via `ftc retry`) | A transient failure (target busy after a format erase / reboot, a lost report/close) should recover, not fail. | Bounded, **transient-only** (reason-string classification), **resume-based** re-run; the source is kept open across the retry. Permanent reasons fail immediately (§5.3). |
-| 7 | **Interval-rate display** (`FTC_RATE_MIN_MS = 3000`) | Two deciles caught inside one FIFO-queuing burst give a near-zero `dt` → a nonsense spike (65k, 116k B/s). | Only an interval that spans ≥ 3 s (the FIFO has had time to drain, so queue-rate == wire-rate) is trusted; a shorter gap falls back to the cumulative average (`FileTransferClient.cpp`). |
-| 8 | **Pure "data only" throughput** (`_ftcData100Ms`) | The user asked for the *reine Übertragungszeit* — transfer time, not finalization. | The clock stops when the **last payload byte left the wire** (the close is sent only after the FIFO drains below `FTC_TX_LOW`), **excluding** the close-ack round-trip and the whole-file CRC verify (those vary 10–1000 ms). |
-| 9 | **`pkg` display fix** (`FileTransferClient.cpp`) | Fast/forget reserve 2 payload bytes for the in-frame CRC16, so the naive `payload + overhead` read 252, not the true on-wire 254. | The summary adds the 2 CRC bytes back so it reports the real `pkg 254`. |
+| 2 | **TP transmit-queue print-storm reboot fix** | Under an IP→TP routing flood (frames arriving far faster than a 9600-baud wire drains), the TX FIFO stays full and a **per-dropped-frame USB-CDC print** stalls `loop()` past the 16 s watchdog → reboot. | The "queue full" log is rate-limited (~1-in-1024 drops). A real problem is still visible; the self-DoS reboot is gone. |
+| 3 | **Non-blocking LittleFS FileInfo CRC** (`crcLoop` / `_crcFile`) | The whole-file CRC32 in `FileInfo` was a blocking whole-file read in the KNX dispatch → a large file could reboot the target on the watchdog. | The CRC now runs cooperatively (a few KB per `loop()` pass, shared with the SD/EFC path); FileInfo answers `0x02` (computing) then `0x00`. The CRC value is byte-identical (§4.3). |
+| 4 | **CRC job single-point cancel** (memory-safety review) | The now-persistent `_crcFile` handle could be left open across an FS-mutating command → use-after-free / a second open handle on RP2040 (e.g. `info` then `format`). | The cooperative CRC job is cancelled before **every** FS-mutating command (format/upload/delete); `cmdFormat` also closes an open transfer handle first. |
+| 5 | **Progress-based deadline** (`FTC_FAST_STALL_MS = 30000`) | The old fixed "60 s + 100 ms/chunk" wall clock assumed a fast link and **false-aborted a slow-but-steady TP upload** mid-transfer. | The overall guard now aborts only if **no chunk makes forward progress** for 30 s (re-armed on every advancing chunk, and on any report whose missing count shrinks). A legitimately slow transfer is never killed (§5.2). |
+| 6 | **Transfer-level auto-retry** (`_cfgTransferRetries` default 3, `_cfgBackoffMs` default 3000 ms — runtime-settable via `ftc retry`) | A transient failure (target busy after a format erase / reboot, a lost report/close) should recover, not fail. | Bounded, **transient-only** (reason-string classification), **resume-based** re-run; the source is kept open across the retry. Permanent reasons fail immediately (§5.3). |
+| 7 | **Interval-rate display** | Two progress samples caught inside one FIFO-queuing burst give a near-zero `dt` → a nonsense spike (65k, 116k B/s). | Only an interval long enough that the FIFO has drained (queue-rate == wire-rate) is trusted as the instantaneous rate; a shorter gap falls back to the cumulative average (`FileTransferClient.cpp`, §9.2). |
+| 8 | **Pure "data only" throughput** | The headline number should be the *reine Übertragungszeit* — transfer time, not finalization. | The clock stops when the **last payload byte left the wire** (the close is sent only after the FIFO drains below `FTC_TX_LOW`), **excluding** the close-ack round-trip and the whole-file CRC verify (those vary 10–1000 ms). |
+| 9 | **`pkg` display fix** (`FileTransferClient.cpp`) | Fast reserves 2 payload bytes for the in-frame CRC16, so the naive `payload + overhead` read 252, not the true on-wire 254. | The summary adds the 2 CRC bytes back so it reports the real `pkg 254`. |
 | 10 | **BAU stack-overflow guard** (`bau_systemB.cpp`) | `ftcSendCommand` length is caller-controlled; `> 251` overflows the stack-local `CemiFrame` buffer. | `length > 251` is rejected before the `memcpy`. See §2.1. |
-| 11 | **Sticky-offset** (`TPUART_TX_STICKY_OFFSET`) | Re-sending the offset byte per octet wastes ~189 host bytes/frame, paid in series with the bus. | **+14 % at pkg 253.** See §7.6. |
+| 11 | **Sticky-offset** (always on, no build flag) | Re-sending the offset byte per octet wastes ~189 host bytes/frame, paid in series with the bus. | **+14 % at pkg 253.** See §7.6. |
 | 12 | **IP-mirror duplicate filtering** (`FTC_DUP_WINDOW_MS = 12`, sequence check, report nonce) | A second KNX-IP router on the line mirrors TP → IP routing multicast, so **every answer arrives twice** (a 621 KB run logged 3785 stale answers). A naive read desyncs the `ll` iterator or aborts at chunk 1. | Duplicates are dropped by time window + propertyId + sequence/nonce and merely counted; a 1-byte `0x00` (the open's echoed answer) is never mistaken for a rejection (`FileTransferClient.cpp`). |
 | 13 | **Cooperative console output** (`ftcOut` / `ftcDrainOut`) | The multi-line `ll`/`df` blocks (header + rows + footer + usage bars) were all logged in one `loop()` pass; each `log()` blocks on USB-CDC, so the burst overran the loop-time budget → a "loop took longer" warning on every `ll`/`df`. | Output is queued and drained **one line per `loop()` pass**, gated on `openknx.freeLoopTime()`; the state machine waits while it drains, so order is preserved and no single pass trips the warning. |
 
@@ -837,7 +973,7 @@ Each entry: **what** · **why** · **impact**.
 | Rate | Formula | When it is honest |
 |---|---|---|
 | **cumulative avg** | `sent / (now − start)` | over IP it *is* the true rate; over TP it is **inflated** early by the initial FIFO burst |
-| **interval (instantaneous)** | `Δbytes / Δt` since the last decile, guarded by `FTC_RATE_MIN_MS` | the true *current* wire rate once the FIFO has drained |
+| **interval (instantaneous)** | `Δbytes / Δt` since the last sample, guarded so a too-short `Δt` is ignored | the true *current* wire rate once the FIFO has drained |
 | **end-to-end "data only"** | `eeSent / pureMs` | the headline number; survives auto-retries via the grand-start clock |
 
 ### 9.3 Retry timing
@@ -847,51 +983,86 @@ so the end-to-end figures are correct across retries. `_ftcRetryLostMs` accumula
 (failed-attempt dead time + Cancel drain + backoff); the *transfer-only* rate subtracts it so it
 reflects the wire, not recovery (`FileTransferClient.cpp`).
 
-### 9.4 Live status for a UI
+### 9.4 Live status + the structured info API (for a UI)
 
-`status()` returns an `FtcStatus` (`FileTransferClient.h`) with `phase`, `target`, `done/total`,
-`bps`, `chunk/chunks`, `ok`, `crc`, `path`, and a short `message` — plus `percentX100()`. Any front-end
-(the console `ftc status`, WebConfig, the display/DDC) polls it; `phase == Done|Failed` marks the end.
+The client exposes a **render-agnostic** surface so a frontend (the console `ftc status`, a web panel, the
+OLED/DDC) draws from typed structs — **no text parsing**. All in `FileTransferClient.h`:
+
+- **`status()` → `FtcStatus`** — the live transfer: `phase`, `target`, `done/total`, `bps`, `chunk/chunks`,
+  `window`, `ok`, `crc`, `path`, a short `message`, the marker counters `verifies` / `crcErrors` / `resends`,
+  and `percentX100()`. `phase == Done|Failed` marks the end.
+- **`fsInfo()` → `FtcFsInfo`** — the last filesystem query (total / used / free) behind `df` and the `ll` footer.
+- **`deviceInfo()` → `FtcDeviceInfo`** — the last `info` fingerprint (mask/class, manufacturer, order/hardware/
+  version, FTM version, feature bits, table states, bus voltage, …).
+- **`transferSetup()` → `FtcTransferSetup`** and **`transferResult()` → `FtcTransferResult`** — the negotiated
+  parameters and the final outcome of the last transfer (used to render the result box, including on failure).
+
+This info API is compiled on the native host always, and on the device behind `OPENKNX_WEBSERVER` (§10.1).
 
 ---
 
 ## 10. Build flags & configuration
 
-### 10.1 Compile-time flags (`platformio.custom.ini`)
+### 10.1 Compile-time flags
 
-| Flag | Where set | Effect |
+The **server** (`FileTransferModule`) compiles on any RP2040/ESP32 target as soon as the module is added —
+the core (FW-update, classic upload, FileInfo, filesystem-info, format/exists/rename/delete, cancel, module
+version, check-features) has **no switch**. Everything else is **on by default (opt-out)** — the point of
+the gates is to **reclaim flash** on a tight target (compile out what you don't use: `OPENKNX_FTC_MINIMAL`
+frees ~4.4 KB of server code, dropping the client `_SCAN`/`_DEVICEINFO` extras ~28 KB on a 2 MB RP2040).
+The full, authoritative switch table with defaults, the `OPENKNX_FTC_MINIMAL` roll-up and the
+Console⟹Security coupling lives in the **[README](README.md#build-switches-feature-gates)** and in
+[`FileTransferConfig.h`](src/FileTransferConfig.h). The client-facing flags:
+
+| Flag | Default | Effect |
 |---|---|---|
-| **`OPENKNX_FTC`** | per env (`:166`, `:260`, `:287`) | Enables the whole **client** (`FileTransferClient*`, the `ftc` console) **and** the send/receive FunctionProperty half in `lib/knx`. Everything it touches is behind this flag, so `grep -r OPENKNX_FTC` finds the full footprint. A server-only device (e.g. a NeoPixel) compiles the client to nothing. |
-| **`OPENKNX_FTC_CONSOLE`** | per env, **initially undefined** (opt-in) | Enables the **interactive console tunnel** (`ftc <pa> console`, §11.1): the `con*` handlers on both sides, a console line-sink in `Console`, and — on the server — implies `OPENKNX_WEBCONSOLE` (the log ring, +`OPENKNX_WEBCONSOLE_BUFSIZE` = 4096 B RAM). All of it is behind this flag; removing `-D` falls back binary-identical. Grants full remote console access — enable only where wanted. |
-| **`OPENKNX_FTC_SECURITY`** | per env, **initially undefined** (opt-in) | Enables the **access-control gate + `login`/`logout`** (§4.8): server cmds 103/104/105 + the write/console gate reading `ParamFTM_Security`/`FTM_Password`/`FTM_AuthTimeout`, and the client login handshake (needs `knx/aes.hpp`; add `knx/src/knx/aes.c` to the build). A product must also ship `FileTransfer.share.xml`. All of it is behind this flag; removing `-D` compiles byte-identical (the OAM-IP-Router relies on this). |
-| **`TPUART_TX_STICKY_OFFSET`** | `ec_flags_*` (`:37`, `:50`) | Send `U_L_DataOffset` only on change (§7.6). **+14 % at pkg 253.** Platform-agnostic. |
-| **`KNX_FIXES_EC`** | `ec_flags_*` (`:39`, `:51`) | KNX robustness fixes, incl. the **print-storm rate-limit** (fix #2) and a null-deref guard on `PID_SUB_LCCONFIG` (`bau091A.cpp`). |
+| **`OPENKNX_FTC`** | off | Compiles the whole **client** (`FileTransferClient*`, the on-device `ftc` console) **and** the send/receive FunctionProperty half in `lib/knx`. A server-only device (e.g. a NeoPixel) compiles the client to nothing. |
+| **`OPENKNX_FTC_CONSOLE`** | off | The **interactive console tunnel** (`ftc <pa> console`, §11.1): `con*` handlers on both sides, a `Console` line-sink, and — on the server — implies `OPENKNX_WEBCONSOLE` (the 4096 B log ring). **Pulls in `OPENKNX_FTC_SECURITY`** unless `-D OPENKNX_FTC_CONSOLE_INSECURE`. Grants full remote console access — enable only where wanted. |
+| **`OPENKNX_FTC_SECURITY`** | off | The **access-control gate + `login`/`logout`** (§4.8): server cmds 103/104/105 + the write/console gate, and the client login handshake (needs `knx/aes.hpp` + `aes.c`; a product also ships `FileTransfer.share.xml`). Without it the module + client compile byte-identical. |
+| **`OPENKNX_FTC_DOWNLOAD` / `_FASTUPLOAD` / `_DIROPS`** | **on** | Server extras — File Download (41) / fast upload (44+45) / directory ops (80-82). `_FASTUPLOAD` off also drops the CheckFeatures FAST bit → clients stay classic. |
+| **`OPENKNX_FTC_SCAN` / `_DEVICEINFO`** | **on** | Client extras (only meaningful with `OPENKNX_FTC`) — on-device bus scan / `ftc <pa> info` fingerprint + GA report. |
+| **`OPENKNX_FTC_MINIMAL`** | off | Roll-up: flips **all** on-by-default extras off → the bare FW-update + transfer + console core (the smallest footprint for a flash-tight RP2040). |
 
-The **server** (`FileTransferModule`) is guarded by `#if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)` — it compiles on any such target regardless of `OPENKNX_FTC`. `FwUpdate` (101): RP2040/RP2350 apply a gzipped image via `picoOTA`; ESP32 self-applies a RAW `.bin` (no gzip) via `Update`/OTA.
+Removing any `-D` compiles the affected code out cleanly (no stubs left behind). `FwUpdate` (101):
+RP2040/RP2350 apply a gzipped image via `picoOTA`; ESP32 self-applies a RAW `.bin` via `Update`/OTA.
+
+**Minimal-footprint examples:**
+
+```
+; smallest possible FTM target (FW-update + classic/console core only), e.g. a 2 MB RP2040 sensor:
+build_flags = -D OPENKNX_FTC_MINIMAL
+
+; server that keeps download + directory browsing but drops the fast/windowed upload path:
+build_flags = -D OPENKNX_FTC_FASTUPLOAD=0
+
+; full on-device client, but without the bus-scan and device-fingerprint helpers:
+build_flags = -D OPENKNX_FTC -D OPENKNX_FTC_SCAN=0 -D OPENKNX_FTC_DEVICEINFO=0
+
+; console-capable target on a trusted/dev bus, without the password gate the console would otherwise pull in:
+build_flags = -D OPENKNX_FTC_CONSOLE -D OPENKNX_FTC_CONSOLE_INSECURE
+```
 
 ### 10.2 Client tunables (`FileTransferClient.cpp`)
 
 | Constant | Value | Meaning |
 |---|---:|---|
 | `FTC_OBJECT_INDEX` | 159 | FunctionProperty object index (server-enforced) |
-| `FTC_PKG_DEFAULT` / `MIN` / `MAX` | 64 / 16 / 254 | frame size bounds; 254 = spec-legal APDU max (255 = escape) |
+| `FTC_PKG_MIN / MAX` | 16 / 254 | frame size bounds; 254 = spec-legal APDU max (255 = escape). Default is **auto** (254, degrades on the path) |
 | `FTC_PKG_OVERHEAD` | 6 | classic payload = `pkg − 6` (fast = `pkg − 8`) |
 | `FTC_TIMEOUT` | 6000 ms | default per-state answer timeout |
 | `_cfgMaxRetries` (`FTC_MAX_RETRIES_DEF`) | 3 | per-chunk retries (CRC/timeout) — **runtime** member, `ftc retry max <0..20>` |
-| `_cfgTransferRetries` (`FTC_TRANSFER_RETRIES_DEF`) | 8 | whole-transfer auto-retries — **runtime** member, `ftc retry transfer <0..50>` (0 = off) |
+| `_cfgTransferRetries` (`FTC_TRANSFER_RETRIES_DEF`) | 3 | whole-transfer auto-retries — **runtime** member, `ftc retry transfer <0..50>` (0 = off) |
 | `_cfgBackoffMs` (`FTC_RETRY_BACKOFF_MS_DEF`) | 3000 ms | settle time before a transfer retry — **runtime** member, `ftc retry backoff <0..60000>` |
 | `FTC_FEAT_FAST` | 0x04 | CheckFeatures FAST bit |
 | `FTC_FEATURE_TIMEOUT` | 800 ms | short FAST-probe window |
 | `FTC_FAST_MAX_CHUNKS` | 8192 | fast chunk cap (mirrors the server bitmap) |
-| `FTC_WND_INIT / MIN / MAX` | 8 / 4 / 64 | AIMD window bounds |
+| `FTC_WND_INIT / MIN / MAX` | 16 / 4 / 64 | AIMD window bounds |
 | `FTC_TX_HIGH / LOW` | 30 / 1 | TP-FIFO water marks (of the 50-deep queue) |
 | `FTC_FAST_BURST_SD / RAM` | 4 / 16 | per-`loop()` send cap (SD read is costly, RAM is cheap) |
-| `FTC_RATE_MIN_MS` | 3000 ms | interval-rate dt guard |
-| `FTC_FORGET_BURST / PACE_MS` | 4 / 25 | forget pacing |
 | `FTC_REPORT_TIMEOUT / RETRIES` | 4000 ms / 3 | report-query answer timeout & retries |
 | `FTC_NOPROGRESS_MAX` | 4 | reports without shrinking → abort |
-| `FTC_FAST_PAGE` | 1024 | seqs per report during forget recovery |
-| `FTC_FAST_STALL_MS` | 30000 ms | progress-based overall deadline |
+| `FTC_FAST_STALL_MS` | 30000 ms | progress-based overall deadline (re-armed on any advance) |
+| `FTC_HARD_BASE_MS / HARD_FLOOR_BPS` | 15000 ms / 40 | size-scaled hard stall/wedge backstop (deadline = base + size ÷ floor-rate) |
 | `FTC_DUP_WINDOW_MS` | 12 | IP-mirror duplicate window |
 | `FTC_SCAN_SPACING_MS / DRAIN_MS / MAX_LIST` | 40 / 2500 / 128 | scan pacing, drain, listing cap |
 | `FTC_DL_PAYLOAD` | 240 | download data bytes/chunk |
@@ -928,19 +1099,25 @@ target changes less often than the command.
 | `format yes` | erase the **whole** filesystem (gated by `yes`) |
 | `mkdir <dir>` / `rmdir <dir>` | create / remove a directory |
 | `mv <old> <new>` | rename / move |
-| `get <remote> [local]` | download a file from the target onto SD |
-| `send <src> [pkg] [mode]` | upload — auto-resumes a matching partial |
-| `resume <src> [pkg] [mode]` | upload — same, explicit resume |
-| `perf [kb] [pkg] [mode]` | speed test: push a RAM pattern, report B/s, then delete it |
+| `get <remote> [local]` | download a file from the target onto SD (`[pkg]` 16..240, default 240) |
+| `send <src> [pkg] [mode]` | upload — **auto-resumes** a matching partial (add `nr`/`fresh` to force a fresh upload); `fast w<N>` pins the window |
+| `fwupdate <file>` / `apply` | reboot the target into an already-uploaded firmware image (`FwUpdate` 101) |
+| `perf [kb] [pkg] [mode] [sd\|efc] [w<N>]` | speed test: push a RAM pattern, report B/s, then delete it (`keep` leaves it) |
+| `led on\|off\|blink` | drive the target's prog-mode LED (locate) — a `PropertyValue_Write`, not an obj-159 command |
 | `console` / `con` | **interactive console tunnel** into the target's OpenKNX console (§11.1) — needs `OPENKNX_FTC_CONSOLE` on both devices |
 | `login <pw>` | unlock write actions on a password-protected target (§4.8) — password → MAC locally, never on the wire; needs `OPENKNX_FTC_SECURITY` |
 | `logout` | lock the target's write actions again now (§4.8) |
+
+> **Drive routing.** A remote path may carry a drive prefix — `/…` (LittleFS, default), `sd/…` (SD card)
+> or `efc/…` (external flash) — routed **at the target** for `df` / `ll` / `ls` / `rm` / `mkdir` / `rmdir`
+> / `mv` / `info` / `get` / `perf`. E.g. `ftc 5.0.3 df sd` or `ftc 5.0.3 ll efc/`. It is path-based, not a
+> new command ID (§4.1).
 
 **Global — `ftc <cmd>`:**
 
 | Command | Description |
 |---|---|
-| `scan [a.l \| a.l.d \| from to] [deep [N]]` | find devices via `DeviceDescriptor_Read`; `deep` = multi-pass union (robust over IP) |
+| `scan [a.l \| a.l.d \| from to] [deep [N]] [ets] [openknx\|info] [save <path>]` | find devices via `DeviceDescriptor_Read`; `deep` = multi-pass union (robust over IP); `ets` = connection-oriented T_Connect probe; `openknx` = only mfr 0x00FA; `info` = full per-device fingerprint; `save <path>` = write the result as CSV (`/`, `sd/` or `efc/`) |
 | `scan full yes` | sweep the whole bus (65535 addresses — gated) |
 | `scan area <a> yes i really know what i am doing` | sweep one area (gated twice) |
 | `cancel` / `c` | stop the running transfer / scan |
@@ -952,8 +1129,10 @@ target changes less often than the command.
 
 - `<pa>` — `a.l.d`, e.g. `5.0.3` (comes first).
 - `<src>` — `test` = built-in 2 KB RAM pattern (→ written to `/ftctest.bin` on the target), or a local SD path.
-- `[pkg]` — 16..254, default 64. **Bigger = faster; 254 = max** (§6.4).
-- `[mode]` — `safe` | `fast` | `forget` (aliases: `win`/`windowed` = fast, `ff` = forget). Order-tolerant with `pkg`.
+- `<remote>` / target path — may carry a `sd/` or `efc/` drive prefix (default LittleFS); routed at the target.
+- `[pkg]` — 16..254, **default auto (254, degrades on the path)**. **Bigger = faster; 254 = max** (§6.4).
+- `[mode]` — `safe` (default) | `fast` (aliases `win`/`windowed` = fast). Add `w<N>` after `fast` to pin
+  the window (e.g. `fast w8`). Order-tolerant with `pkg`.
 
 **Examples:**
 
@@ -963,8 +1142,9 @@ ftc 5.0.3 df                    # target LittleFS: total / used(%) / free + usag
 ftc 5.0.3 ll
 ftc scan 5.0                    # sweep line 5.0
 ftc scan 5.0.1 5.0.50 deep 5    # range, 5-pass union
-ftc 5.0.3 perf 50 253 forget    # 50 KB test, pkg 253, forget mode
-ftc 5.0.3 send /fw_neo.bin.gz 253 fast
+ftc 5.0.3 perf 50 254 fast      # 50 KB test, pkg 254, fast/windowed mode
+ftc 5.0.3 perf 50 254 fast w8   # same, but pin the fast window to 8 (no end-burst overrun)
+ftc 5.0.3 send /fw_neo.bin.gz 254 fast
 ftc 5.0.3 info                  # device fingerprint
 ftc cancel
 ```
@@ -990,7 +1170,7 @@ the defaults on reboot — a fast knob for tuning/tests, not persisted config.
 | Setting | Default | Range | Effect |
 |---|---:|---|---|
 | `max` | 3 | 0..20 | per-chunk retries on CRC/timeout before that chunk fails (§5.2) |
-| `transfer` | 8 | 0..50 | whole-transfer auto-retries (transient abort → resume); **0 = off** (§5.3) |
+| `transfer` | 3 | 0..50 | whole-transfer auto-retries (transient abort → resume); **0 = off** (§5.3) |
 | `backoff` | 3000 | 0..60000 ms | wait between transfer retries — let a busy/rebooting target settle |
 
 ```
@@ -1002,74 +1182,50 @@ ftc retry backoff 1000    # shorter settle between transfer retries
 
 ### 11.1 Interactive console tunnel (`ftc <pa> console`)
 
-> Opt-in behind **`OPENKNX_FTC_CONSOLE`** (§10.1) — **initially undefined**. Both devices need the flag.
-> The full `ftc ?` help lists `console | con` only when it is compiled in.
-
-Opens a transparent, interactive session into the **remote device's own OpenKNX console** over the
-KNX bus — you type `mem`, `fs`, `info`, … on your router and see the target's output stream back, until
-`quit`. It uses **only standard `A_FunctionProperty_Command` / `_State_Response`** (like the rest of FTC),
-so it routes through line/area couplers and adds **0 LOC to `lib/knx`**.
+Opens a transparent, interactive session into the **remote device's own OpenKNX console** over the KNX
+bus — you type `mem`, `fs`, `info`, … locally and the target's output streams back, until `quit`. It is a
+**separate channel** from the FTC-159 command table (object index **160**, two properties) and rides only
+standard `A_FunctionProperty_Command` / `_State_Response`, so it routes through couplers and adds 0 LOC to
+`lib/knx`. Cooperative and non-blocking on both sides; one session at a time; tolerates a congested bus.
 
 ```
-ftc 5.0.3 console      # step in -> you are "inside"; type commands; `quit` steps out
-mem                    # runs on 5.0.3, its output streams back
-info
-quit                   # (or `exit`) -> back to your local console
+ftc 5.0.3 console      # step in; type commands; quit steps out
 ```
 
-- **Step in / out:** `quit` and `exit` are caught **locally** and close the session; `ftc cancel` is an
-  escape hatch. While inside, finished input lines are diverted to the target (a `Console` line-sink), not
-  run locally; the terminal still echoes your keystrokes.
-- **Wire:** a separate object index **160** (distinct from the FTC-159 command table), two properties —
-  `PID_IN` (1: `[flags][line]`, flags bit0 = OPEN, bit1 = CLOSE) and `PID_OUT` (2: drain, answer
-  `[status][more][overflow][text…]`). OPEN carries the client PA (logged at the target only).
-- **Output capture:** the server drains the shared **`OPENKNX_WEBCONSOLE` log ring** (implied by the flag,
-  default 4096 B) — the console already writes everything through the logger, so capture is 0 extra code.
-  Background logs stream too. The client writes each drained chunk **verbatim** to its serial (under the
-  logger mutex), not through `log()`, so the remote text is not re-timestamped.
-- **Non-blocking (VORGABE):** the dispatch handler only parks a line / copies a **bounded ≤247 B** ring
-  window — it never runs a command or touches flash. The command itself runs in the server's `loop()`
-  under `freeLoopTime()` + `skipLooptimeWarning()`, exactly like the **local** USB console (an accepted
-  one-shot, not a new stall). The client drains cooperatively (one bounded chunk per `loop()` pass) and
-  keepalive-polls every ~3 s to fetch async logs.
-- **Truncation (honest):** a single burst larger than the 4 KB ring between two drains overwrites the head;
-  the server flags it and the client prints `[...output truncated...]` once, then continues cleanly.
-  Large `mem`/`fs` dumps can trip this — raise `OPENKNX_WEBCONSOLE_BUFSIZE` if that matters.
-- **One session:** single logical owner — a second router opening gets `busy`. On OPEN the target's **local
-  console is disabled** (`disableConsole(true)`) and re-enabled on CLOSE; an idle session (no poll for 60 s)
-  is reaped so the target is never left deaf. Reboot commands (`restart`/`erase`) end the session — the
-  client reads the ensuing silence as "device rebooted, session over".
-- **Security:** an unauthenticated `A_FunctionProperty` carrier = **full device control** (`erase`,
-  `restart`, `dw/aw`, `flash` dumps). v1's only gate is the **default-off build flag**; a ProgMode gate is
-  a documented later step (see `doc/concepts/ftc-console-tunnel.md` §11).
+Opt-in behind **`OPENKNX_FTC_CONSOLE`** (which pulls in access control, §4.8) — both devices need the flag.
 
-Design & verified anchors: `doc/concepts/ftc-console-tunnel.md` (concept) and
-`ftc-console-tunnel-umsetzung.md` (implementation hand-off). Server: `FileTransferModule::conFunctionProperty`
-/ `conLoop`. Client: `FileTransferClient::requestConsole` / `consoleFeedLine` / the `FtcConsole` state.
+> **Full detail — the object-160 wire (PID_IN/PID_OUT), output capture via the log ring, the non-blocking
+> model, truncation, the one-session reaper and the security note — is in
+> [`FTC-Console.md`](FTC-Console.md).**
 
 ---
 
 ## 12. Known limits & future work
 
-- **SPI @ 500 kbps host link (the big one).** The NCN5130 can talk SPI at 500 kbps (MODE2 strap +
-  SCK/CSB/TREQ wiring + a new SPI host driver in `lib/TPUart`). It would nearly eliminate the
-  store-and-forward serial latency and push toward the **~800 B/s TP-bus limit** — roughly 2× the best
-  38400-UART number. It is a substantial hardware + firmware project, not a config change (§7.5).
-- **Host baud is a strap, not a setting.** 19200 vs 38400 is decided by the CSB/UC1 pin at reset; the
-  firmware already auto-detects and uses it. A faster board = a PCB rework to strap CSB/UC1 high (§7.4).
-- **Fast chunk cap.** Fast/forget is capped at `FTM_FAST_MAX_CHUNKS = 8192` (~2 MB @ pkg 253, covers
-  firmware). Above the cap the server answers `0x4A` and the client transparently runs classic (no cap).
-- **`pkg 254` is the ceiling** — the spec-legal APDU max (255 = `0xFF` escape). `pkg 255` is rejected.
-- **Server-side hardening TODOs.** The classic `writeFile` still has no sequence/gap awareness of its
-  own — correctness comes entirely from the client's stop-and-wait and the shared `writeChunk` absolute
-  seek. The fast path's bitmap is the only server-side integrity tracker; the classic path trusts the
+Genuinely open items only — the once-mysterious throughput ceiling is now *understood*, not open (it is
+the host-UART strap + store-and-forward, §7; there is no firmware lever left there).
+
+- **SPI @ 500 kbps host link (the one real speed lever left).** The NCN5130 can talk SPI at 500 kbps
+  (MODE2 strap + SCK/CSB/TREQ wiring + a new SPI host driver in `lib/TPUart`). It would nearly eliminate
+  the store-and-forward serial latency and push toward the **~650 B/s TP-bus limit** — clearly above the
+  best 38400-UART number. Substantial hardware + firmware, not a config change (§7.5).
+- **`safe` vs `fast` under a flooded bus is a delivery-pattern trade-off, not a bug.** `safe` self-paces
+  and grinds through a congested bus; `fast` bursts a window and is inherently sensitive to a bus a third
+  device is already saturating (§3.1). The stall-deadline re-arm keeps `fast` *progressing* rather than
+  false-aborting, but on a knowingly busy/shared bus `safe` is the right tool. Bisecting a suspected
+  "fast regression" vs. a busier *environment* needs a last-known-good reference — open.
+- **Console log-ring overflow on a big dump.** The console tunnel drains the shared 4096 B log ring; a
+  single burst larger than that between two drains overwrites the head → the client prints
+  `[...output truncated...]` once and continues. A dedicated, larger device console ring is a TODO
+  (raise `OPENKNX_WEBCONSOLE_BUFSIZE` as a stopgap). §11.1.
+- **Fast chunk cap.** Fast is capped at `FTM_FAST_MAX_CHUNKS = 8192` (~2 MB @ pkg 254, covers firmware).
+  Above the cap the server answers `0x4A` and the client transparently runs classic (no cap).
+- **Server-side hardening TODO.** The classic `writeFile` has no sequence/gap awareness of its own —
+  correctness comes entirely from the client's stop-and-wait and the shared `writeChunk` absolute seek.
+  The fast path's received-bitmap is the only server-side integrity tracker; the classic path trusts the
   round trip.
-- **Duplicate answers over a mirroring IP router** are handled (counted + dropped) but not *explained* —
-  a second KNX-IP router mirroring TP → routing multicast is the confirmed source; FTC filters them
-  rather than preventing them.
-- **Hardware note (RP2350 targets):** flash via UF2/`picotool`, **never OTA** — OTA bricks the RP2350
-  boot path. This is a target-side flashing constraint, orthogonal to FTC, but relevant when staging a
-  firmware file for `FwUpdate` (101).
+- **RP2350 targets: flash via UF2/`picotool`, never OTA** — OTA bricks the RP2350 boot path. A target-side
+  flashing constraint (orthogonal to FTC) but relevant when staging a firmware file for `FwUpdate` (101).
 
 ---
 
@@ -1089,11 +1245,4 @@ Design & verified anchors: `doc/concepts/ftc-console-tunnel.md` (concept) and
 | **chunk** | one payload frame of a file; `chunks = ceil(size / payload)`; seq is 1-based (0 = open, 0xFFFF = close) |
 | **PA** | physical/individual address, `area.line.device`, e.g. `5.0.3` |
 | **store-and-forward** | the NCN buffers a whole TX frame from the host before putting it on TP (adds host time in series) |
-| **sticky offset** | sending `U_L_DataOffset` only when it changes (`TPUART_TX_STICKY_OFFSET`) |
-
----
-
-*Sources: `FileTransferClient.{h,cpp}`, `FileTransferModule.{h,cpp}`, `FileTransferClientConsole.cpp`,
-`bau_systemB.cpp`, `bau091A.cpp`, `tpuart_data_link_layer.cpp`, `Transmitter.cpp`, `DataLinkLayer.cpp`,
-`doc/errorcodes.txt`, `platformio.custom.ini`. Measurements: KNeoPix @ PA 5.0.3, 50 KB ramp,
-CRC32/POSIX 0x6F8129C7. Concept docs: `doc/concepts/ftc*.md`.*
+| **sticky offset** | sending `U_L_DataOffset` only when it changes (always on) |

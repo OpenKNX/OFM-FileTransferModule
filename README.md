@@ -6,16 +6,27 @@
 
 Add this module to make your OpenKNX device an FTC **target**: upload/download files, manage the flash and
 run a firmware update — plus, optionally, an **interactive remote console** — all **over the KNX / KNXnet-IP
-tunnel**. A native cross-platform host CLI (`ftc`) drives it from a PC.
+tunnel**. Drive it **device → device** (the on-device `ftc` console on any OpenKNX device built with
+`-D OPENKNX_FTC`) **or from a PC** with the native cross-platform `ftc` CLI — **no PC is required in the chain**.
 
-## Step 1
-Make shure you get this output in your build step:  
-Sizes depends on your configuration, but you need the entry "Filesystem size".
+## Step 1 — check the firmware fits for FW-update-over-KNX
+The build prints a fit check: the compressed firmware image must fit in the device's filesystem (that is
+where a `FwUpdate` stages the incoming image before it is applied). You want the closing `=> OK`:
 ```
-Flash size: 2.00MB
-Sketch size: 1.50MB
-Filesystem size: 0.50MB
+FW-update-over-KNX fit (compressed OTA image must fit in filesystem):
+  firmware:              987196 bytes
+  est. gzip (x0.65):     641677 bytes
+  filesystem:           2617344 bytes
+  usable  (x0.90):      2355609 bytes
+=> OK - fits with headroom.
 ```
+`est. gzip` is the ~0.65× compressed size actually transferred; `usable` is the filesystem minus a safety
+margin. If the check fails, grow the filesystem partition (or shrink the sketch) until the image fits.
+
+This build-time check is only a heads-up — **it can never corrupt a device.** Before *any* real transfer,
+the client also runs a **runtime space check**: it queries the target's free space and, if the file would
+not fit, **refuses up front** ("not enough space on target filesystem") instead of streaming a whole
+upload that could only fail near the end. So a too-small target is caught cleanly, not mid-transfer.
 
 ## Step 2
 Add the Module to the OpenKnx Stack
@@ -35,34 +46,81 @@ void setup()
 }
 ```
 
-## Step 3 — talk to it from a PC
-Use the built-in **`ftc`** host CLI (in [`ftc-cli/`](ftc-cli/), cross-built for Windows / macOS / Linux). It
-speaks KNXnet/IP tunnelling directly — also through third-party certified interfaces — for upload, download,
-firmware update and the interactive console:
+## Step 3 — drive it (device → device or from a PC)
+**Device → device** — build any OpenKNX device with `-D OPENKNX_FTC` and it gains the on-device `ftc`
+console client (PA → PA, over the bus, no PC):
 ```
-ftc --ip <interface-ip> <pa> ll            # list files on the device
-ftc --ip <interface-ip> <pa> send <file>   # upload
-ftc --ip <interface-ip> <pa> console       # interactive remote console (needs OPENKNX_FTC_CONSOLE)
+ftc <pa> ll                # list files on another device
+ftc <pa> send <file>       # upload
+ftc <pa> console           # interactive remote console (needs OPENKNX_FTC_CONSOLE on both)
 ```
+**From a PC** — the native **`ftc`** host CLI (in [`ftc-cli/`](ftc-cli/), cross-built for Windows / macOS /
+Linux) speaks KNXnet/IP tunnelling directly, also through third-party certified interfaces:
+```
+ftc --ip <interface-ip> <pa> ll
+ftc --ip <interface-ip> <pa> send <file>
+ftc --ip <interface-ip> <pa> console
+```
+Both fronts share the **same** transfer + protocol core — only the transport (cEMI on the device vs. a
+KNXnet/IP tunnel on the host) differs.
 > The older standalone [KnxFileTransferClient](https://github.com/OpenKNX/KnxFileTransferClient) still works too.
 
 ## Console & fast transfers — what you need
-For a plain device to be an FTC **target** with the interactive console and the fast upload modes, you need:
-- this **FileTransferModule** on branch **`ec/v1dev-ftc`** (it carries the console server + the fast/windowed modes), and
-- the compile flag **`-D OPENKNX_FTC_CONSOLE`** on the target — enables the console tunnel (implies the log
-  ring / web-console). Plain file transfer needs no extra flag once the module is added.
+- **Plain file transfer** (upload / download / FW-update) needs no extra flag once the module is added — the
+  device is a target out of the box.
+- **Interactive console** — add **`-D OPENKNX_FTC_CONSOLE`** on the target; it opens the console tunnel and
+  implies the log ring / web-console (and pulls in the access-control gate, see the switch table above).
+- **`fast` / windowed upload** works out of the box (`OPENKNX_FTC_FASTUPLOAD`, on by default). Over a
+  third-party (non-OpenKNX) interface it transparently degrades to the classic path; the biggest gains are
+  over an OpenKNX interface / router.
 
-You do **not** need the tunnelling stack for a plain target: the FTC **client** and the KNXnet/IP front-end
-live on the **interface / router** (knx branch `ec/ip-interface-bau07B0-wip`, TPUart `main-ec`). On the
-OpenKNX common side, base **`v1dev`** is enough.
+### Documentation
 
-> These feature branches are **work-in-progress — for testing.** The `fast`/`windowed` (mode 1) and `forget`
-> (mode 2) upload modes only work with an OpenKNX interface or router, not through third-party interfaces.
-> See **[`README_FTC.md`](README_FTC.md)** for the full command set, the wire protocol and the measurements.
+| Doc | What's in it |
+|---|---|
+| **[`doc/FTC-Reference.md`](doc/FTC-Reference.md)** | Engineering reference: command set, wire protocol, `safe` vs `fast`, resume/recovery, throughput & the NCN bottleneck, build flags, metrics. |
+| **[`doc/FTC-Console.md`](doc/FTC-Console.md)** | The interactive remote console tunnel (object 160) — how it works, non-blocking, security. |
+| **[`doc/FTC-Security.md`](doc/FTC-Security.md)** | Access control: the password gate for writes & console (`OPENKNX_FTC_SECURITY`). |
+| **[`ftc-cli/README.md`](ftc-cli/README.md)** | The native desktop client (`ftc --ip …`) for Windows / macOS / Linux. |
+
+## Build switches (feature gates)
+
+**Why:** to **save flash**. The module runs on **any OpenKNX device** — including flash-tight ones like a
+2 MB RP2040 — so every optional feature can be compiled out to reclaim space you'd rather give to your own
+application. Concretely: `OPENKNX_FTC_MINIMAL` frees **~4.4 KB** of server code, and dropping the client
+extras (`_SCAN` / `_DEVICEINFO`) frees **~28 KB** on a 2 MB RP2040. Nothing is lost in transfer correctness
+— only features you don't use.
+
+Every optional feature is **on by default (opt-out)**, so adding the module changes nothing until you strip
+it down: a minimal device drops everything except the core with `-D OPENKNX_FTC_MINIMAL`, or you pin a
+single gate with `-D OPENKNX_FTC_…=0`. All defaults and couplings live in
+[`FileTransferConfig.h`](src/FileTransferConfig.h).
+
+**Core — always compiled, no switch:** FwUpdate, classic File Upload, File Info (+ cooperative CRC),
+Filesystem Info, Format / Exists / Rename / Delete, Module Version, Check Features, Cancel.
+
+| Switch | Default | Enables | Off → |
+|---|---|---|---|
+| `OPENKNX_FTC` | off | the on-device **`ftc`** console client (PA → PA); shares its core with the desktop `ftc-cli` | device is an FTC **target** only, no client |
+| `OPENKNX_FTC_CONSOLE` | off | interactive console tunnel (obj 160) — **implies `OPENKNX_FTC_SECURITY`** | no console |
+| `OPENKNX_FTC_SECURITY` | off | password access control (login / logout, ETS-gated) | writes open (unless a console pulls it in) |
+| `OPENKNX_FTC_DOWNLOAD` | **on** | File Download (41) | no reading files off the device |
+| `OPENKNX_FTC_FASTUPLOAD` | **on** | fast / windowed upload (44 / 45) + the CheckFeatures FAST bit | classic upload only (the client auto-falls-back) |
+| `OPENKNX_FTC_DIROPS` | **on** | Dir List / Create / Delete (80 / 81 / 82) | no directory browsing |
+| `OPENKNX_FTC_SCAN` | **on** (client) | on-device bus scan | — |
+| `OPENKNX_FTC_DEVICEINFO` | **on** (client) | `ftc <pa> info` device fingerprint + GA report | — |
+| `OPENKNX_SDCARD` / `OPENKNX_EXTFLASH` | off | `sd/` / `efc/` drive backends (+ their File Info CRC) | LittleFS only |
+| `OPENKNX_WEBSERVER` | (from OFM-Network) | the render-agnostic **Info-API** struct mirror a web / panel frontend draws from | mirror not compiled |
+
+- `OPENKNX_FTC_MINIMAL` flips every **on-by-default** extra to off → the bare FW-update + console core.
+- `OPENKNX_FTC_CONSOLE` pulls in `OPENKNX_FTC_SECURITY` so a console take-over is never unauthenticated; opt
+  out deliberately with `-D OPENKNX_FTC_CONSOLE_INSECURE` (dev / trusted bus).
+- The client sub-gates (`_SCAN` / `_DEVICEINFO`) only apply when `OPENKNX_FTC` is set — a device without the
+  client compiles none of it anyway.
 
 ## Good to know
-The FtpServer uses following FunctionProperties.  
-These may not used by any other module.
+The FileTransferModule (FTC) server uses the following FunctionProperties.  
+These must not be used by any other module.
 |ObjectIndex|PropertyId|Used for|
 |---|---|---|
 |159|0|Format|

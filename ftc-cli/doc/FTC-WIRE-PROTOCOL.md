@@ -4,7 +4,7 @@ Definitive, byte-exact description of the OpenKNX **FileTransferClient (FTC)** w
 the firmware sources so a **native desktop KNXnet/IP tunnel client** can drive it byte-correct: inject cEMI
 `L_Data.req` with the right APDU, and parse incoming `L_Data.ind` into the five client callbacks.
 
-Every claim carries a `file:line` and/or a `README_FTC.md §` citation. Line numbers are as of the sources
+Every claim carries a `file:line` and/or a `FTC-Reference.md §` citation. Line numbers are as of the sources
 read for this spec; if code shifts, re-verify against the cited symbol name.
 
 **Sources (authoritative):**
@@ -14,7 +14,7 @@ read for this spec; if code shifts, re-verify against the cited symbol name.
 - `knx/src/knx/bau_systemB.cpp` — the 6 `ftcSend*` + 5 scan shims + the 5 response callbacks.
 - `knx/src/knx/application_layer.cpp` — APDU assembly + response-indication parsing.
 - `knx/src/knx/{apdu,tpdu,npdu,cemi_frame,transport_layer,bits}.cpp` + `knx_types.h` — framing + APCI/TPCI.
-- `lib/OFM-FileTransferModule/README_FTC.md`, `doc/errorcodes.txt`.
+- `lib/OFM-FileTransferModule/doc/FTC-Reference.md`, `doc/errorcodes.txt`.
 
 `lib/knx` is a symlink → `../../knx` (resolved: `/Users/ecolak/Entwicklung/OpenKNX-Router/knx`).
 
