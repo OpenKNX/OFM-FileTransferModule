@@ -157,7 +157,6 @@ class FileTransferModule : public OpenKNX::Module
     bool cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     // FAST gap report (cmd45): answer the received-bitmap for a window so the client resends only gaps.
     void cmdFileReport(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
-    // bool processFunctionPropertyState(uint8_t objectIndex, uint8_t propertyId, uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength) override;
 
     bool checkOpenedFile(uint8_t *resultData, uint8_t &resultLength);
     bool checkOpenedDir(uint8_t *resultData, uint8_t &resultLength);

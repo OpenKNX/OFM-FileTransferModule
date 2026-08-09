@@ -1099,7 +1099,7 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
     // time_t lw = _file.getLastWrite();
     FastCRC32 crc32;
     uint32_t crc = 0;
-    int len = 1000;
+    static constexpr int len = 256; // fixed CRC read chunk (was a 1000-byte VLA on the KNX-dispatch stack)
     bool first = true;
     uint8_t buf[len];
     while (_file.available())
@@ -1199,7 +1199,7 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
     if (!checkOpenedDir(resultData, resultLength)) return;
 
     // --- Provider-served (sd/efc): one entry per round-trip; both expose the same dirNext ---
-    #if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH) || defined(OPENKNX_EXTFLASH)
+    #if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
     if (_sdDirActive || _efcDirActive)
     {
         char name[64];
@@ -1309,6 +1309,20 @@ void FileTransferModule::cmdFileDelete(uint8_t length, uint8_t *data, uint8_t *r
     pushByte(0x0, resultData);
 }
 
+// Optional exact total size (LE uint32) appended after the NUL-terminated name (scan from nameStart).
+// Bounds-checked within length; absent (older client) -> 0 = no SD preAllocate (legacy behaviour).
+static uint32_t ftmParseSizeHint(const uint8_t *data, uint8_t nameStart, uint8_t length)
+{
+    for (uint8_t i = nameStart; i < length; i++)
+        if (data[i] == '\0')
+        {
+            if ((size_t)i + 5 <= (size_t)length)
+                return (uint32_t)data[i + 1] | ((uint32_t)data[i + 2] << 8) | ((uint32_t)data[i + 3] << 16) | ((uint32_t)data[i + 4] << 24);
+            return 0;
+        }
+    return 0;
+}
+
 void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
@@ -1343,16 +1357,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
             logInfoP("Truncate file upload");
         }
 
-        // Optional exact total size (LE uint32) appended AFTER the NUL-terminated name -> SD preAllocate.
-        // Bounds-checked within `length`; absent (older client) -> 0 = no preAllocate (legacy behaviour).
-        uint32_t sizeHint = 0;
-        for (uint8_t i = 4; i < length; i++)
-            if (data[i] == '\0')
-            {
-                if ((size_t)i + 5 <= (size_t)length)
-                    sizeHint = (uint32_t)data[i + 1] | ((uint32_t)data[i + 2] << 8) | ((uint32_t)data[i + 3] << 16) | ((uint32_t)data[i + 4] << 24);
-                break;
-            }
+        uint32_t sizeHint = ftmParseSizeHint(data, 4, length);
 
         if (!ftmXferOpenWrite(filename, isResume, sizeHint))
         {
@@ -1427,15 +1432,7 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
 
         _size = data[2];               // payload B/chunk -> seek stride ((seq-1)*_size)
         const uint8_t flags = data[3]; // bit0 resume (r+ vs w), bit1 keepBitmap (recovery re-open)
-        // Optional exact total size (LE uint32) after the NUL name (from data+6) -> SD preAllocate; else 0 (legacy).
-        uint32_t sizeHint = 0;
-        for (uint8_t i = 6; i < length; i++)
-            if (data[i] == '\0')
-            {
-                if ((size_t)i + 5 <= (size_t)length)
-                    sizeHint = (uint32_t)data[i + 1] | ((uint32_t)data[i + 2] << 8) | ((uint32_t)data[i + 3] << 16) | ((uint32_t)data[i + 4] << 24);
-                break;
-            }
+        uint32_t sizeHint = ftmParseSizeHint(data, 6, length);
         if (!ftmXferOpenWrite(filename, flags & 0x01, sizeHint))
         {
             pushByte(0x42, resultData);
@@ -1593,7 +1590,6 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
         _lastSequence = 0;
         pushByte(0x0, resultData);
         pushInt(fileSize, resultData + 1);
-        pushByte(0x0, resultData);
         resultLength = 5;
         return;
     }
