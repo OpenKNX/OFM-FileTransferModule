@@ -74,9 +74,7 @@ void FileTransferModule::loop(bool configured)
 #ifdef OPENKNX_FTC_CONSOLE
     conLoop();
 #endif
-#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
-    crcLoop(); // advance a cooperative SD/EFC file-CRC job, if one is running (non-blocking)
-#endif
+    crcLoop(); // advance a cooperative file-CRC job (LittleFS/SD/EFC), if one is running (non-blocking)
 }
 
 enum class FtmCommands
@@ -788,11 +786,10 @@ void FileTransferModule::conLoop()
 }
 #endif
 
-#if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
-// Advance the cooperative SD/EFC file CRC by a bounded slice per loop() pass -> NEVER a whole-file read in the
-// dispatch (that reboots on a large file). The read handle (_src) was opened by cmdFileInfo when the job
+// Advance a cooperative file CRC (LittleFS/SD/EFC) by a bounded slice per loop() pass -> NEVER a whole-file
+// read in the dispatch (that reboots on a large file). The read handle was opened by cmdFileInfo when the job
 // started and stays open until the answer flips to 0x00. A stranded job (client stopped polling) is reaped
-// after HEARTBEAT_INTERVAL so it can never hold the drive's single handle forever.
+// after HEARTBEAT_INTERVAL so it can never hold a handle forever.
 void FileTransferModule::crcLoop()
 {
     if (!_crcActive) return;
@@ -801,11 +798,12 @@ void FileTransferModule::crcLoop()
     {
         const uint8_t want = (uint8_t)MIN((uint32_t)sizeof(buf), _crcSize - _crcOff);
         uint8_t got = 0;
+        if (_crcDrive == FD_INT) got = (uint8_t)_crcFile.readBytes((char *)buf, want); // LittleFS, sequential
     #ifdef OPENKNX_SDCARD
-        if (_crcDrive == FD_SD) got = sd::fileStore.read(_crcOff, buf, want);
+        else if (_crcDrive == FD_SD) got = sd::fileStore.read(_crcOff, buf, want);
     #endif
     #ifdef OPENKNX_EXTFLASH
-        if (_crcDrive == FD_EFC) got = efc::fileStore.read(_crcOff, buf, want);
+        else if (_crcDrive == FD_EFC) got = efc::fileStore.read(_crcOff, buf, want);
     #endif
         if (got == 0) { _crcOff = _crcSize; break; } // read error/short -> stop; a wrong CRC then trips the client verify
         _crcVal = _crcFirst ? _crc32.cksum(buf, got) : _crc32.cksum_upd(buf, got);
@@ -818,18 +816,18 @@ void FileTransferModule::crcLoop()
 void FileTransferModule::crcCancel()
 {
     if (!_crcActive) return;
+    if (_crcDrive == FD_INT) _crcFile.close();
     #ifdef OPENKNX_SDCARD
-    if (_crcDrive == FD_SD) sd::fileStore.close();
+    else if (_crcDrive == FD_SD) sd::fileStore.close();
     #endif
     #ifdef OPENKNX_EXTFLASH
-    if (_crcDrive == FD_EFC) efc::fileStore.close();
+    else if (_crcDrive == FD_EFC) efc::fileStore.close();
     #endif
     _crcActive = false;
     _crcOff = 0;
     _crcSize = 0;
     _crcFirst = true;
 }
-#endif
 
 void FileTransferModule::cmdFormat(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -1088,47 +1086,49 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
     }
 #endif
 
-    _file = LittleFS.open(filename, "r");
-
-    if (!_file)
+    // LittleFS: cooperative whole-file CRC (never a blocking read in the dispatch). Mirrors the SD/EFC job:
+    // 0x02 = size known + CRC computing (client polls again); 0x00 = size + CRC ready; 0x42 = not found.
+    const bool sameJob = _crcActive && _crcDrive == FD_INT &&
+                         strncmp(_crcPath, filename, sizeof(_crcPath) - 1) == 0;
+    if (sameJob && _crcOff >= _crcSize) // CRC done -> answer size + crc, release the read handle
+    {
+        pushByte(0x00, resultData);
+        pushInt(_crcSize, resultData + 1);
+        pushInt(_crcVal, resultData + 5);
+        resultLength = 9;
+        crcCancel();
+        return;
+    }
+    if (sameJob) // still computing -> tell the client to poll again
+    {
+        _crcLastAccess = millis();
+        pushByte(0x02, resultData);
+        pushInt(_crcSize, resultData + 1);
+        resultLength = 5;
+        return;
+    }
+    // a new (or switched) path: cancel any prior job, open + init this one
+    crcCancel();
+    _crcFile = LittleFS.open(filename, "r");
+    if (!_crcFile)
     {
         pushByte(0x42, resultData);
         resultLength = 1;
-        //logErrorP("File can't be opened"); // pre checks - should not throw this error
         _dirOpen = false;
         return;
     }
-
-    size_t filesize = _file.size();
-    // Later used in v2 with clock
-    // time_t cr = _file.getCreationTime();
-    // time_t lw = _file.getLastWrite();
-    FastCRC32 crc32;
-    uint32_t crc = 0;
-    static constexpr int len = 256; // fixed CRC read chunk (was a 1000-byte VLA on the KNX-dispatch stack)
-    bool first = true;
-    uint8_t buf[len];
-    while (_file.available())
-    {
-        int readed = _file.readBytes((char *)buf, len);
-        if (first)
-            crc = crc32.cksum((uint8_t *)buf, readed);
-        else
-            crc = crc32.cksum_upd((uint8_t *)buf, readed);
-        first = false;
-    }
-    _file.close(); // close the CRC-loop handle; this path leaves _fileOpen false, so nothing auto-closes it later
-
-    logInfoP("Read file info of \"%s\"", filename);
-    logIndentUp();
-    logInfoP("Filesize: %i bytes", filesize);
-    logInfoP("CRC32: 0x%08X", crc);
-    logIndentDown();
-
-    pushByte(0x0, resultData);
-    pushInt(filesize, resultData + 1);
-    pushInt(crc, resultData + 5);
-    resultLength = 9;
+    _crcActive = true;
+    _crcDrive = FD_INT;
+    _crcSize = (uint32_t)_crcFile.size();
+    _crcOff = 0;
+    _crcFirst = true;
+    _crcVal = 0;
+    _crcLastAccess = millis();
+    strncpy(_crcPath, filename, sizeof(_crcPath) - 1);
+    _crcPath[sizeof(_crcPath) - 1] = 0;
+    pushByte(0x02, resultData); // 0x02: CRC computing; size is known now
+    pushInt(_crcSize, resultData + 1);
+    resultLength = 5;
 }
 
 /**

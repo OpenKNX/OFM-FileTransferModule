@@ -86,6 +86,7 @@ class FileTransferModule : public OpenKNX::Module
     bool _crcFirst = true;
     uint32_t _crcLastAccess = 0; // last FileInfo(flag) poll -> idle-cancel a stranded job
     FastCRC32 _crc32;
+    File _crcFile;               // LittleFS read handle for the cooperative CRC job (FD_INT)
     void crcLoop();              // advance the CRC by a bounded slice; called from loop() (SD/EFC builds)
     void crcCancel();            // close the read handle + clear the job state
 
