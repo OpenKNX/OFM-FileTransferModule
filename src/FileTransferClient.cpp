@@ -1841,7 +1841,7 @@ void FileTransferClient::ftcSendInfo()
     _ftcInfoLen = (uint8_t)n; // keep the payload length for a congested-send retry (FtcInfoSend)
     ftcOut(0, "  verify     asking the target for size + CRC32 ...");
     if (ftcSend(FTC_CMD_FILE_INFO, _ftcInfoLen))
-        _ftcState = FtcVerify;
+        _ftcState = _ftcVerifyReturn; // upload -> FtcVerify; download -> FtcDownloadVerify
     else
     {
         // TX queue still draining the burst -> retry the send until it clears (bounded in FtcInfoSend), don't abort
@@ -1928,6 +1928,8 @@ void FileTransferClient::ftcListAdvance()
             ftcAbort("could not send FileInfo during list");
             return;
         }
+        // Bound the cooperative-CRC (0x02) poll for THIS entry; not re-armed per poll -> a stuck CRC still ends.
+        _ftcDirInfoDeadline = millis() + FTC_FAST_STALL_MS;
         _ftcState = FtcDirInfo;
         return;
     }
@@ -2129,6 +2131,7 @@ void FileTransferClient::ftcFinish()
     _ftcDownload = false;     // op over -> a later upload/scan must not inherit the download auto-resume path
     _ftcStartMs = 0;
     _ftcState = FtcIdle;
+    _ftcVerifyReturn = FtcVerify; // clear so a download-verify return never leaks into a later upload verify
     // The operation is over -> the scan/ll/ls result is not read again. RELEASE the buffer (swap with an
     // empty vector, NOT .clear(): clear keeps the grown capacity, up to FTC_SCAN_MAX_LIST*sizeof(FtcEntry)
     // ~9.5 KiB). Deferred scan-post already bailed at the guard above, so this only runs at the true end.
@@ -2149,7 +2152,7 @@ void FileTransferClient::ftcEnterApplyGate()
         _ftcState = FtcApplyProbe;
     else // cannot even probe -> assume no self-apply; the image is uploaded, so just skip
     {
-        openknx.logger.logWithPrefix("FTC", "target cannot self-apply (ESP / old FTM) -- image uploaded, apply skipped");
+        openknx.logger.logWithPrefix("FTC", "target cannot self-apply (Update feature not advertised) -- image uploaded, apply skipped");
         ftcFinish();
     }
 }
@@ -2157,11 +2160,20 @@ void FileTransferClient::ftcEnterApplyGate()
 /** @brief Feature byte known: trigger self-apply if the Update bit (0x2) is set, else log a skip. Always finishes. */
 void FileTransferClient::ftcApplyDecide()
 {
+    // Under FTC security a closed write window makes the target REFUSE FwUpdate (0xA0/0xA2) instead of applying.
+    // FwUpdate is fire-and-forget (no L7 reply to wait on), so read the "writes disabled" feature bit (0x20)
+    // up front and refuse cleanly -- never print a false "TRIGGERED" while the device did nothing.
+    if (_ftcFeatBits & 0x20) // WRITES_DISABLED (locked / login required)
+    {
+        openknx.logger.logWithPrefix("FTC", "target refuses writes (locked / login required) -- fwupdate NOT triggered; run: ftc <pa> login <pw>");
+        ftcFinish();
+        return;
+    }
     if (_ftcFeatBits & 0x2) // Update -> the target (RP2040 FTM) can arm PicoOTA and reboot
         ftcTriggerFwUpdate();
     else
     {
-        openknx.logger.logWithPrefix("FTC", "target cannot self-apply (ESP / old FTM) -- image uploaded, apply skipped");
+        openknx.logger.logWithPrefix("FTC", "target cannot self-apply (Update feature not advertised) -- image uploaded, apply skipped");
         ftcFinish();
     }
 }
@@ -2471,7 +2483,10 @@ void FileTransferClient::requestInfo(uint16_t pa, const char *remotePath)
     openknx.logger.logWithPrefixAndValues("FTC", "info -> %u.%u.%u \"%s\"",
                                           FTC_PA_ARGS(pa), _ftcPath);
     if (ftcSend(FTC_CMD_FILE_INFO, (uint8_t)n))
+    {
         _ftcState = FtcInfo;
+        _ftcInfoDeadline = millis() + FTC_FAST_STALL_MS; // bound the cooperative-CRC (0x02) re-poll for plain `info`
+    }
     else
         openknx.logger.logWithPrefix("FTC", "send failed");
 }
@@ -3692,6 +3707,7 @@ void FileTransferClient::loopDownload()
             {
                 _ftcRespPending = false;
                 if (ftcDropDup()) return;
+                if (_ftcRespProp != FTC_CMD_FILE_DOWNLOAD) return; // parity: reject a wrong-command mirror
                 // Answer: [0x00][size:4 BE][0x00]. Errors: 0x42 not found, 0x4 requested pkg too big.
                 if (_ftcRespLen < 5 || _ftcResp[0] != 0x00)
                 {
@@ -3853,6 +3869,7 @@ void FileTransferClient::loopDownload()
             {
                 _ftcRespPending = false;
                 if (ftcDropDup()) return;
+                if (_ftcRespProp != FTC_CMD_FILE_DOWNLOAD) return; // parity: reject a wrong-command mirror
                 // Answer: [0x00][seq:2 BE][readed:1][data:readed][crc16:2 BE].
                 if (_ftcRespLen < 6 || _ftcResp[0] != 0x00)
                 {
@@ -3925,12 +3942,9 @@ void FileTransferClient::loopDownload()
                     _status.done = _dlWritten;
                     // End-to-end proof (mirrors the upload): ask the target for size + CRC32, compare in
                     // FtcDownloadVerify against the received-stream CRC32 + _dlWritten. The DOWNLOAD panel prints there.
+                    _ftcVerifyReturn = FtcDownloadVerify; // ftcSendInfo/FtcInfoSend return here on BOTH sent + congested paths
                     ftcSendInfo();
-                    if (_ftcState == FtcVerify)
-                    {
-                        _ftcState = FtcDownloadVerify;
-                        _ftcSince = millis();
-                    }
+                    _ftcSince = millis();
                     return;
                 }
                 _dlSeq++;
@@ -3954,6 +3968,15 @@ void FileTransferClient::loopDownload()
             {
                 _ftcRespPending = false;
                 if (_ftcRespProp != FTC_CMD_FILE_INFO) return; // only the FileInfo(43) echo is our verify result
+                // 0x02: the target is still computing the source CRC (LittleFS answers this FIRST) -> poll again
+                // so the download is actually CRC-verified. Bounded by the in-transfer _ftcHardDeadline backstop.
+                if (_ftcRespLen >= 5 && _ftcResp[0] == 0x02)
+                {
+                    _ftcVerifyReturn = FtcDownloadVerify; // ftcSendInfo/FtcInfoSend return here on BOTH sent + congested paths
+                    ftcSendInfo();                        // re-ask for size+CRC (LittleFS still computing)
+                    _ftcSince = millis();
+                    return;
+                }
                 if (_ftcRespLen >= 5 && _ftcResp[0] == 0x01)   // SD/EFC: source CRC is opt-in -> delivered, unverified
                 {
                     const bool sizeOk = (_dlWritten == _dlSize); // still catch truncation
@@ -4970,6 +4993,42 @@ void FileTransferClient::loopDirOps()
                 const char *nm = (_ftcDirIdx < _ftcListing.size()) ? _ftcListing[_ftcDirIdx].name : "?";
                 char row[128];
                 const bool haveEntry = _ftcDirIdx < _ftcListing.size();
+                // 0x02: size known, CRC still computing (cooperative; LittleFS answers this FIRST for every file).
+                // Store the size and poll the SAME entry again (do NOT advance) until 0x00/0x01, bounded by
+                // _ftcDirInfoDeadline so a stuck CRC falls back to size-only instead of looping forever.
+                if (_ftcRespLen >= 5 && _ftcResp[0] == 0x02)
+                {
+                    if (haveEntry)
+                    {
+                        _ftcListing[_ftcDirIdx].size = rd32be(_ftcResp + 1);
+                        _ftcListing[_ftcDirIdx].hasInfo = true;
+                    }
+                    if ((int32_t)(millis() - _ftcDirInfoDeadline) >= 0) // compute stuck too long -> size-only, move on
+                    {
+                        const uint32_t size = haveEntry ? _ftcListing[_ftcDirIdx].size : 0;
+                        char sz[16];
+                        ftcFmtBytes(size, sz, sizeof(sz));
+                        snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | file", nm, sz, "n/a");
+                        ftcOut(0, "%s", row);
+                        if (haveEntry) _ftcListing[_ftcDirIdx].hasCrc = false;
+                        _ftcListBytes += size;
+                        _ftcListFiles++;
+                        _ftcDirIdx++;
+                        ftcListAdvance();
+                        return;
+                    }
+                    // Re-poll THIS entry. _ftcPath still holds its path (not advanced); ftcSend refreshes _ftcSince.
+                    // Clear _ftcRespT so the (fast) poll answer is not dropped by the 12 ms stale-mirror window.
+                    _ftcRespT = 0;
+                    const size_t rn = strlen(_ftcPath) + 1;
+                    memcpy(_ftcTx, _ftcPath, rn);
+                    if (!ftcSend(FTC_CMD_FILE_INFO, (uint8_t)rn))
+                    {
+                        ftcAbort("could not re-send FileInfo during list");
+                        return;
+                    }
+                    return; // stay in FtcDirInfo; _ftcDirInfoDeadline NOT re-armed
+                }
                 if (_ftcRespLen >= 9 && _ftcResp[0] == 0x00)
                 {
                     const uint32_t size = rd32be(_ftcResp + 1);
@@ -5047,6 +5106,7 @@ void FileTransferClient::loopFast()
                 }
                 if (r != 0x00)
                 {
+                    openknx.logger.logWithPrefixAndValues("FTC", "fast open rejected (0x%02X): %s", r, ftcResultName(r));
                     ftcAbort("target refused fast open");
                     return;
                 }
@@ -5091,12 +5151,14 @@ void FileTransferClient::loopFast()
             {
                 _ftcRespPending = false;
                 if (_ftcRespProp != FTC_CMD_FILE_REPORT) return; // stale (report vs FileInfo 9-byte collision, M6)
-                if (_ftcRespLen < 6) return;
-                if (_ftcResp[0] != 0x00)
+                // "no open file" (target rebooted / auto-closed mid fast-upload) is a 1-byte 0x42 -> test the status
+                // BEFORE the success-frame length guard, else the <6 guard shadows it (30 s stall + wrong reason).
+                if (_ftcRespLen >= 1 && _ftcResp[0] != 0x00)
                 {
                     ftcAbort("report: target has no open file");
                     return;
                 }
+                if (_ftcRespLen < 6) return;
                 const uint16_t base = (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]); // BE echoes
                 const uint16_t count = (uint16_t)((_ftcResp[3] << 8) | _ftcResp[4]);
                 const uint8_t nonce = _ftcResp[5];
@@ -5277,6 +5339,7 @@ void FileTransferClient::loopFast()
             {
                 _ftcRespPending = false;
                 if (_ftcRespProp != FTC_CMD_FILE_UPLOAD_FAST) return; // stale mirror -> keep waiting
+                if (_ftcRespLen < 1 || _ftcResp[0] != 0x00) return;   // only a real 1-byte 0x00 close-ack proceeds (not a stale 0xA2 sec-reject)
                 if (_ftcStartMs != 0) _ftcElapsedMs = millis() - _ftcStartMs;
                 if (_ftcGrandStartMs != 0) _ftcGrandElapsedMs = millis() - _ftcGrandStartMs;
                 ftcSendInfo(); // FileInfo(43) -> FtcVerify (whole-file CRC32 = the ultimate gate)
@@ -5834,7 +5897,7 @@ void FileTransferClient::loop(bool configured)
             if (ftcSend(FTC_CMD_FILE_INFO, _ftcInfoLen))
             {
                 _ftcSince = millis();
-                _ftcState = FtcVerify;
+                _ftcState = _ftcVerifyReturn; // upload -> FtcVerify; download -> FtcDownloadVerify
             }
             else if (millis() - _ftcSince > FTC_FAST_STALL_MS)
                 ftcAbort("could not send verify FileInfo");
@@ -5968,10 +6031,14 @@ void FileTransferClient::loop(bool configured)
             {
                 _ftcRespPending = false;
                 if (_ftcRespProp != FTC_CMD_FILE_INFO) return; // stale mirror -> keep waiting
-                if (_ftcRespLen < 1 || _ftcResp[0] != 0x00)
+                // The file is PRESENT if the target could open it: 0x00 (size+CRC), 0x01 (size only, SD/EFC),
+                // or 0x02 (size known, CRC still computing -- LittleFS ALWAYS answers this FIRST for every file).
+                // Only 0x42 (not found) / no-answer refuses. The apply check needs existence, NOT the CRC, so it
+                // must not require 0x00 -- that refused every real LittleFS file (0x02) and every SD/EFC file (0x01).
+                const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                if (st != 0x00 && st != 0x01 && st != 0x02)
                 {
-                    openknx.logger.logWithPrefixAndValues("FTC", "file not found on target -- not triggering (0x%02X)",
-                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
+                    openknx.logger.logWithPrefixAndValues("FTC", "file not found on target -- not triggering (0x%02X)", st);
                     ftcFinish();
                     return;
                 }
@@ -6000,7 +6067,7 @@ void FileTransferClient::loop(bool configured)
             else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
             {
                 // No CheckFeatures answer in the short window -> assume no self-apply (ESP / old FTM).
-                openknx.logger.logWithPrefix("FTC", "target cannot self-apply (ESP / old FTM) -- image uploaded, apply skipped");
+                openknx.logger.logWithPrefix("FTC", "target cannot self-apply (Update feature not advertised) -- image uploaded, apply skipped");
                 ftcFinish();
             }
             return;
@@ -6012,6 +6079,25 @@ void FileTransferClient::loop(bool configured)
             {
                 _ftcRespPending = false;
                 if (ftcDropDup()) return;                    // ignore a mirrored duplicate answer
+                if (_ftcRespProp != FTC_CMD_FILE_INFO) return; // parity with sibling states: reject a wrong-command mirror
+                // 0x02: size known, CRC still computing (LittleFS answers this FIRST for every file) -> poll again
+                // until 0x00, bounded by _ftcInfoDeadline so a stuck CRC reports size-only instead of "not found".
+                if (_ftcRespLen >= 5 && _ftcResp[0] == 0x02)
+                {
+                    if ((int32_t)(millis() - _ftcInfoDeadline) >= 0)
+                    {
+                        const uint32_t size = rd32be(_ftcResp + 1);
+                        _status.total = size;
+                        _status.ok = true;
+                        openknx.logger.logWithPrefixAndValues("FTC", "info: size=%u  crc32=n/a (CRC compute timed out)", size);
+                        ftcFinish();
+                        return;
+                    }
+                    const size_t rn = strlen(_ftcPath) + 1;
+                    memcpy(_ftcTx, _ftcPath, rn);
+                    ftcSend(FTC_CMD_FILE_INFO, (uint8_t)rn); // re-poll THIS file; ftcSend refreshes _ftcSince
+                    return;                                  // stay in FtcInfo; _ftcInfoDeadline NOT re-armed
+                }
                 if (_ftcRespLen >= 5 && _ftcResp[0] == 0x01) // size valid, CRC not computed (SD/EFC default)
                 {
                     const uint32_t size = rd32be(_ftcResp + 1);
@@ -6188,9 +6274,9 @@ void FileTransferClient::loop(bool configured)
                 if (_ftcRespProp != FTC_CMD_FILE_UPLOAD) return;
                 if (_ftcRespLen < 1 || _ftcResp[0] != 0x00)
                 {
-                    // 0x42 = could not open (bad path?), 0x81 = a dir listing is still open there
-                    openknx.logger.logWithPrefixAndValues("FTC", "open rejected, result=0x%02X",
-                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
+                    // 0x42 = could not open (bad path?), 0x81 = a dir listing is still open there, 0xA0/0xA2 = auth
+                    const uint8_t rc = _ftcRespLen ? _ftcResp[0] : 0xFF;
+                    openknx.logger.logWithPrefixAndValues("FTC", "open rejected (0x%02X): %s", rc, ftcResultName(rc));
                     ftcAbort("target refused FileUpload/open");
                     return;
                 }
@@ -6313,8 +6399,8 @@ void FileTransferClient::loop(bool configured)
         case FtcUploadClose:
         {
             // The close answer carries no data (resultLength = 0), so its arrival is the signal.
-            const bool done = _ftcRespPending;
-            _ftcRespPending = false; // consume it -- otherwise the next state inherits this answer
+            const bool done = _ftcRespPending && _ftcRespProp == FTC_CMD_FILE_UPLOAD; // ignore a wrong-command mirror
+            _ftcRespPending = false; // consume it (incl. a stale mirror) -- otherwise the next state inherits this answer
             if (!done && millis() - _ftcSince > FTC_TIMEOUT)
             {
                 // Not a success: close is what makes the target flush + close the file. Without its answer

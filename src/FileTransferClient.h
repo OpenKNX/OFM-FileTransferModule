@@ -256,6 +256,9 @@ class FileTransferClient : public OpenKNX::Module
     // (never overlaps -> 1-outstanding, bus-friendly). Read-only; no behaviour change.
 #ifdef OPENKNX_FTC_CONSOLE
     bool consoleIdle() const { return _conSub == 0; }
+    // Console link state (read-only): the session is REALLY open only once the TARGET accepted the OPEN (0x00),
+    // which stamps _conStartMs. Until then the tunnel may be up but the target has not answered. Reset on close.
+    bool consoleConnected() const { return _conStartMs != 0; }
 #endif
     void requestCancel();
     void requestPing(uint16_t pa);
@@ -472,6 +475,7 @@ class FileTransferClient : public OpenKNX::Module
     int ftcReadSource(uint32_t offset, uint8_t *buffer, uint8_t maxLength);
 
     FtcState _ftcState = FtcIdle;
+    FtcState _ftcVerifyReturn = FtcVerify; // which verify state a FileInfo(43) send returns to: upload FtcVerify vs download FtcDownloadVerify (both on the sent AND the TX-congested path). Reset to FtcVerify in ftcFinish.
     uint16_t _ftcTarget = 0;
     uint32_t _ftcSince = 0;
 
@@ -539,6 +543,7 @@ class FileTransferClient : public OpenKNX::Module
     uint32_t _ftcDeadline = 0;
     uint32_t _ftcHardDeadline = 0;                  // absolute wall-clock wedge backstop for the whole transfer (0 = unarmed). Armed per attempt at up/download start, cleared at ftcFinish + retry-arm -> only ever fires inside a transfer
     uint32_t _ftcInfoDeadline = 0;                  // patience window for the pre-transfer FileInfo on a busy target
+    uint32_t _ftcDirInfoDeadline = 0;               // per-entry patience for the ll/DirInfo cooperative-CRC poll (0x02); NOT re-armed per poll -> bounds a stuck CRC
     uint8_t _ftcInfoLen = 0;                         // FileInfo(43) payload length -- kept so a congested send can be re-tried
     uint8_t _ftcTransferRetries = 0;                // whole-transfer auto-retries spent (bounded by _cfgTransferRetries); reset only on a fresh request
     bool _ftcRetryPending = false;                  // a transient upload abort armed a resume-retry -> FtcCancel re-runs the transfer after a backoff

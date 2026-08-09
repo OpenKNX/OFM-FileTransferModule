@@ -19,8 +19,8 @@ static const uint8_t FTM_SEC_K0[16] = {0x4F, 0x70, 0x65, 0x6E, 0x4B, 0x4E, 0x58,
 #endif
 
 #ifdef OPENKNX_FTC_CONSOLE
-// OGM-Common compat: newer commons have disableConsole(bool, const char* reason) (the "occupied (remote
-// a.b.c)" notice); older ones (as some products still pin) only have disableConsole(bool). This shim picks
+// OGM-Common compat: newer commons have disableConsole(bool, const char* reason) (the "external console
+// session active (remote a.b.c)" notice); older ones (as some products still pin) only have disableConsole(bool). This shim picks
 // the two-arg form when it compiles and silently drops the reason otherwise -> every downstream product
 // builds regardless of its pinned OGM-Common version, with NO OGM-Common edit. Overload ranking: the `int`
 // tag is preferred; if disableConsole(bool, const char*) is ill-formed, SFINAE falls back to the `long` one.
@@ -677,7 +677,7 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
             _conOwnerPa = (len >= 3) ? (uint16_t)((data[1] << 8) | data[2]) : 0;
             _conLastAccess = millis();
             snprintf(_conOwnerStr, sizeof(_conOwnerStr), "remote %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
-            ftcDisableConsole(openknx.console, true, _conOwnerStr, 0); // silence the local console; local input now gets a one-line "occupied (remote a.b.c)" notice (reason dropped on older OGM-Common)
+            ftcDisableConsole(openknx.console, true, _conOwnerStr, 0); // silence the local console; local input now gets a one-line "external console session active (remote a.b.c)" notice (reason dropped on older OGM-Common)
             logInfoP("Console taken over by %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
             res[0] = 0x00;
             resLen = 1;
@@ -1356,6 +1356,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         if(data[3] > 1)
         {
             pushByte(0x42, resultData);
+            resultLength = 1; // was missing: the client only sends flag 0/1 so this is unreachable, but never return an uninitialised length
             logErrorP("Start file upload to \"%s\" is failed", filename);
             return;
         }
