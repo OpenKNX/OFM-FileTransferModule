@@ -536,11 +536,13 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
+#if OPENKNX_FTC_DOWNLOAD
         case FtmCommands::FileDownload:
         {
             cmdFileDownload(length, data, resultData, resultLength);
             return true;
         }
+#endif
 
         case FtmCommands::FileUpload:
         {
@@ -554,6 +556,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
+#if OPENKNX_FTC_DIROPS
         case FtmCommands::DirCreate:
         {
             cmdDirCreate(length, data, resultData, resultLength);
@@ -571,6 +574,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             cmdDirList(length, data, resultData, resultLength);
             return true;
         }
+#endif
 
         case FtmCommands::Cancel:
         {
@@ -584,6 +588,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
+#if OPENKNX_FTC_FASTUPLOAD
         case FtmCommands::FileUploadFast:
         {
             // Return is the "handled" flag: open/close true (answered), a DATA frame false so no L7
@@ -596,6 +601,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             cmdFileReport(length, data, resultData, resultLength);
             return true;
         }
+#endif
 
         case FtmCommands::FilesystemInfo:
         {
@@ -1172,6 +1178,7 @@ void FileTransferModule::cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_
     logInfoP("Filesystem: total %u, used %u, free %u (%s)", (unsigned)total, (unsigned)used, (unsigned)(total >= used ? total - used : 0), status ? "KB" : "B");
 }
 
+#if OPENKNX_FTC_DIROPS
 void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
@@ -1292,6 +1299,7 @@ void FileTransferModule::cmdDirDelete(uint8_t length, uint8_t *data, uint8_t *re
     logInfoP("Deleting of the folder \"%s\" was successful", data);
     pushByte(0x0, resultData);
 }
+#endif
 
 void FileTransferModule::cmdFileDelete(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -1395,6 +1403,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
  * DATA frames are still AckRequested on the wire, so TP1 L2 keeps doing L_ACK/BUSY/retransmit --
  * the only remaining flow-control backstop for the silent stream.
  */
+#if OPENKNX_FTC_FASTUPLOAD
 bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     // Refresh on EVERY frame: silent DATA never hits the classic dispatch that touches _heartbeat, so
@@ -1550,7 +1559,9 @@ void FileTransferModule::cmdFileReport(uint8_t length, uint8_t *data, uint8_t *r
         _fastRateMs = now;
     }
 }
+#endif
 
+#if OPENKNX_FTC_DOWNLOAD
 void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
@@ -1599,6 +1610,7 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
     readFile(sequence, resultData, resultLength);
     _lastSequence = sequence;
 }
+#endif
 
 void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -1607,7 +1619,9 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
     result |= 0x2; // Update
 #endif
+#if OPENKNX_FTC_FASTUPLOAD
     result |= 0x4; // FAST: server understands cmd44/cmd45 (windowed fast upload).
+#endif
 #ifdef OPENKNX_FTC_CONSOLE
     result |= 0x8; // Console: obj-160 console tunnel available (ftc <pa> console)
 #endif

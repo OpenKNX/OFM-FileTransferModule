@@ -153,11 +153,13 @@ class FileTransferModule : public OpenKNX::Module
     // (sequence-1)*_size and write n payload bytes; true only if the seek AND full write succeeded.
     bool writeChunk(uint16_t sequence, const uint8_t *payload, uint8_t n);
     void writeFile(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength);
+#if OPENKNX_FTC_FASTUPLOAD
     // FAST upload (cmd44): open(00 00, answered) / close(FF FF, answered) / data(SILENT). Returns the
     // "handled" flag so a DATA frame produces NO L7 answer (the dispatcher only responds if handled).
     bool cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     // FAST gap report (cmd45): answer the received-bitmap for a window so the client resends only gaps.
     void cmdFileReport(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#endif
 
     bool checkOpenedFile(uint8_t *resultData, uint8_t &resultLength);
     bool checkOpenedDir(uint8_t *resultData, uint8_t &resultLength);
@@ -173,12 +175,16 @@ class FileTransferModule : public OpenKNX::Module
     void cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdCancel(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#if OPENKNX_FTC_DIROPS
     void cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdDirCreate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdDirDelete(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#endif
     void cmdFileDelete(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#if OPENKNX_FTC_DOWNLOAD
     void cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+#endif
     void cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
 };
 
