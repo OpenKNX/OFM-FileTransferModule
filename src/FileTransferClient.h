@@ -235,6 +235,17 @@ class FileTransferClient : public OpenKNX::Module
     bool processCommand(const std::string cmd, bool diagnoseKo) override;
     void showHelp() override;
     void loop(bool configured) override;
+    void loopDownload();   // download state group (extracted from loop())
+    void loopFast();       // fast-upload state group
+    void loopDirOps();     // dir list/info state group
+    void loopScan();       // scan state group
+    void loopDeviceInfo(); // device-info + GA state group
+#ifdef OPENKNX_FTC_SECURITY
+    void loopSecurity(); // auth state group
+#endif
+#ifdef OPENKNX_FTC_CONSOLE
+    void loopConsole(); // console-client state group
+#endif
 
 
     // --- Action API: any front-end (console, WebConfig, DDC) calls these -----------------------
@@ -243,7 +254,9 @@ class FileTransferClient : public OpenKNX::Module
     // Console lockstep state: true when no console command/drain/OPEN is in flight (_conSub == 0). The host
     // auto-command scheduler gates on this so a scheduled line is sent ONLY when the previous round-trip is done
     // (never overlaps -> 1-outstanding, bus-friendly). Read-only; no behaviour change.
+#ifdef OPENKNX_FTC_CONSOLE
     bool consoleIdle() const { return _conSub == 0; }
+#endif
     void requestCancel();
     void requestPing(uint16_t pa);
     void requestList(uint16_t pa, const char *dir, bool detailed);

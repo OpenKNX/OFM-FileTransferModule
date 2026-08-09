@@ -41,8 +41,10 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Presence & info");
     c.ftcOut(0, "  %-33s  %s", "ping", "Is the target there? (module-version round trip)");
+#if OPENKNX_FTC_DEVICEINFO
     c.ftcOut(0, "  %-33s  %s", "info | i", "Device fingerprint: mask/class, FTM version, features");
     c.ftcOut(0, "  %-33s  %s", "info ga", "Group communication: GA table + com-object links (not on BCU1 / mask 0x0012)");
+#endif
     c.ftcOut(0, "  %-33s  %s", "info <file>", "Size + CRC32 of one file");
     c.ftcOut(0, "  %-33s  %s", "df [sd|efc]", "Filesystem: total / used / free + usage bar (drive optional)");
     c.ftcOut(0, "  %-33s  %s", "ll [dir]", "List a directory: name, size, CRC32 (+ usage bar)");
@@ -66,7 +68,9 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Transfer");
     c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; mode safe|fast, fast w<N> pins the window; flags below");
+#if OPENKNX_FTC_DOWNLOAD
     c.ftcOut(0, "  %-33s  %s", "get | receive | download <rem> [local]", "Download a file (always fresh)");
+#endif
     c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [sd|efc] [w<N>]", "Speed test: push a pattern, report B/s (sd|efc = target drive; fast w<N> = fixed window; keep = leave file)");
     c.ftcOut(0, "");
 
@@ -79,7 +83,9 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "");
 
     c.ftcOut(H, "Global:  ftc <cmd>");
+#if OPENKNX_FTC_SCAN
     c.ftcOut(0, "  %-33s  %s", "scan [a.l | a b] [deep] [ets]", "Discover devices (ets = connection-oriented, finds more)");
+#endif
     c.ftcOut(0, "  %-33s  %s", "     [openknx | info] [save <path>]", "openknx=flag OpenKNX (mfr 0x00FA)  info=full per-device info  save=write CSV to /|sd/|efc/");
     c.ftcOut(0, "  %-33s  %s", "retry [max|transfer|backoff [v]]", "Show / set retry tuning");
     c.ftcOut(0, "  %-33s  %s", "s | status, c | cancel", "Status / cancel of the running job");
@@ -99,8 +105,10 @@ void FileTransferClientConsole::showUsage()
 #ifdef OPENKNX_FTC_CONSOLE
     c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 console", "Interactive console tunnel over KNX");
 #endif
+#if OPENKNX_FTC_SCAN
     c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets openknx", "Scan and discover OpenKNX devices on line 1.1 (connection-oriented)");
     c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets save /scan.csv", "Discover devices on line 1.1 and write CSV to LittleFS");
+#endif
     c.ftcOut(H, "%s", RULE);
 }
 
@@ -131,6 +139,7 @@ void FileTransferClientConsole::showStatus()
  * Forms: bare (own line), <a.l>, <a.l.d>, <from> <to> range, `full yes` (gated once),
  * `area <a> yes ...` (gated twice).
  */
+#if OPENKNX_FTC_SCAN
 void FileTransferClientConsole::showScan(const std::string &cmd)
 {
     if (_client.isBusy())
@@ -244,6 +253,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
 
     openknx.logger.logWithPrefix("FTC", "usage: ftc scan [a.l | from to] [deep] [ets] [openknx|info] [save <path>] | ftc scan full yes");
 }
+#endif
 
 /** @brief Parse/dispatch one `ftc ...` command; PA first (it changes less often than the cmd), `cancel`/`?` take no PA. */
 bool FileTransferClientConsole::processCommand(const std::string &cmd)
@@ -281,11 +291,13 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         return true;
     }
     // "ftc scan ..." -- no PA first; sweeps a range of addresses. Own gates for the wide sweeps.
+#if OPENKNX_FTC_SCAN
     if (argc >= 1 && strcmp(paStr, "scan") == 0)
     {
         showScan(cmd);
         return true;
     }
+#endif
     // "ftc retry [max|transfer|backoff] [value]" -- no PA; global retry tuning (get/set/help).
     if (argc >= 1 && strcmp(paStr, "retry") == 0)
     {
@@ -382,6 +394,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
     if (strcmp(sub, "info") == 0 || strcmp(sub, "i") == 0)
     {
+#if OPENKNX_FTC_DEVICEINFO
         if (argc >= 3 && strcmp(arg, "ga") == 0) // group communication: GA table + com-object links
         {
             _client.requestGroupComm(pa);
@@ -390,6 +403,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         if (argc < 3) // no file -> device fingerprint (mask/class + FTM version + features)
             _client.requestDeviceInfo(pa);
         else
+#endif
             _client.requestInfo(pa, arg);
         return true;
     }
@@ -403,6 +417,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestDelete(pa, arg);
         return true;
     }
+#if OPENKNX_FTC_DOWNLOAD
     if (strcmp(sub, "receive") == 0 || strcmp(sub, "download") == 0 || strcmp(sub, "get") == 0)
     {
         // ftc <pa> receive|download|get <remote> [local] [pkg] [verbose]  -- pull a file onto the local sink (SD).
@@ -437,6 +452,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestDownload(pa, rem, local, pkg, noResume);
         return true;
     }
+#endif
     if (strcmp(sub, "format") == 0)
     {
         // Wipes the WHOLE filesystem (all files + folders). Cannot brick the device (app is in program

@@ -336,11 +336,13 @@ static constexpr uint32_t FTC_PROGRESS_MS = 1000; // non-verbose progress cadenc
 static constexpr uint8_t FTC_PROG_BAR_W = 20;     // progress-bar inner width ('#' fill / '-' track)
 static constexpr uint8_t FTC_BOX_IW = 54;         // result-panel inner width (between the '|' borders)
 
-// Console-divider rules -- three DISTINCT widths are used deliberately (do not collapse to one): 80 = the
-// config/section rule, 79 = the LittleFS/df bar frame, 78 = the scan / list / device-report separators.
-static const char RULE78[] = "------------------------------------------------------------------------------";
-static const char RULE79[] = "-------------------------------------------------------------------------------";
-static const char RULE80[] = "--------------------------------------------------------------------------------";
+// Console-divider rules -- three DISTINCT widths from ONE 80-dash buffer: every char is a dash, so the
+// shorter rules are just the buffer viewed from an offset (single stored literal, explicit rather than
+// relying on the compiler's string tail-merging). RULE_SECTION 80 = config/section rule; RULE_DFBAR 79 =
+// LittleFS/df bar frame; RULE_REPORT 78 = scan / list / device-report separators.
+static const char RULE_SECTION[] = "--------------------------------------------------------------------------------";
+static const char *const RULE_DFBAR = RULE_SECTION + 1;  // 79 dashes
+static const char *const RULE_REPORT = RULE_SECTION + 2; // 78 dashes
 
 void FileTransferClient::ftcCloseSource()
 {
@@ -544,6 +546,7 @@ static bool ftcCat(char *buf, size_t cap, size_t &pos, const char *fmt, ...)
     return true;
 }
 
+#if OPENKNX_FTC_SCAN
 void FileTransferClient::scanRecord(uint16_t pa, uint16_t mask)
 {
     char paStr[16];
@@ -576,10 +579,10 @@ void FileTransferClient::scanReport()
     }
 
     openknx.logger.color(CONSOLE_HEADLINE_COLOR);
-    openknx.logger.log(RULE78);
+    openknx.logger.log(RULE_REPORT);
     openknx.logger.logWithValues("Scan %s:  %u device(s) found  /  %u address(es) probed",
                                  _scanLabel, _scanFound, (unsigned)_scanProbed);
-    openknx.logger.log(RULE78);
+    openknx.logger.log(RULE_REPORT);
     openknx.logger.color(0);
 
     // Feature B: one-line summary of the devices the probe flagged as OpenKNX (bounded RAM string, no I/O).
@@ -812,12 +815,14 @@ bool FileTransferClient::ftcScanProbeStart(const FtcEntry &e)
     _ftcTarget = pa;
     _propPending = false;
     _ftcRespPending = false;
+#if OPENKNX_FTC_DEVICEINFO
     if (_scanInfo)
     {
         _scanProbeInFlight = 2;
         ftcDevInfoBegin(pa, true);
     }
     else // LIGHT: one connectionless PropertyValue_Read of the Device Object (idx 0, PID 11, 1 element, start 1)
+#endif
     {
         _scanProbeInFlight = 1;
         SecurityControl sec = {false, None};
@@ -871,6 +876,7 @@ void FileTransferClient::ftcScanInfoBail()
     _scanProbeDone = true;
     _ftcState = FtcScanPost;
 }
+#endif
 
 void FileTransferClient::ftcStart(uint16_t pa, bool upload, uint8_t mode)
 {
@@ -1331,7 +1337,7 @@ void FileTransferClient::ftcProceedToUpload()
 
     // Last CONFIG-box step: the open. verify + space were queued earlier; this line + the divider close the box.
     ftcOut(0, "  open       %s", _ftcPath);
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE80);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_SECTION);
 
     if (_ftcMode == 0)
     {
@@ -1737,10 +1743,10 @@ void FileTransferClient::ftcConfigBox(uint16_t pa, const char *title, const char
                                       uint32_t size, bool hasCrc, uint32_t crc,
                                       const char *mode, const char *framing, const char *options)
 {
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE80);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_SECTION);
     ftcOut(CONSOLE_HEADLINE_COLOR, " FileTransferClient - %s -> PA %u.%u.%u (0x%04X) - connectionless", title,
            FTC_PA_ARGS(pa), pa);
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE80);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_SECTION);
     ftcOut(0, "  Source     %s", source);
     ftcOut(0, "  Target     %s", target);
     if (hasCrc)
@@ -1750,7 +1756,7 @@ void FileTransferClient::ftcConfigBox(uint16_t pa, const char *title, const char
     if (mode) ftcOut(0, "  Mode       %s", mode);
     if (framing) ftcOut(0, "  Framing    %s", framing);
     if (options) ftcOut(0, "  Options    %s", options);
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE80);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_SECTION);
 }
 
 void FileTransferClient::ftcAbort(const char *reason)
@@ -1926,14 +1932,14 @@ void FileTransferClient::ftcListAdvance()
         return;
     }
 
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE78);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_REPORT);
     // Footer aligned to the columns: counts under Name, byte total under Size, "total" under Type.
     char left[41];
     snprintf(left, sizeof(left), "Files: %u   Dirs: %u", _ftcListFiles, _ftcListDirs);
     char foot[128];
     snprintf(foot, sizeof(foot), "%-40.40s | %12u | %-10s | total", left, (unsigned)_ftcListBytes, "");
     ftcOut(CONSOLE_HEADLINE_COLOR, "%s", foot);
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE78);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_REPORT);
     _status.ok = true;
     if (_ftcListDetailed)
     {
@@ -2205,7 +2211,9 @@ void FileTransferClient::requestCancel()
         _scanPostDone = true;
         openknx.logger.logWithPrefixAndValues("FTC", "scan cancelled at %u/%u addresses",
                                               (unsigned)_scanProbed, (unsigned)_status.total);
+#if OPENKNX_FTC_SCAN
         scanReport();
+#endif
         ftcFinish();
         return;
     }
@@ -2644,11 +2652,11 @@ void FileTransferClient::ftcPrintFsBar(uint32_t total, uint32_t used, bool full)
         ftcOut(CONSOLE_HEADLINE_COLOR, "| %-22s | %-50s |", "Total", total_s);
         ftcOut(CONSOLE_HEADLINE_COLOR, "| %-22s | %-50s |", "Used", used_s);
         ftcOut(CONSOLE_HEADLINE_COLOR, "| %-22s | %-50s |", "Free", free_s);
-        ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE79);
+        ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_DFBAR);
     }
     ftcOut(CONSOLE_HEADLINE_COLOR, "| Used: %-10s [%-*s] %3u.%02u%% |", usz, BAR, usedBar, (unsigned)(usedH / 100), (unsigned)(usedH % 100));
     ftcOut(CONSOLE_HEADLINE_COLOR, "| Free: %-10s [%-*s] %3u.%02u%% |", fsz, BAR, freeBar, (unsigned)(freeH / 100), (unsigned)(freeH % 100));
-    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE79);
+    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_DFBAR);
 }
 
 /**
@@ -2657,6 +2665,7 @@ void FileTransferClient::ftcPrintFsBar(uint32_t total, uint32_t used, bool full)
  * DeviceDescriptor gives the mask (class); ModuleVersion(100) + CheckFeatures(102) prove an FTM server
  * and its capabilities; a PropertyValue read of the app number resolves the exact model.
  */
+#if OPENKNX_FTC_DEVICEINFO
 void FileTransferClient::requestDeviceInfo(uint16_t pa)
 {
     ftcDevInfoBegin(pa, false);
@@ -2880,7 +2889,7 @@ void FileTransferClient::ftcDevReport()
     {
         ftcOut(0, "File-Transfer:    no answer (not a KnxFileTransfer device)");
     }
-    ftcOut(0, "%s", RULE80);
+    ftcOut(0, "%s", RULE_SECTION);
 
     _status.ok = _devHasMask || _devHasVer || _devHasSerial;
     ftcStatusMsg(_devHasVer ? "device info complete" : "device info (partial)");
@@ -3162,12 +3171,14 @@ void FileTransferClient::ftcGaReport()
         }
         ftcOut(0, "  C Comm · R Read · W Write · T Transmit · U Update   (Size = object size, not the semantic DPT)");
     }
-    ftcOut(0, "%s", RULE78);
+    ftcOut(0, "%s", RULE_REPORT);
     _status.ok = (_gaObjectsN > 0);
     ftcStatusMsg("group communication read");
 }
 
 /** @brief perf/upload `w<N>`: pin the fast window, clamped to [MIN,MAX] (0 = adaptive AIMD). No probe-up when pinned; loss still ratchets it down one step. */
+#endif // OPENKNX_FTC_DEVICEINFO
+
 void FileTransferClient::ftcSetFixedWindow(uint16_t fixedWnd)
 {
     _ftcWndFix = fixedWnd ? (uint16_t)(fixedWnd < FTC_WND_MIN ? FTC_WND_MIN : fixedWnd > FTC_WND_MAX ? FTC_WND_MAX
@@ -3455,6 +3466,7 @@ void FileTransferClient::ftcCloseSink()
     _dlSinkOpen = false;
 }
 
+#if OPENKNX_FTC_DOWNLOAD
 // FileDownload open: [0x00][0x00][pkg][path\0]. The answer is [0x00][size:4 BE][0x00].
 void FileTransferClient::ftcDlSendOpen()
 {
@@ -3639,6 +3651,7 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     _ftcState = FtcDownloadOpen;
     _ftcSince = millis();
 }
+#endif // OPENKNX_FTC_DOWNLOAD
 
 // `ftc <pa> fwupdate <remote>`: trigger the target to apply an already-uploaded firmware (reboots it).
 void FileTransferClient::requestFwUpdate(uint16_t pa, const char *remotePath)
@@ -3667,180 +3680,1356 @@ void FileTransferClient::requestFwUpdate(uint16_t pa, const char *remotePath)
         openknx.logger.logWithPrefix("FTC", "send failed");
 }
 
-void FileTransferClient::loop(bool configured)
+#if OPENKNX_FTC_DOWNLOAD
+// Download state group, extracted from loop() (verbatim; loop() dispatches here).
+void FileTransferClient::loopDownload()
 {
-    // Cooperative console output first -- even when idle: the ll/ls/df footer is queued right before
-    // ftcFinish() sets FtcIdle, so it must still drain to completion here.
-    if (ftcDrainOut()) return;
-
-    // Locate-blink (ftc <pa> led blink): toggle the target's prog-LED from loop() while idle. The FtcIdle
-    // guard means it never injects a frame mid-transfer; a quick read (list/info) just pauses then resumes it.
-    if (_ledBlinkPa && _ftcState == FtcIdle && millis() >= _ledBlinkNext)
-    {
-        _ledBlinkOn ^= 1;
-        SecurityControl sec{false, None};
-        knx.bau().ftcSendPropertyValueWrite(_ledBlinkPa, sec, 0, FTC_PID_PROGMODE, 1, 1, &_ledBlinkOn, 1);
-        _ledBlinkNext = millis() + FTC_LED_BLINK_MS;
-    }
-
-    if (_ftcState == FtcIdle)
-        return;
-
-    // Progress heartbeat: refresh the transfer line at least every FTC_PROGRESS_MS even between chunk acks, so a
-    // slow link (chunk interval > cadence) still updates ~1 Hz instead of freezing. ftcMaybeProgress gates on
-    // time; with `done` unchanged since the last shown line its interval rate falls back to avg (no false 0 B/s).
     switch (_ftcState)
     {
-        case FtcUploadChunk:
-        case FtcUploadChunkRetry:
-        case FtcUploadClose:
-        case FtcFastStream:
-        case FtcFastReport:
-        case FtcFastResend:
-        case FtcFastClose:
-            ftcMaybeProgress(true, _status.chunk, _ftcChunks, _ftcDone, _ftcSize, _ftcStartMs);
-            break;
-        case FtcDownloadChunk:
-        case FtcDownloadVerify:
-            ftcMaybeProgress(false, _dlSeq, _dlChunks, _dlWritten, _dlSize, _dlStartMs);
-            break;
-        default: break;
-    }
-
-    // Whole-transfer wedge backstop: a state that stalls without its own watchdog (the 0x02 CRC re-query,
-    // or any future one) still terminates. _ftcHardDeadline is non-zero only inside an up/download, so this
-    // never trips info-ga/scan. Transient reason -> auto-resume gets its attempts, then it fails cleanly.
-    if (_ftcHardDeadline && (int32_t)(millis() - _ftcHardDeadline) >= 0)
-    {
-        ftcAbort("transfer wedged (hard-deadline)");
-        return;
-    }
-
-    switch (_ftcState)
-    {
-
-        case FtcFeatureProbe:
+        case FtcDownloadOpen:
         {
-            // fast pre-flight. Accept only the CheckFeatures echo (a mirror can land here), cache a
-            // real answer per-PA, gate, join the classic path; no answer in the short window = old server.
             if (_ftcRespPending)
             {
                 _ftcRespPending = false;
-                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
-                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
-                _ftcFeatPa = _ftcTarget;
-                _ftcFeatBits = feat;
-                _ftcFeatValid = true;
-                ftcGateFast(feat, true);
-                ftcSendInfo();
-                _ftcInfoDeadline = millis() + FTC_FAST_STALL_MS;
-                _ftcState = FtcResumeInfo;
-            }
-            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
-            {
-                // No answer in 800ms -> old server. Do NOT cache (may be transient); run classic.
-                ftcGateFast(0, false);
-                ftcSendInfo();
-                _ftcInfoDeadline = millis() + FTC_FAST_STALL_MS;
-                _ftcState = FtcResumeInfo;
-            }
-            return;
-        }
-
-    #ifdef OPENKNX_FTC_SECURITY
-        case FtcAuthProbe:
-        {
-            // login pre-flight: CheckFeatures tells us whether the target is password-protected at all.
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
-                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
-                _ftcFeatPa = _ftcTarget;
-                _ftcFeatBits = feat;
-                _ftcFeatValid = true;
-                authAfterProbe(feat, true);
-            }
-            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
-            {
-                authAfterProbe(0, false); // no answer in the short window -> old / non-auth device
-            }
-            return;
-        }
-
-        case FtcAuthChallenge:
-        {
-            // login step 1: got the 16-byte nonce -> compute the 4-byte MAC locally and send AuthResponse(104).
-            // The password (as _ftcAuthKey) never leaves this process; only the MAC goes on the wire.
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (_ftcRespProp != FTC_CMD_AUTH_CHALLENGE) return; // stale mirror -> keep waiting
-                if (_ftcRespLen < 17 || _ftcResp[0] != 0x00)
+                if (ftcDropDup()) return;
+                // Answer: [0x00][size:4 BE][0x00]. Errors: 0x42 not found, 0x4 requested pkg too big.
+                if (_ftcRespLen < 5 || _ftcResp[0] != 0x00)
                 {
-                    openknx.logger.logWithPrefix("FTC", "login: target sent no nonce");
-                    memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                    openknx.logger.logWithPrefixAndValues("FTC", "download open rejected (0x%02X)",
+                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
+                    _status.phase = FtcPhase::Failed;
+                    ftcStatusMsg("open rejected");
                     ftcFinish();
                     return;
                 }
-                uint8_t mac[16]; // MAC = first SEC_MAC_LEN bytes of AES_ECB(pad16(pw), nonce); nonce = _ftcResp[1..16]
-                memcpy(mac, _ftcResp + 1, 16);
-                struct AES_ctx c;
-                AES_init_ctx(&c, _ftcAuthKey);
-                AES_ECB_encrypt(&c, mac);
-                memcpy(_ftcTx, mac, SEC_MAC_LEN);
-                memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
-                if (ftcSend(FTC_CMD_AUTH_RESPONSE, SEC_MAC_LEN))
-                    _ftcState = FtcAuthResponse;
-                else
+                _dlSize = rd32be(_ftcResp + 1);
+                _status.total = _dlSize;
+                _dlChunks = (uint16_t)((_dlSize + _dlPayload - 1) / _dlPayload);
+                _status.chunks = _dlChunks;
+                _xferSetup.size = _dlSize;
+                _xferSetup.chunks = _dlChunks;
+                if (_dlBackend && _dlBackend->freeBytes) // pre-write space gate (backends that can report it)
+                {
+                    const uint64_t freeB = _dlBackend->freeBytes();
+                    if (freeB < _dlSize)
+                    {
+                        openknx.logger.logWithPrefixAndValues("FTC", "not enough space on '%s' (need %u B, free %u B)",
+                                                              _dlBackend->prefix, (unsigned)_dlSize, (unsigned)freeB);
+                        _status.phase = FtcPhase::Failed;
+                        ftcStatusMsg("no space");
+                        ftcFinish();
+                        return;
+                    }
+                }
+                // RESUME decision (additive; a fresh download falls straight through to the code below and
+                // stays byte-identical). Resume iff: not forced-fresh, the backend can report the local size
+                // AND resume-open a sink, a matching whole-chunk prefix exists (0 < keepBytes < _dlSize).
+                if (!_dlNoResume && _dlBackend && _dlBackend->src.open != nullptr &&
+                    _activeSink->resumeOpen != nullptr)
+                {
+                    const int32_t have = _dlBackend->src.open(_dlLocal); // local partial size (or <0 = no file)
+                    if (_dlBackend->src.close) _dlBackend->src.close();
+                    if (have > 0 && (uint32_t)have < _dlSize && _dlPayload > 0)
+                    {
+                        const uint32_t keepBytes = ((uint32_t)have / _dlPayload) * _dlPayload; // whole-chunk floor
+                        if (keepBytes > 0)
+                        {
+                            // Reopen the source and cooperatively fold [0,keepBytes) into _dlCrc, then
+                            // resume-open the sink for append. Seed the continuation counters so the %-bar,
+                            // seq and byte count pick up where the partial left off.
+                            if (_dlBackend->src.open(_dlLocal) >= 0)
+                            {
+                                _dlResumeBase = keepBytes;
+                                _dlWritten = keepBytes;
+                                _dlSeq = (uint16_t)(keepBytes / _dlPayload + 1); // first chunk to (re)fetch
+                                _dlCrc = 0;
+                                _dlCrcOff = 0;
+                                _dlStartMs = millis();
+                                ftcArmHardDeadline(_dlSize); // covers the cooperative CRC prefix + the chunks
+                                _status.done = _dlWritten;
+                                openknx.logger.logWithPrefixAndValues("FTC",
+                                                                      "resuming %u/%u bytes (from chunk %u, %u B/chunk) -- folding local prefix",
+                                                                      (unsigned)keepBytes, (unsigned)_dlSize, _dlSeq, _dlPayload);
+                                ftcStatusMsg("resuming");
+                                _ftcState = FtcDownloadCrcPrefix;
+                                _ftcSince = millis();
+                                return;
+                            }
+                            // reopen for the fold failed -> fall through to a fresh (truncating) download
+                        }
+                    }
+                }
+                if (!_activeSink->open(_dlLocal))
+                {
+                    openknx.logger.logWithPrefixAndValues("FTC", "open failed on '%s' backend: \"%s\"",
+                                                          _dlBackend ? _dlBackend->prefix : "", _dlLocal);
+                    _status.phase = FtcPhase::Failed;
+                    ftcStatusMsg("sink open failed");
                     ftcFinish();
+                    return;
+                }
+                _dlSinkOpen = true;
+                _dlStartMs = millis();
+                ftcArmHardDeadline(_dlSize); // wedge backstop for the download
+                openknx.logger.logWithPrefixAndValues("FTC", "downloading %u bytes (%u chunks, %u B/chunk)",
+                                                      (unsigned)_dlSize, _dlChunks, _dlPayload);
+                if (_dlSize == 0)
+                {
+                    ftcCloseSink();
+                    _status.ok = true;
+                    ftcStatusMsg("downloaded (empty)");
+                    ftcFinish();
+                    return;
+                }
+                _dlSeq = 1;
+                ftcDlSendChunk();
+                _ftcState = FtcDownloadChunk;
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
-                openknx.logger.logWithPrefix("FTC", "login: no answer within 6s");
-                memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
-                ftcFinish();
+                // Transient (target busy): route through ftcAbort so a download auto-resumes (bounded by
+                // _cfgTransferRetries; a fresh re-run finds no partial and just retries the open).
+                ftcAbort("download: no open answer");
             }
             return;
         }
 
-        case FtcAuthResponse:
+        case FtcDownloadCrcPrefix:
         {
-            // login step 2 / logout: the target's status byte. 104: 0x00 authorized / 0xA1 failed. 105: 0x00 done.
+            // Cooperative fold of the on-disk prefix [0,keepBytes) into _dlCrc before appending new chunks
+            // (VORGABE non-blocking): a bounded chunk per pass, gated on the loop budget. The whole-transfer
+            // hard-deadline (armed before entering) backstops it -- it has no wire round-trip of its own.
+            if (_dlCrcOff >= _dlResumeBase)
+            {
+                ftcDlAfterPrefixFold();
+                return;
+            }
+            uint8_t buf[240];
+            do
+            {
+                uint32_t want = _dlResumeBase - _dlCrcOff;
+                if (want > sizeof(buf)) want = sizeof(buf);
+                // src read ABI is uint8_t-length; want is <= sizeof(buf) (240) so the cast never truncates.
+                const uint8_t n = (_dlBackend && _dlBackend->src.read)
+                                      ? _dlBackend->src.read(_dlCrcOff, buf, (uint8_t)want)
+                                      : 0;
+                if (n == 0) // < keepBytes <= on-disk size here, so a 0 is a genuine local read failure
+                {
+                    // Cannot fold the partial -> give up the resume, restart this download FRESH (the remote
+                    // file is fine; re-fetching from 0 is always correct). The sink/deadline are already set up.
+                    if (_dlBackend->src.close) _dlBackend->src.close();
+                    openknx.logger.logWithPrefix("FTC", "resume prefix read failed -- restarting fresh");
+                    _dlResumeBase = 0;
+                    _dlWritten = 0;
+                    _dlSeq = 1;
+                    _dlCrc = 0;
+                    _dlCrcOff = 0;
+                    _status.done = 0;
+                    if (!_activeSink->open(_dlLocal)) // fresh (truncating) sink
+                    {
+                        _status.phase = FtcPhase::Failed;
+                        ftcStatusMsg("sink open failed");
+                        ftcFinish();
+                        return;
+                    }
+                    _dlSinkOpen = true;
+                    ftcDlSendChunk();
+                    _ftcState = FtcDownloadChunk;
+                    _ftcSince = millis();
+                    return;
+                }
+                _dlCrc = ftcCrc32Posix(_dlCrc, buf, n, (_dlCrcOff == 0)); // first read seeds the fold
+                _dlCrcOff += n;
+            }
+            while (_dlCrcOff < _dlResumeBase && openknx.freeLoopTime());
+            if (_dlCrcOff < _dlResumeBase) return; // budget spent -> continue next pass
+            ftcDlAfterPrefixFold();
+            return;
+        }
+
+        case FtcDownloadChunk:
+        {
             if (_ftcRespPending)
             {
                 _ftcRespPending = false;
-                const uint8_t want = _ftcLogout ? FTC_CMD_AUTH_LOGOUT : FTC_CMD_AUTH_RESPONSE;
-                if (_ftcRespProp != want) return; // stale mirror -> keep waiting
-                const uint8_t r = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
-                if (_ftcLogout)
-                    openknx.logger.logWithPrefix("FTC", "logged out");
-                else if (r == 0x00)
-                    openknx.logger.logWithPrefix("FTC", "login OK -- writes allowed until the target's idle timeout");
-                else
+                if (ftcDropDup()) return;
+                // Answer: [0x00][seq:2 BE][readed:1][data:readed][crc16:2 BE].
+                if (_ftcRespLen < 6 || _ftcResp[0] != 0x00)
                 {
-                    // 0xA1 auth failed. Bytes 1..2 (if present) carry the remaining brute-force back-off in
-                    // seconds: 0 = still within the 3 free tries, else "too many tries, wait N".
-                    const uint16_t backSec = (_ftcRespLen >= 3) ? (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]) : 0;
-                    if (backSec == 0)
-                        openknx.logger.logWithPrefix("FTC", "login FAILED -- wrong password, try again");
-                    else if (backSec < 60)
-                        openknx.logger.logWithPrefixAndValues("FTC", "login FAILED -- too many tries, next attempt in %u s", backSec);
-                    else
-                        openknx.logger.logWithPrefixAndValues("FTC", "login FAILED -- too many tries, next attempt in %u min", (backSec + 59) / 60);
+                    openknx.logger.logWithPrefixAndValues("FTC", "download chunk error (0x%02X)",
+                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
+                    ftcCloseSink();
+                    _status.phase = FtcPhase::Failed;
+                    ftcFinish();
+                    return;
                 }
-                ftcFinish();
+                const uint16_t seq = (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]);
+                const uint8_t readed = _ftcResp[3];
+                if ((int)4 + readed + 2 > (int)_ftcRespLen) // data + trailing CRC must fit
+                {
+                    openknx.logger.logWithPrefix("FTC", "download chunk truncated");
+                    ftcCloseSink();
+                    _status.phase = FtcPhase::Failed;
+                    ftcFinish();
+                    return;
+                }
+                const uint16_t rxCrc = (uint16_t)((_ftcResp[4 + readed] << 8) | _ftcResp[5 + readed]);
+                const uint16_t calcCrc = ftcCrc16Modbus(_ftcResp + 1, (uint8_t)(readed + 3));
+                if (seq != _dlSeq || rxCrc != calcCrc)
+                {
+                    if (++_ftcRetries > _cfgMaxRetries)
+                    {
+                        openknx.logger.logWithPrefixAndValues("FTC", "download chunk %u failed (seq %u, crc %04X/%04X)",
+                                                              _dlSeq, seq, rxCrc, calcCrc);
+                        ftcCloseSink();
+                        _status.phase = FtcPhase::Failed;
+                        ftcFinish();
+                        return;
+                    }
+                    ftcDlSendChunk(); // retry the same chunk
+                    return;
+                }
+                _ftcRetries = 0;
+                if (readed > 0)
+                {
+                    const int w = _activeSink->write(_ftcResp + 4, readed);
+                    if (w != (int)readed)
+                    {
+                        openknx.logger.logWithPrefix("FTC", "sink write failed (SD full?)");
+                        ftcCloseSink();
+                        _status.phase = FtcPhase::Failed;
+                        ftcStatusMsg("write failed");
+                        ftcFinish();
+                        return;
+                    }
+                    _dlWritten += readed;
+                    _dlCrc = ftcCrc32Posix(_dlCrc, _ftcResp + 4, readed, (_dlSeq == 1)); // fold received stream (chunk 1 seeds)
+                    _status.done = _dlWritten;
+                    _status.chunk = _dlSeq;
+                    if (_dlStartMs != 0)
+                    {
+                        const uint32_t el = millis() - _dlStartMs;
+                        const uint32_t liveBps = el ? (uint32_t)(((uint64_t)_dlWritten * 1000ULL) / el) : 0;
+                        _status.bps = (uint16_t)(liveBps > 0xFFFF ? 0xFFFF : liveBps);
+                    }
+                    ftcMaybeProgress(false, _dlSeq, _dlChunks, _dlWritten, _dlSize, _dlStartMs);
+                }
+                // Last chunk = a short/empty chunk OR all bytes received. The `>=` arm is essential: a file whose
+                // size is an exact multiple of the chunk size returns readed==_dlPayload on its last chunk (never
+                // short), and the server has already closed the file at EOF -> without it we'd request one chunk
+                // too many (server answers 0x43) and wrongly report the download FAILED.
+                if (readed < _dlPayload || _dlWritten >= _dlSize)
+                {
+                    ftcCloseSink();
+                    _dlEndMs = millis(); // freeze the pure-transfer end BEFORE the verify round-trip
+                    _status.done = _dlWritten;
+                    // End-to-end proof (mirrors the upload): ask the target for size + CRC32, compare in
+                    // FtcDownloadVerify against the received-stream CRC32 + _dlWritten. The DOWNLOAD panel prints there.
+                    ftcSendInfo();
+                    if (_ftcState == FtcVerify)
+                    {
+                        _ftcState = FtcDownloadVerify;
+                        _ftcSince = millis();
+                    }
+                    return;
+                }
+                _dlSeq++;
+                ftcDlSendChunk();
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
-                openknx.logger.logWithPrefix("FTC", _ftcLogout ? "logout: no answer within 6s" : "login: no answer within 6s");
+                openknx.logger.logWithPrefixAndValues("FTC", "download: no answer for chunk %u", _dlSeq);
+                // Transient: route through ftcAbort -> auto-resume from the flushed local partial (mid-stream
+                // recovery). ftcAbort's retry branch closes (flushes) the sink first.
+                ftcAbort("download: no chunk answer");
+            }
+            return;
+        }
+
+        case FtcDownloadVerify:
+        {
+            // End-to-end proof: the target's FileInfo(43) CRC32 vs the CRC32 folded over the received stream
+            // (mirrors the upload's FtcVerify). Also catches truncation via _dlWritten == _dlSize.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_FILE_INFO) return; // only the FileInfo(43) echo is our verify result
+                if (_ftcRespLen >= 5 && _ftcResp[0] == 0x01)   // SD/EFC: source CRC is opt-in -> delivered, unverified
+                {
+                    const bool sizeOk = (_dlWritten == _dlSize); // still catch truncation
+                    _status.ok = sizeOk;
+                    _status.crc = _dlCrc ^ 0xFFFFFFFFu;
+                    _status.done = _dlWritten;
+                    _status.phase = sizeOk ? FtcPhase::Done : FtcPhase::Failed;
+                    _ftcNoTargetCrc = true; // SD/EFC source: CRC unavailable, size verified
+                    ftcDownloadPanel(sizeOk, false, 0);
+                    ftcStatusMsg(sizeOk ? "downloaded (unverified: SD/EFC source CRC off)" : "download FAILED (truncated)");
+                    ftcFinish();
+                    return;
+                }
+                if (_ftcRespLen != 9) return; // a shorter frame (close ack / stale) -> keep waiting
+                const bool statOk = (_ftcResp[0] == 0x00);
+                const uint32_t tsize = statOk ? (rd32be(_ftcResp + 1))
+                                              : 0;
+                const uint32_t tcrc = statOk ? (rd32be(_ftcResp + 5))
+                                             : 0;
+                const uint32_t mine = _dlCrc ^ 0xFFFFFFFFu;
+                const bool ok = statOk && (_dlWritten == _dlSize) && (tsize == _dlSize) && (tcrc == mine);
+                _status.ok = ok;
+                _status.crc = mine;
+                _status.done = _dlWritten;
+                _status.phase = ok ? FtcPhase::Done : FtcPhase::Failed;
+                ftcDownloadPanel(ok, statOk, tcrc);
+                ftcStatusMsg(ok ? "downloaded (verified)" : (statOk ? "download verify FAILED" : "downloaded (unverified)"));
+                ftcFinish();
+                return;
+            }
+            if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                // No FileInfo answer (old / silent server): the bytes ARE written -> report, flagged unverified.
+                _status.ok = true;
+                _status.done = _dlWritten;
+                _status.phase = FtcPhase::Done;
+                ftcDownloadPanel(true, false, 0);
+                ftcStatusMsg("downloaded (unverified)");
                 ftcFinish();
             }
             return;
         }
-    #endif
+        default: break;
+    }
+}
+#endif // OPENKNX_FTC_DOWNLOAD
 
-        // ===== FAST TRANSFER states (windowed AIMD) =========================================
+#if OPENKNX_FTC_DEVICEINFO
+// loopDeviceInfo state group, extracted from loop() (verbatim).
+void FileTransferClient::loopDeviceInfo()
+{
+    switch (_ftcState)
+    {
+        case FtcDevDescr:
+        {
+            // Mask (DeviceDescriptor) arrives via the scan ring; then ask for the FTM version.
+            if (_ftcDdTail != _ftcDdHead)
+            {
+                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
+                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
+                if (m.pa == _ftcTarget)
+                {
+                    _devMask = m.mask;
+                    _devHasMask = true;
+                }
+            }
+            // Move on as soon as the mask is in, or after the timeout (device may not answer DD at all).
+            if (_devHasMask || millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                // No connectionless answer -> one connection-oriented retry (BCU1/old masks answer only CO). Not during
+                // a scan probe (the scan drives its own CO sweep), and only once per probe.
+                if (!_devHasMask && !_devCoTried && !_scanInfoActive)
+                {
+                    _devCoTried = true;
+                    if (knx.bau().ftcScanConnect(_ftcTarget))
+                    {
+                        _devCoConn = true;
+                        _ftcSince = millis();
+                        _ftcState = FtcDevCoConn;
+                        return;
+                    }
+                }
+                _ftcTxLen = 0;
+                if (ftcSend(FTC_CMD_MODULE_VERSION, 0))
+                    _ftcState = FtcDevVer;
+#if OPENKNX_FTC_SCAN
+                else if (_scanInfoActive) // scan FULL probe: cannot send -> bail to the next device, not abort the scan
+                    ftcScanInfoBail();
+#endif
+                else
+                    ftcDevReport(), ftcFinish();
+            }
+            return;
+        }
+
+        case FtcDevCoConn:
+        {
+            // T_Connect opening for the connection-oriented DeviceDescriptor retry.
+            if (knx.bau().ftcScanConnected())
+            {
+                SecurityControl sec{false, None};
+                knx.bau().ftcScanReadDescriptor(sec); // CO DeviceDescriptor_Read over the open connection
+                _ftcSince = millis();
+                _ftcState = FtcDevCoDescr;
+            }
+            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
+            {
+                knx.bau().ftcScanDisconnect();
+                _devCoConn = false;
+                ftcDevReport(), ftcFinish(); // no CO link either -> report what we have (single-device info only, never a scan)
+            }
+            return;
+        }
+
+        case FtcDevCoDescr:
+        {
+            // CO DeviceDescriptor answer arrives via the same scan ring as the connectionless read.
+            while (_ftcDdTail != _ftcDdHead)
+            {
+                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
+                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
+                if (m.pa == _ftcTarget)
+                {
+                    _devMask = m.mask;
+                    _devHasMask = true;
+                }
+            }
+            if (_devHasMask || millis() - _ftcSince > FTC_CO_READ_TMO)
+            {
+                if (!_devHasMask)
+                {
+                    knx.bau().ftcScanDisconnect();
+                    _devCoConn = false;
+                    ftcDevReport(), ftcFinish();
+                    return;
+                }
+                // Got the mask over CO -> the device is memory-mapped (BCU1/old). Keep the CO link open (ftcFinish
+                // closes it). For `info ga`, walk the tables on it; for plain `info` on BCU1, read the fixed identity
+                // block, then report.
+                if (_gaMode)
+                {
+                    ftcGaBeginWalk(); // reuses the open CO link (ftcScanConnect self-guards)
+                }
+                else if (KnxDeviceMap::memoryMapped(KnxDeviceMap::family(_devMask)))
+                    ftcBcuStartBlockRead(); // BCU1/BCU2 over the open CO link
+                else
+                    ftcDevReport(), ftcFinish();
+            }
+            return;
+        }
+
+        case FtcBcuConn:
+        {
+            // T_Connect opening before the BCU2 memory-mapped identity block read.
+            if (knx.bau().ftcScanConnected())
+                ftcBcuStartBlockRead();
+            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
+            {
+                knx.bau().ftcScanDisconnect();
+                _devCoConn = false;
+                ftcDevReport(), ftcFinish(); // no CO link -> report what we have (mask etc.)
+            }
+            return;
+        }
+
+        case FtcBcu1Mem:
+        {
+            // BCU1/BCU2 identity block (0x0100..): accumulate, then KnxDeviceMap::decodeIdentity -> the device-info extras.
+            if (_memPending)
+            {
+                _memPending = false;
+                if (ftcDropDup()) return;
+                if (_memLen == 0) return;
+                _gaGot = (uint16_t)(_gaGot + _memLen);
+                if (_gaGot > FTC_GA_MAX_BYTES) _gaGot = FTC_GA_MAX_BYTES;
+                if (_gaGot < _gaExpect && _gaGot < FTC_GA_MAX_BYTES)
+                {
+                    uint8_t step = FTC_GA_STEP;
+                    if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot));
+                    return;
+                }
+            }
+            else if (millis() - _ftcSince <= FTC_TIMEOUT)
+                return;
+            // complete (or timed out with a partial block) -> decode (BCU1 + BCU2 share the fixed map), then report
+            {
+                KnxDeviceMap::Identity id = KnxDeviceMap::decodeIdentity(_memBuf, _gaGot);
+                _devBcuRunState = id.runState;
+                _devBcuPei = id.peiType;
+                _devBcuRunError = id.runError;
+                _devBcuMfr = id.manufacturer;
+                memcpy(_devBcuApp, id.appBcd, 3);
+                _devHasBcuApp = id.haveApp;
+                _devHasBcu1 = id.valid && _gaGot > 0;
+            }
+            // Identity done -> read the bus voltage via A_ADC_Read over the open CO link (BCU has a real ADC;
+            // OpenKNX devices answer zero). Channel 1, 8 conversions (the ETS bus-voltage probe).
+            _adcPending = false;
+            _adcVal = 0;
+            _adcCnt = 0;
+            knx.bau().ftcSetAdcCallback(ftcOnAdc);
+            _ftcSince = millis();
+            {
+                SecurityControl sec{false, None};
+                knx.bau().ftcSendAdcRead(_ftcTarget, sec, 1, 8);
+            }
+            _ftcState = FtcBcuAdc;
+            return;
+        }
+
+        case FtcBcuAdc:
+        {
+            if (_adcPending)
+            {
+                _adcPending = false;
+                if (_adcCnt > 0 && _adcVal > 0)
+                {
+                    // The BCU sums `count` 8-bit conversions of the divided bus voltage; each averaged unit is 0.15 V
+                    // (calibrated vs ETS: 1.1.9 raw 1520 / 8 = 190 -> 190 * 0.15 = 28.5 V). mV = raw * 150 / count.
+                    _devBusVoltmV = (uint16_t)(((int32_t)_adcVal * 150) / _adcCnt);
+                    _devHasBusVolt = true;
+                }
+                ftcDevReport();
+                ftcFinish();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                ftcDevReport(); // no ADC answer (device has no ADC / did not respond) -> report without voltage
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcDevVer:
+        {
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                // The router mirrors answers TP->IP, so a late duplicate of a PREVIOUS command can land
+                // in this window. Only accept the echo whose propertyId is the command we sent here.
+                if (_ftcRespProp != FTC_CMD_MODULE_VERSION) return;
+                if (_ftcRespLen >= 6) // 6 bytes: major/minor/revision, each big-endian
+                {
+                    _devVerMaj = (uint16_t)((_ftcResp[0] << 8) | _ftcResp[1]);
+                    _devVerMin = (uint16_t)((_ftcResp[2] << 8) | _ftcResp[3]);
+                    _devVerRev = (uint16_t)((_ftcResp[4] << 8) | _ftcResp[5]);
+                    _devHasVer = true;
+                }
+                _ftcTxLen = 0;
+                if (ftcSend(FTC_CMD_CHECK_FEATURES, 0))
+                    _ftcState = FtcDevFeat;
+                else
+                {
+                    _devPropStep = 0;
+                    ftcDevSendProp();
+                    _ftcState = FtcDevProp;
+                }
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                // No ModuleVersion answer. If a mask came back the device is still there (just no FTC
+                // server) -> read its Device-Object identity. If nothing answered at all, it is absent.
+                if (_devHasMask)
+                {
+                    _devPropStep = 0;
+                    ftcDevSendProp();
+                    _ftcState = FtcDevProp;
+                }
+#if OPENKNX_FTC_SCAN
+                else if (_scanInfoActive) // scan FULL probe: nothing answered -> bail to the next device
+                {
+                    ftcScanInfoBail();
+                }
+#endif
+                else
+                {
+                    ftcDevReport();
+                    ftcFinish();
+                }
+            }
+            return;
+        }
+
+        case FtcDevFeat:
+        {
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale duplicate -> keep waiting
+                if (_ftcRespLen >= 1) _devFeat = _ftcResp[0];
+            }
+            else if (millis() - _ftcSince <= FTC_TIMEOUT)
+            {
+                return;
+            }
+            _devPropStep = 0;
+            ftcDevSendProp();
+            _ftcState = FtcDevProp;
+            return;
+        }
+
+        case FtcDevProp:
+        {
+            if (_propPending)
+            {
+                _propPending = false;
+                // Store by the RESPONSE's propertyId, not _devPropStep: a late duplicate of a prior read
+                // must land in ITS field, not the one we are currently waiting on.
+                if (_propObj == 0)
+                {
+                    switch (_propPid)
+                    {
+                        case FTC_PID_SERIAL:
+                            if (_propLen >= 6)
+                            {
+                                memcpy(_devSerial, _propData, 6);
+                                _devMfr = (uint16_t)((_propData[0] << 8) | _propData[1]);
+                                _devHasSerial = true;
+                            }
+                            break;
+                        case FTC_PID_ORDER:
+                            if (_propLen > 0)
+                            {
+                                const uint8_t n = _propLen > sizeof(_devOrder) ? (uint8_t)sizeof(_devOrder) : _propLen;
+                                memset(_devOrder, 0, sizeof(_devOrder));
+                                memcpy(_devOrder, _propData, n);
+                                _devHasOrder = true;
+                            }
+                            break;
+                        case FTC_PID_VERSION:
+                            if (_propLen > 0)
+                            {
+                                _devFwLen = _propLen > sizeof(_devFw) ? (uint8_t)sizeof(_devFw) : _propLen;
+                                memcpy(_devFw, _propData, _devFwLen);
+                                _devHasFw = true;
+                            }
+                            break;
+                        case FTC_PID_PROGMODE:
+                            if (_propLen >= 1)
+                            {
+                                _devProgMode = _propData[0];
+                                _devHasProg = true;
+                            }
+                            break;
+                        case FTC_PID_HARDWARE:
+                            if (_propLen >= 6)
+                            {
+                                memcpy(_devHw, _propData, 6);
+                                _devHasHw = true;
+                            }
+                            break;
+                    }
+                }
+                // Advance only when THIS step's property answered; a stale answer for another PID was
+                // stored above but we keep waiting for the one we asked for.
+                if (_propPid == FTC_DEV_PIDS[_devPropStep])
+                    _devPropStep++;
+                else
+                    return;
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                _devPropStep++; // this property never answered -> skip it
+            }
+            else
+            {
+                return;
+            }
+
+            if (_devPropStep >= FTC_DEV_PROP_COUNT)
+            {
+#if OPENKNX_FTC_SCAN
+                if (_scanInfoActive)
+                {
+                    ftcScanInfoBail();
+                    return;
+                } // scan info-probe: skip phase-2 enum, hand the identity back
+#endif
+                // Device-Object identity done -> phase 2: enumerate objects to find app-program + tables.
+                _devObjProbe = 1;
+                ftcDevSendObjType();
+                _ftcState = FtcDevEnum;
+            }
+            else
+            {
+                ftcDevSendProp();
+            }
+            return;
+        }
+
+        case FtcDevEnum:
+        {
+            if (_propPending)
+            {
+                _propPending = false;
+                // Answers are all PID_OBJECT_TYPE; tell them apart by the object index they came from.
+                if (_propObj == _devObjProbe)
+                {
+                    if (_propLen >= 2)
+                    {
+                        const uint16_t ot = (uint16_t)((_propData[0] << 8) | _propData[1]);
+                        if (ot == FTC_OT_ADDR) _devIdxAddr = (int8_t)_devObjProbe;
+                        else if (ot == FTC_OT_ASSOC)
+                            _devIdxAssoc = (int8_t)_devObjProbe;
+                        else if (ot == FTC_OT_APP)
+                            _devIdxApp = (int8_t)_devObjProbe;
+                        else if (ot == FTC_OT_GRP)
+                            _devIdxGrp = (int8_t)_devObjProbe;
+                    }
+                    _devObjProbe++;
+                }
+                else
+                {
+                    return; // stale answer for another index -> keep waiting for this one
+                }
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                _devObjProbe++; // no answer for this index -> move on
+            }
+            else
+            {
+                return;
+            }
+
+            if (_devObjProbe > FTC_ENUM_MAX)
+            {
+                if (_gaMode)
+                {
+                    // `info ga`: skip the load-state reads; walk the GA + association tables (_devIdxAddr/_devIdxAssoc).
+                    // The walk goes connection-oriented (ETS-style) -- ftcGaBeginWalk opens the T_Connect first.
+                    _gaWhich = 0;
+                    ftcGaBeginWalk();
+                    return;
+                }
+                if (KnxDeviceMap::memoryMapped(KnxDeviceMap::family(_devMask)) && _devIdxAddr < 0)
+                {
+                    // Memory-mapped classic device with no property table objects (BCU2 0025 etc.): its identity is
+                    // not in properties -> open a T_Connect and read the fixed memory block over CO (BCU1 already did
+                    // this via the CO fallback). Then decode via the family map + report.
+                    if (knx.bau().ftcScanConnect(_ftcTarget))
+                    {
+                        _devCoConn = true;
+                        _ftcSince = millis();
+                        _ftcState = FtcBcuConn;
+                        return;
+                    }
+                    ftcBcuStartBlockRead();
+                    return;
+                }
+                ftcDevBuildLoadQueue();
+                if (_loadQN == 0)
+                {
+                    ftcDevReport();
+                    ftcFinish();
+                }
+                else
+                {
+                    _loadQi = 0;
+                    ftcDevSendLoad();
+                    _ftcState = FtcDevLoad;
+                }
+            }
+            else
+            {
+                ftcDevSendObjType();
+            }
+            return;
+        }
+
+        case FtcDevLoad:
+        {
+            if (_propPending)
+            {
+                _propPending = false;
+                const uint8_t wObj = _loadQObj[_loadQi], wPid = _loadQPid[_loadQi];
+                if (_propObj == wObj && _propPid == wPid)
+                {
+                    if (wPid == FTC_PID_PROG_VERSION && _propLen >= 5)
+                    {
+                        _devAppMfr = (uint16_t)((_propData[0] << 8) | _propData[1]);
+                        _devAppNum = (uint16_t)((_propData[2] << 8) | _propData[3]);
+                        _devAppVer = _propData[4];
+                        _devHasApp = true;
+                    }
+                    else if (wPid == FTC_PID_LOAD_STATE && _propLen >= 1)
+                    {
+                        int slot = -1;
+                        if (wObj == _devIdxAddr) slot = 0;
+                        else if (wObj == _devIdxAssoc)
+                            slot = 1;
+                        else if (wObj == _devIdxApp)
+                            slot = 2;
+                        else if (wObj == _devIdxGrp)
+                            slot = 3;
+                        if (slot >= 0)
+                        {
+                            _devLoad[slot] = _propData[0];
+                            _devLoadHas[slot] = true;
+                        }
+                    }
+                    _loadQi++;
+                }
+                else
+                {
+                    return; // stale/duplicate -> keep waiting for the queued read
+                }
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                _loadQi++;
+            }
+            else
+            {
+                return;
+            }
+
+            if (_loadQi >= _loadQN)
+            {
+                ftcDevReport();
+                ftcFinish();
+            }
+            else
+            {
+                ftcDevSendLoad();
+            }
+            return;
+        }
+
+        case FtcGaConnect:
+        {
+            // T_Connect opening for the (ETS-style) connection-oriented memory walk. Once up, individualSend()
+            // routes every read on the connection; on no-ack we clear the half-open state and walk connectionless.
+            if (knx.bau().ftcScanConnected())
+            {
+                _gaConnected = true; // ours to close -> ftcFinish() disconnects (never an existing ETS session)
+                ftcGaAdvance();
+            }
+            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
+            {
+                knx.bau().ftcScanDisconnect();
+                ftcGaAdvance();
+            }
+            return;
+        }
+
+        case FtcGaRef:
+        {
+            // PID_TABLE_REFERENCE answer -> the current table's memory base; then start the A_Memory_Read walk.
+            if (_propPending)
+            {
+                _propPending = false;
+                const uint8_t idx = (uint8_t)((_gaWhich == 0) ? _devIdxAddr : (_gaWhich == 1) ? _devIdxAssoc
+                                                                                              : (_devIdxGrp >= 0 ? _devIdxGrp : _devIdxApp));
+                if (_propObj != idx || _propPid != FTC_PID_TABLE_REFERENCE)
+                    return; // stale/duplicate answer for another read -> keep waiting
+                if (_propLen >= 2)
+                {
+                    // 4-byte PDT_UNSIGNED_LONG; the memory address is the low word (big-endian).
+                    _gaRef = (uint16_t)((_propData[_propLen - 2] << 8) | _propData[_propLen - 1]);
+                    _gaGot = 0;
+                    _gaExpect = 0;
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef); // CO over the open T_Connect
+                    _ftcState = FtcGaMem;
+                }
+                else
+                {
+                    _gaWhich++; // no usable reference -> skip this table
+                    ftcGaAdvance();
+                }
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                _gaWhich++; // no answer -> skip this table
+                ftcGaAdvance();
+            }
+            return;
+        }
+
+        case FtcGaPtr:
+        {
+            // BCU1 only: the 1-byte table pointer (read from 0x0111/0x0112) -> the table sits at 0x100 + pointer.
+            if (_memPending)
+            {
+                _memPending = false;
+                if (ftcDropDup()) return;
+                // 0x00 / 0xFF are "absent" pointer values (System 2 stores its assoc/GrOT elsewhere) -> skip the
+                // table cleanly instead of reading 0x0100 / 0x01FF junk.
+                if (_memLen >= 1 && _memBuf[0] != 0x00 && _memBuf[0] != 0xFF)
+                {
+                    _gaRef = (uint16_t)(0x0100 + _memBuf[0]); // _memBuf[0] = pointer byte (written at offset addr-_gaRef = 0)
+                    _gaGot = 0;
+                    _gaExpect = 0;
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef);
+                    _ftcState = FtcGaMem;
+                }
+                else
+                {
+                    _gaWhich++; // no / absent pointer -> skip this table
+                    ftcGaAdvance();
+                }
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                _gaWhich++;
+                ftcGaAdvance();
+            }
+            return;
+        }
+
+        case FtcGaMem:
+        {
+            if (_memPending)
+            {
+                _memPending = false;
+                if (ftcDropDup()) return; // late IP-mirror of a memory answer -> ignore
+                if (_memLen == 0) return; // rejected/empty chunk -> let the timeout end the table
+                _gaGot = (uint16_t)(_gaGot + _memLen);
+                if (_gaGot > FTC_GA_MAX_BYTES) _gaGot = FTC_GA_MAX_BYTES;
+                if (_gaExpect == 0 && _gaGot >= (_gaClassic ? 1u : 2u))
+                {
+                    // first chunk carries the entry count -> total length, mask-aware.
+                    uint32_t need;
+                    if (_gaClassic)
+                    {
+                        // BCU RT1/2: address/assoc = [count:1] + 2-octet entries; GrOT = [size:1][ram-ptr:1] + 3-octet descriptors.
+                        const uint16_t count = _memBuf[0];
+                        need = (_gaWhich == 2) ? (2u + (uint32_t)count * 3u) : (1u + (uint32_t)count * 2u);
+                    }
+                    else
+                    {
+                        // System B: [count:2] then address 2B/entry, association 4B/entry, GrOT 2B/entry (one 16-bit descriptor word per KO).
+                        const uint16_t count = (uint16_t)((_memBuf[0] << 8) | _memBuf[1]);
+                        need = 2u + (uint32_t)count * (_gaWhich == 1 ? 4u : 2u);
+                    }
+                    _gaExpect = (uint16_t)(need > FTC_GA_MAX_BYTES ? FTC_GA_MAX_BYTES : need);
+                }
+                if (_gaGot < _gaExpect && _gaGot < FTC_GA_MAX_BYTES)
+                {
+                    uint8_t step = FTC_GA_STEP;
+                    if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot)); // CO over the open T_Connect
+                    return;
+                }
+                // table complete -> parse it, then advance to the next table (or emit the report).
+                ftcGaParse();
+                _gaWhich++;
+                ftcGaAdvance();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                // partial table: parse what arrived and note it (same skip-on-timeout pattern as FtcDevProp/FtcDevLoad).
+                ftcOut(CONSOLE_HEADLINE_COLOR, "  (%s table read timed out -- partial)", _gaWhich == 0 ? "address" : "association");
+                ftcGaParse();
+                _gaWhich++;
+                ftcGaAdvance();
+            }
+            return;
+        }
+
+        default: break;
+    }
+}
+#endif // OPENKNX_FTC_DEVICEINFO
+
+#if OPENKNX_FTC_SCAN
+// loopScan state group, extracted from loop() (verbatim).
+void FileTransferClient::loopScan()
+{
+    switch (_ftcState)
+    {
+        case FtcScan:
+        {
+            // 1) Drain every queued answer. Matched by the responder's own PA, so probe order and
+            //    answer order need not line up -- that is what lets the probes be pipelined.
+            while (_ftcDdTail != _ftcDdHead)
+            {
+                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
+                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
+                if (m.pa <= (uint16_t)_scanEnd)
+                {
+                    scanRecord(m.pa, m.mask);
+                    _ftcSince = millis(); // an answer just arrived -> keep the drain window open (adaptive)
+                }
+            }
+
+            // 2) Fire the next probe once the spacing has elapsed (_scanLastSend == 0 -> first one now).
+            if (_scanNext <= _scanEnd)
+            {
+                if (_scanLastSend == 0 || millis() - _scanLastSend >= _scanSpacingMs)
+                {
+                    const uint16_t pa = (uint16_t)_scanNext;
+                    _scanNext++;
+                    if (pa != 0 && pa != knx.individualAddress()) // never probe ourselves
+                    {
+                        SecurityControl sec = {false, None};
+                        knx.bau().ftcSendDeviceDescriptorRead(pa, sec);
+                        _scanProbed++;
+                        _status.done = _scanProbed;
+                    }
+                    _scanLastSend = millis();
+                    _ftcSince = millis(); // hold the drain timer off while probes are still going out
+                }
+                return;
+            }
+
+            // 3) All probes sent -> let the slowest answer drain in. Then either start the next deep
+            //    pass (accumulating the union, since IP drops different answers each time) or finish.
+            if (millis() - _ftcSince > _scanDrainMs)
+            {
+                if (_scanSweep < _scanSweeps)
+                {
+                    _scanSweep++;
+                    openknx.logger.logWithPrefixAndValues("FTC", "  deep sweep %u/%u (%u found so far)...",
+                                                          _scanSweep, _scanSweeps, _scanFound);
+                    _scanNext = _scanStart;
+                    _scanLastSend = 0;
+                    _ftcSince = millis();
+                    return;
+                }
+                scanReport();
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcScanCo:
+        {
+            // ETS-parity scan: strictly serial, one address in flight. T_Connect -> CO
+            // DeviceDescriptor_Read -> disconnect. Reaches old BCU1/BCU2 masks that answer ONLY
+            // connection-oriented. RULE: ftcScanDisconnect() on EVERY exit (present/absent/timeout) --
+            // a half-open TP connection would wedge the next address.
+
+            // a) Drain answers exactly like FtcScan; flag the address in flight (_scanNext) as present.
+            while (_ftcDdTail != _ftcDdHead)
+            {
+                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
+                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
+                if (m.pa <= (uint16_t)_scanEnd)
+                {
+                    scanRecord(m.pa, m.mask);
+                    if (m.pa == (uint16_t)_scanNext) _scanCoGot = true;
+                }
+            }
+
+            if (_scanCoPhase == 0)
+            {
+                if (_scanNext > _scanEnd)
+                {
+                    scanReport();
+                    ftcFinish();
+                    return;
+                }
+                const uint16_t pa = (uint16_t)_scanNext;
+                if (pa == 0 || pa == knx.individualAddress())
+                {
+                    _scanNext++;
+                    return;
+                } // never probe ourselves
+                if (_scanLastSend != 0 && millis() - _scanLastSend < FTC_CO_SETTLE_MS) return;
+                if (!knx.bau().ftcScanConnect(pa))
+                {
+                    // Busy = the TP link is owned (ETS/mgmt). Back off, but bound it: without a deadline a
+                    // phase-0 scan spins forever while ETS holds the link -> abort + report after FTC_CO_BUSY_TMO.
+                    if (_scanCoBusyT0 == 0)
+                        _scanCoBusyT0 = millis();
+                    else if (millis() - _scanCoBusyT0 > FTC_CO_BUSY_TMO)
+                    {
+                        openknx.logger.logWithPrefix("FTC", "scan: TP connection busy (ETS/mgmt?) -- aborting CO scan");
+                        scanReport();
+                        ftcFinish();
+                    }
+                    return;
+                }
+                _scanCoBusyT0 = 0; // connected -> clear the busy deadline
+                _scanProbed++;
+                _status.done = _scanProbed;
+                _scanCoGot = false;
+                _scanCoAckT0 = 0;
+                _scanCoT0 = millis();
+                _scanCoPhase = 1;
+                return;
+            }
+
+            if (_scanCoPhase == 1)
+            {
+                if (knx.bau().ftcScanConnected()) // T_Connect up -> read on the connection
+                {
+                    SecurityControl sec = {false, None};
+                    knx.bau().ftcScanReadDescriptor(sec);
+                    _scanCoT0 = millis();
+                    _scanCoPhase = 2;
+                }
+                else if (millis() - _scanCoT0 > FTC_CO_CONNECT_TMO)
+                {
+                    knx.bau().ftcScanDisconnect();
+                    _scanLastSend = millis();
+                    _scanNext++;
+                    _scanCoPhase = 0;
+                }
+                return;
+            }
+
+            // _scanCoPhase == 2: WaitResp. Presence-on-ACK: the device T_ACKing our CO read confirms it is present
+            // faster AND more reliably than waiting for the DeviceDescriptor response (BCU1 never sends one; slow
+            // devices drop it under bus load -> the old scan missed them). On the T_ACK we give a short grace for
+            // the DD (to learn the class), then record + advance; absent addresses still fall out on the timeout.
+            {
+                const bool acked = knx.bau().ftcScanReadAcked();
+                if (acked && _scanCoAckT0 == 0) _scanCoAckT0 = millis();
+                bool done = false, recordUnknown = false;
+                if (_scanCoGot)
+                    done = true; // DD arrived -> already recorded with its real class in the ring drain above
+                else if (_scanCoAckT0 != 0 && millis() - _scanCoAckT0 > FTC_CO_ACK_GRACE)
+                    done = recordUnknown = true; // present (T_ACK) but no DD in the grace (e.g. BCU1) -> record, class unknown
+                else if (millis() - _scanCoT0 > FTC_CO_READ_TMO)
+                    done = true;
+                if (done)
+                {
+                    if (recordUnknown) scanRecord((uint16_t)_scanNext, 0);
+                    knx.bau().ftcScanDisconnect();
+                    _scanLastSend = millis();
+                    _scanNext++;
+                    _scanCoPhase = 0;
+                }
+            }
+            return;
+        }
+
+        case FtcScanPost:
+        {
+            // Post-sweep OpenKNX/info probe + cooperative CSV write (Feature B/C). Strictly non-blocking:
+            // ONE PID read per device (in flight, bounded by FTC_TIMEOUT) and at most a few file rows per
+            // loop() pass (gated on freeLoopTime()). Every path advances -> cannot wedge.
+
+            // (1) Resolve a LIGHT probe in flight (FULL probes resolve via the FtcDevProp short-circuit).
+            if (_scanProbeInFlight == 1)
+            {
+                if (_propPending)
+                {
+                    _propPending = false;
+                    if (_propObj == 0 && _propPid == FTC_PID_SERIAL && _propLen >= 2)
+                    {
+                        _devMfr = (uint16_t)((_propData[0] << 8) | _propData[1]); // first 2 of the 6-byte serial = mfr id
+                        _scanProbeAnswered = true;
+                    }
+                    _scanProbeDone = true;
+                }
+                else if (millis() - _ftcSince > FTC_TIMEOUT)
+                    _scanProbeDone = true; // no answer -> leave unmarked, advance
+                else
+                    return;
+            }
+
+            // (2) A completed probe -> consume it (mark OpenKNX + log + stream row), then advance.
+            if (_scanProbeInFlight && _scanProbeDone)
+            {
+                ftcScanPostConsume();
+                _scanOkIdx++;
+                _scanProbeInFlight = 0;
+                _scanProbeDone = false;
+            }
+
+            // (3) Walk the remaining entries, a bounded few per pass. Launch the next System B probe (and
+            //     return to wait), or write an unprobed row (non-System-B / save-only) and advance.
+            while (_scanOkIdx < _ftcListing.size())
+            {
+                if (!openknx.freeLoopTime()) return; // out of loop budget -> resume next pass
+                const uint16_t m = (uint16_t)_ftcListing[_scanOkIdx].crc;
+                const bool sysB = ((m & 0x0FFF) == 0x07B0 || (m & 0x0FFF) == 0x07B1);
+                if (_scanOpenKnx && sysB)
+                {
+                    if (ftcScanProbeStart(_ftcListing[_scanOkIdx])) return; // one probe launched -> wait for it
+                    // else: unparseable PA -> fall through, write an unprobed row + advance
+                }
+                ftcScanWriteRow(_ftcListing[_scanOkIdx], false); // no-op when not saving
+                _scanOkIdx++;
+            }
+
+            // (4) All entries processed -> close the sink, then re-enter scanReport() to print + finish.
+            _scanPostDone = true;
+            if (_scanSinkOpen)
+            {
+                if (_scanSaveBe && _scanSaveBe->sink.close) _scanSaveBe->sink.close();
+                _scanSinkOpen = false;
+                openknx.logger.logWithPrefixAndValues("FTC", "scan saved: %s (%u device rows)", _scanSavePath, _scanSaveN);
+            }
+            scanReport();
+            ftcFinish();
+            return;
+        }
+
+        default: break;
+    }
+}
+#endif
+
+// loopDirOps state group, extracted from loop() (verbatim).
+void FileTransferClient::loopDirOps()
+{
+    switch (_ftcState)
+    {
+        case FtcDirList:
+        {
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                // Drop mirrored duplicates: wrong command echo, or a copy arriving within the mirror
+                // window of the last accepted answer (a real TP round trip is far slower).
+                if (_ftcRespProp != FTC_CMD_DIR_LIST || (_ftcRespT && millis() - _ftcRespT < FTC_DUP_WINDOW_MS))
+                    return;
+                _ftcRespT = millis();
+                if (_ftcRespLen < 2 || _ftcResp[0] != 0x00)
+                {
+                    openknx.logger.logWithPrefixAndValues("FTC", "list: error 0x%02X",
+                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
+                    _ftcListing.clear();
+                    ftcFinish();
+                    return;
+                }
+                const uint8_t type = _ftcResp[1]; // 0 = no more, 1 = file, 2 = directory
+                if (type == 0)
+                {
+                    // Collection done -> print the table header.
+                    char title[96];
+                    snprintf(title, sizeof(title), "== KNX File Transfer - %u.%u.%u - list \"%s\" ==",
+                             FTC_PA_ARGS(_ftcTarget), _ftcListDir);
+                    ftcOut(0, "");
+                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", title);
+                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_REPORT);
+                    if (_ftcListDetailed)
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "Name                                     | Size (bytes) | CRC32      | Type");
+                    else
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "Name                                     | Type");
+                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_REPORT);
+                    if (_ftcListing.empty())
+                        ftcOut(0, "  ..(empty)");
+                    _ftcDirIdx = 0;
+                    if (_ftcListDetailed)
+                    {
+                        // ll: one FileInfo per file fills in size + CRC32 (via FtcDirInfo).
+                        _ftcState = FtcDirInfo;
+                        ftcListAdvance();
+                        return;
+                    }
+                    // ls: names only, no per-file round trips.
+                    for (size_t i = 0; i < _ftcListing.size(); i++)
+                    {
+                        char row[128];
+                        snprintf(row, sizeof(row), "%-40.40s | %s", _ftcListing[i].name,
+                                 _ftcListing[i].isDir ? "dir" : "file");
+                        ftcOut(0, "%s", row);
+                        if (_ftcListing[i].isDir)
+                            _ftcListDirs++;
+                        else
+                            _ftcListFiles++;
+                    }
+                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_REPORT);
+                    char lsleft[41];
+                    snprintf(lsleft, sizeof(lsleft), "Files: %u   Dirs: %u", _ftcListFiles, _ftcListDirs);
+                    char lsfoot[64];
+                    snprintf(lsfoot, sizeof(lsfoot), "%-40.40s | total", lsleft);
+                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", lsfoot);
+                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE_REPORT);
+                    // ls done -- ftcFinish() releases _ftcListing (size/crc are 0 here anyway, hasInfo=false).
+                    _status.ok = true;
+                    ftcFinish();
+                    return;
+                }
+                // One entry -> store name + kind, then continue the iterator.
+                uint8_t nl = (_ftcRespLen > 2) ? (uint8_t)(_ftcRespLen - 2) : 0;
+                char name[64];
+                if (nl >= sizeof(name)) nl = sizeof(name) - 1;
+                memcpy(name, _ftcResp + 2, nl);
+                name[nl] = 0;
+                if (_ftcListing.size() < FTC_SCAN_MAX_LIST) // cap collected entries (RAM + the one-pass ll/ls emit); mirrors scanRecord
+                {
+                    FtcEntry e;
+                    strncpy(e.name, name, sizeof(e.name) - 1);
+                    e.isDir = (type == 2);
+                    _ftcListing.push_back(e);
+                }
+                ftcSendDirList();
+                return;
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                openknx.logger.logWithPrefix("FTC", "list: no answer");
+                _ftcListing.clear();
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcDirInfo:
+        {
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                // Same duplicate guard: a stale DirList mirror would be misread as size+CRC, a FileInfo
+                // mirror would land on the next file -- accept only the real, on-time FileInfo echo.
+                if (_ftcRespProp != FTC_CMD_FILE_INFO || (_ftcRespT && millis() - _ftcRespT < FTC_DUP_WINDOW_MS))
+                    return;
+                _ftcRespT = millis();
+                const char *nm = (_ftcDirIdx < _ftcListing.size()) ? _ftcListing[_ftcDirIdx].name : "?";
+                char row[128];
+                const bool haveEntry = _ftcDirIdx < _ftcListing.size();
+                if (_ftcRespLen >= 9 && _ftcResp[0] == 0x00)
+                {
+                    const uint32_t size = rd32be(_ftcResp + 1);
+                    const uint32_t crc = rd32be(_ftcResp + 5);
+                    char sz[16];
+                    ftcFmtBytes(size, sz, sizeof(sz));
+                    snprintf(row, sizeof(row), "%-40.40s | %12s | 0x%08X | file", nm, sz, (unsigned)crc);
+                    if (haveEntry)
+                    {
+                        _ftcListing[_ftcDirIdx].size = size;
+                        _ftcListing[_ftcDirIdx].crc = crc;
+                        _ftcListing[_ftcDirIdx].hasInfo = true;
+                        _ftcListing[_ftcDirIdx].hasCrc = true;
+                    }
+                    _ftcListBytes += size;
+                    _ftcListFiles++;
+                }
+                else if (_ftcRespLen >= 5 && _ftcResp[0] == 0x01) // size valid, CRC not computed (SD/EFC default)
+                {
+                    const uint32_t size = rd32be(_ftcResp + 1);
+                    char sz[16];
+                    ftcFmtBytes(size, sz, sizeof(sz));
+                    snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | file", nm, sz, "n/a");
+                    if (haveEntry)
+                    {
+                        _ftcListing[_ftcDirIdx].size = size;
+                        _ftcListing[_ftcDirIdx].hasInfo = true;
+                        _ftcListing[_ftcDirIdx].hasCrc = false;
+                    }
+                    _ftcListBytes += size;
+                    _ftcListFiles++;
+                }
+                else
+                    snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | file?", nm, "?", "?");
+                ftcOut(0, "%s", row);
+                _ftcDirIdx++;
+                ftcListAdvance();
+                return;
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                const char *nm = (_ftcDirIdx < _ftcListing.size()) ? _ftcListing[_ftcDirIdx].name : "?";
+                char row[128];
+                snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | (no answer)", nm, "?", "?");
+                ftcOut(0, "%s", row);
+                _ftcDirIdx++;
+                ftcListAdvance();
+            }
+            return;
+        }
+
+        default: break;
+    }
+}
+
+// loopFast state group, extracted from loop() (verbatim).
+void FileTransferClient::loopFast()
+{
+    switch (_ftcState)
+    {
         case FtcFastOpen:
         {
             // cmd44 open ack: 0x00 ok, 0x42 open-fail, 0x4A too-many-chunks (pre-gated, so unexpected).
@@ -4103,6 +5292,380 @@ void FileTransferClient::loop(bool configured)
             return;
         }
 
+        default: break;
+    }
+}
+
+#ifdef OPENKNX_FTC_CONSOLE
+// loopConsole state group, extracted from loop() (verbatim).
+void FileTransferClient::loopConsole()
+{
+    switch (_ftcState)
+    {
+        case FtcConsoleProbe:
+        {
+            // Capability pre-flight: accept only the CheckFeatures echo, cache it per PA, then open or bail.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
+                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
+                _ftcFeatPa = _ftcTarget;
+                _ftcFeatBits = feat;
+                _ftcFeatValid = true;
+                conAfterProbe(feat, true);
+            }
+            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            {
+                // Congested bus can starve a single probe. Resend the idempotent CheckFeatures a few times
+                // (ftcSend re-arms _ftcSince) before giving up -> the console opens under load instead of
+                // failing with a misleading "no answer".
+                if (_conProbeTries < FTC_CON_PROBE_RETRIES && ftcSend(FTC_CMD_CHECK_FEATURES, 0))
+                    _conProbeTries++;
+                else
+                    conAfterProbe(0, false); // still nothing after the retries -> absent / not an FTC device
+            }
+            return;
+        }
+
+        case FtcConsole:
+        {
+            if (_conSub == 3)
+            {
+                if (_ftcRespPending)
+                {
+                    _ftcRespPending = false;
+                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_IN) return; // stale mirror
+                    if (ftcDropDup()) return;
+                    const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                    if (st == 0x00) // accepted -> NOW it is a real session: stamp, hijack local input, banner, drain
+                    {
+                        _conStartMs = millis();
+                        openknx.console.setLineSink(&consoleFeedLineStatic);
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "-- console %u.%u.%u -- 'quit'/'exit' to leave, 'ftc cancel' to escape --",
+                               FTC_PA_ARGS(_ftcTarget));
+                        _conSub = 2;
+                        conSend(CON_PID_OUT, &_conMaxDrain, 1);
+                        return;
+                    }
+                    if (st == 0xA0) // password stage, not logged in -- guide the user, do NOT open a doomed session
+                    {
+                        _conSub = 0;
+                        _conStartMs = 0;
+                        _status.phase = FtcPhase::Failed;
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "%u.%u.%u: password-protected -- run: ftc %u.%u.%u login <pw>, then retry",
+                               FTC_PA_ARGS(_ftcTarget),
+                               FTC_PA_ARGS(_ftcTarget));
+                        ftcFinish();
+                        return;
+                    }
+                    if (st == 0xA2) // writes disabled: prog-mode stage (not in prog) or ETS access = "Aus"
+                    {
+                        conRefuse("console locked -- set prog mode, or ETS access is \"Aus\"");
+                        return;
+                    }
+                    if (st == 0x01) // another PA already owns the console
+                    {
+                        conRefuse("console in use -- try again later");
+                        return;
+                    }
+                    conRefuse("unexpected target response -- console not opened"); // incl. 0x43 / malformed / future codes
+                    return;
+                }
+                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // longer window: probe proved presence, so a slow OPEN ack is congestion, not absence
+                    conRefuse("no answer from the target -- console not opened");
+                return;
+            }
+            if (_conSub == 1)
+            {
+                if (_ftcRespPending)
+                {
+                    _ftcRespPending = false;
+                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_IN) return; // stale mirror
+                    if (ftcDropDup()) return;
+                    const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                    if (st == 0x00) // accepted -> pull whatever the command produced
+                    {
+                        _conSub = 2;
+                        conSend(CON_PID_OUT, &_conMaxDrain, 1);
+                        return;
+                    }
+                    // Reasons stay short: conClose() already frames them as "-- <pa>: <reason> (session time) --".
+                    _status.phase = FtcPhase::Failed; // any non-OK ends the session with a clear reason (no zombie)
+                    if (st == 0xA0)                   // PW window lapsed mid-session: the server re-gates each command (F1a)
+                        conClose("authorization expired -- log in again", true);
+                    else if (st == 0xA2) // locked mid-session (prog mode left, or mode reprogrammed)
+                        conClose("console locked", true);
+                    else if (st == 0x43) // target dropped the session (idle-reaped or closed)
+                        conClose("target idle timeout", true);
+                    else // 0x01 previous command still running, or any unknown code -> fail safe
+                        conClose("target busy or unexpected response", true);
+                }
+                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant: wait, do NOT resend (command is not idempotent)
+                {
+                    _status.phase = FtcPhase::Failed;
+                    conClose("no answer from target", true);
+                }
+                return;
+            }
+            if (_conSub == 2) // draining the target's log ring
+            {
+                if (_ftcRespPending)
+                {
+                    _ftcRespPending = false;
+                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_OUT) return; // stale mirror
+                    if (ftcDropDup()) return;
+                    if (_ftcRespLen >= 1 && _ftcResp[0] != 0x00) // 0x43 = session gone on the target (#3: kill the zombie)
+                    {
+                        _status.phase = FtcPhase::Failed;
+                        conClose("target idle timeout", false);
+                        return;
+                    }
+                    const uint8_t more = (_ftcRespLen >= 2) ? _ftcResp[1] : 0;
+                    const uint8_t ovf = (_ftcRespLen >= 3) ? _ftcResp[2] : 0;
+                    // Payload is already-formatted remote console text -> write it verbatim to our serial
+                    // (bounded <=247 B), NOT through logger.log() which would re-timestamp every chunk. Hold
+                    // the logger mutex so it cannot interleave with a concurrent log line (ESP dual-core).
+                    if (_ftcRespLen > 3)
+                    {
+                        logBegin();
+                        OPENKNX_LOGGER_DEVICE.write(_ftcResp + 3, _ftcRespLen - 3);
+                        logEnd();
+                    }
+                    if (ovf) ftcOut(31, "[...output truncated...]");
+                    if (more)
+                        conSend(CON_PID_OUT, &_conMaxDrain, 1); // keep draining
+                    else
+                    {
+                        _conSub = 0;
+                        _conKeepNext = millis() + CON_KEEP_MS;
+                    }
+                }
+                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant per-chunk window; re-armed on every chunk that arrives -> big outputs drain slowly but completely under load
+                {
+                    _status.phase = FtcPhase::Failed; // F1: a silent-drain timeout is an error, not a clean exit
+                    // sendClose = true: the target likely still owns the session (e.g. a drain answer that never
+                    // crossed a constrained interface); the 1-byte CLOSE fits any tunnel and releases it now
+                    // instead of leaving it wedged until CON_IDLE_TMO. Fire-and-forget: harmless if it is gone.
+                    conClose("no answer while draining", true);
+                }
+                return;
+            }
+            // _conSub == 0: idle in-session -> periodic keepalive poll (async logs + keep the session fresh).
+            // Suppress the poll while the user is actively typing (last local line < CON_KEEP_MS ago): over a
+            // TP tunnel each drain round-trips 1-2 s, and a line typed into that window would be dropped as
+            // "busy". Deferring keeps _conSub==0 so the command is sent immediately; async logs still flow once
+            // typing pauses for CON_KEEP_MS (and every command's own drain carries the ring in the meantime).
+            if (millis() >= _conKeepNext && (millis() - _conLastInputMs) >= CON_KEEP_MS)
+            {
+                _conKeepNext = millis() + CON_KEEP_MS;
+                conSend(CON_PID_OUT, &_conMaxDrain, 1);
+                _conSub = 2;
+            }
+            return;
+        }
+        default: break;
+    }
+}
+#endif
+
+#ifdef OPENKNX_FTC_SECURITY
+// loopSecurity state group, extracted from loop() (verbatim).
+void FileTransferClient::loopSecurity()
+{
+    switch (_ftcState)
+    {
+        case FtcAuthProbe:
+        {
+            // login pre-flight: CheckFeatures tells us whether the target is password-protected at all.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
+                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
+                _ftcFeatPa = _ftcTarget;
+                _ftcFeatBits = feat;
+                _ftcFeatValid = true;
+                authAfterProbe(feat, true);
+            }
+            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            {
+                authAfterProbe(0, false); // no answer in the short window -> old / non-auth device
+            }
+            return;
+        }
+
+        case FtcAuthChallenge:
+        {
+            // login step 1: got the 16-byte nonce -> compute the 4-byte MAC locally and send AuthResponse(104).
+            // The password (as _ftcAuthKey) never leaves this process; only the MAC goes on the wire.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_AUTH_CHALLENGE) return; // stale mirror -> keep waiting
+                if (_ftcRespLen < 17 || _ftcResp[0] != 0x00)
+                {
+                    openknx.logger.logWithPrefix("FTC", "login: target sent no nonce");
+                    memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                    ftcFinish();
+                    return;
+                }
+                uint8_t mac[16]; // MAC = first SEC_MAC_LEN bytes of AES_ECB(pad16(pw), nonce); nonce = _ftcResp[1..16]
+                memcpy(mac, _ftcResp + 1, 16);
+                struct AES_ctx c;
+                AES_init_ctx(&c, _ftcAuthKey);
+                AES_ECB_encrypt(&c, mac);
+                memcpy(_ftcTx, mac, SEC_MAC_LEN);
+                memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                if (ftcSend(FTC_CMD_AUTH_RESPONSE, SEC_MAC_LEN))
+                    _ftcState = FtcAuthResponse;
+                else
+                    ftcFinish();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                openknx.logger.logWithPrefix("FTC", "login: no answer within 6s");
+                memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcAuthResponse:
+        {
+            // login step 2 / logout: the target's status byte. 104: 0x00 authorized / 0xA1 failed. 105: 0x00 done.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                const uint8_t want = _ftcLogout ? FTC_CMD_AUTH_LOGOUT : FTC_CMD_AUTH_RESPONSE;
+                if (_ftcRespProp != want) return; // stale mirror -> keep waiting
+                const uint8_t r = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                if (_ftcLogout)
+                    openknx.logger.logWithPrefix("FTC", "logged out");
+                else if (r == 0x00)
+                    openknx.logger.logWithPrefix("FTC", "login OK -- writes allowed until the target's idle timeout");
+                else
+                {
+                    // 0xA1 auth failed. Bytes 1..2 (if present) carry the remaining brute-force back-off in
+                    // seconds: 0 = still within the 3 free tries, else "too many tries, wait N".
+                    const uint16_t backSec = (_ftcRespLen >= 3) ? (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]) : 0;
+                    if (backSec == 0)
+                        openknx.logger.logWithPrefix("FTC", "login FAILED -- wrong password, try again");
+                    else if (backSec < 60)
+                        openknx.logger.logWithPrefixAndValues("FTC", "login FAILED -- too many tries, next attempt in %u s", backSec);
+                    else
+                        openknx.logger.logWithPrefixAndValues("FTC", "login FAILED -- too many tries, next attempt in %u min", (backSec + 59) / 60);
+                }
+                ftcFinish();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                openknx.logger.logWithPrefix("FTC", _ftcLogout ? "logout: no answer within 6s" : "login: no answer within 6s");
+                ftcFinish();
+            }
+            return;
+        }
+        default: break;
+    }
+}
+#endif
+
+void FileTransferClient::loop(bool configured)
+{
+    // Cooperative console output first -- even when idle: the ll/ls/df footer is queued right before
+    // ftcFinish() sets FtcIdle, so it must still drain to completion here.
+    if (ftcDrainOut()) return;
+
+    // Locate-blink (ftc <pa> led blink): toggle the target's prog-LED from loop() while idle. The FtcIdle
+    // guard means it never injects a frame mid-transfer; a quick read (list/info) just pauses then resumes it.
+    if (_ledBlinkPa && _ftcState == FtcIdle && millis() >= _ledBlinkNext)
+    {
+        _ledBlinkOn ^= 1;
+        SecurityControl sec{false, None};
+        knx.bau().ftcSendPropertyValueWrite(_ledBlinkPa, sec, 0, FTC_PID_PROGMODE, 1, 1, &_ledBlinkOn, 1);
+        _ledBlinkNext = millis() + FTC_LED_BLINK_MS;
+    }
+
+    if (_ftcState == FtcIdle)
+        return;
+
+    // Progress heartbeat: refresh the transfer line at least every FTC_PROGRESS_MS even between chunk acks, so a
+    // slow link (chunk interval > cadence) still updates ~1 Hz instead of freezing. ftcMaybeProgress gates on
+    // time; with `done` unchanged since the last shown line its interval rate falls back to avg (no false 0 B/s).
+    switch (_ftcState)
+    {
+        case FtcUploadChunk:
+        case FtcUploadChunkRetry:
+        case FtcUploadClose:
+        case FtcFastStream:
+        case FtcFastReport:
+        case FtcFastResend:
+        case FtcFastClose:
+            ftcMaybeProgress(true, _status.chunk, _ftcChunks, _ftcDone, _ftcSize, _ftcStartMs);
+            break;
+        case FtcDownloadChunk:
+        case FtcDownloadVerify:
+            ftcMaybeProgress(false, _dlSeq, _dlChunks, _dlWritten, _dlSize, _dlStartMs);
+            break;
+        default: break;
+    }
+
+    // Whole-transfer wedge backstop: a state that stalls without its own watchdog (the 0x02 CRC re-query,
+    // or any future one) still terminates. _ftcHardDeadline is non-zero only inside an up/download, so this
+    // never trips info-ga/scan. Transient reason -> auto-resume gets its attempts, then it fails cleanly.
+    if (_ftcHardDeadline && (int32_t)(millis() - _ftcHardDeadline) >= 0)
+    {
+        ftcAbort("transfer wedged (hard-deadline)");
+        return;
+    }
+
+    switch (_ftcState)
+    {
+
+        case FtcFeatureProbe:
+        {
+            // fast pre-flight. Accept only the CheckFeatures echo (a mirror can land here), cache a
+            // real answer per-PA, gate, join the classic path; no answer in the short window = old server.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
+                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
+                _ftcFeatPa = _ftcTarget;
+                _ftcFeatBits = feat;
+                _ftcFeatValid = true;
+                ftcGateFast(feat, true);
+                ftcSendInfo();
+                _ftcInfoDeadline = millis() + FTC_FAST_STALL_MS;
+                _ftcState = FtcResumeInfo;
+            }
+            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            {
+                // No answer in 800ms -> old server. Do NOT cache (may be transient); run classic.
+                ftcGateFast(0, false);
+                ftcSendInfo();
+                _ftcInfoDeadline = millis() + FTC_FAST_STALL_MS;
+                _ftcState = FtcResumeInfo;
+            }
+            return;
+        }
+
+    #ifdef OPENKNX_FTC_SECURITY
+        case FtcAuthProbe:
+        case FtcAuthChallenge:
+        case FtcAuthResponse:
+            loopSecurity();
+            return;
+    #endif
+
+        // ===== FAST TRANSFER states (windowed AIMD) =========================================
+        case FtcFastOpen:
+        case FtcFastStream:
+        case FtcFastReport:
+        case FtcFastResend:
+        case FtcFastClose:
+            loopFast();
+            return;
         case FtcResumeInfo:
         {
             if (_ftcRespPending)
@@ -4490,161 +6053,9 @@ void FileTransferClient::loop(bool configured)
         }
 
         case FtcDirList:
-        {
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                // Drop mirrored duplicates: wrong command echo, or a copy arriving within the mirror
-                // window of the last accepted answer (a real TP round trip is far slower).
-                if (_ftcRespProp != FTC_CMD_DIR_LIST || (_ftcRespT && millis() - _ftcRespT < FTC_DUP_WINDOW_MS))
-                    return;
-                _ftcRespT = millis();
-                if (_ftcRespLen < 2 || _ftcResp[0] != 0x00)
-                {
-                    openknx.logger.logWithPrefixAndValues("FTC", "list: error 0x%02X",
-                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
-                    _ftcListing.clear();
-                    ftcFinish();
-                    return;
-                }
-                const uint8_t type = _ftcResp[1]; // 0 = no more, 1 = file, 2 = directory
-                if (type == 0)
-                {
-                    // Collection done -> print the table header.
-                    char title[96];
-                    snprintf(title, sizeof(title), "== KNX File Transfer - %u.%u.%u - list \"%s\" ==",
-                             FTC_PA_ARGS(_ftcTarget), _ftcListDir);
-                    ftcOut(0, "");
-                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", title);
-                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE78);
-                    if (_ftcListDetailed)
-                        ftcOut(CONSOLE_HEADLINE_COLOR, "Name                                     | Size (bytes) | CRC32      | Type");
-                    else
-                        ftcOut(CONSOLE_HEADLINE_COLOR, "Name                                     | Type");
-                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE78);
-                    if (_ftcListing.empty())
-                        ftcOut(0, "  ..(empty)");
-                    _ftcDirIdx = 0;
-                    if (_ftcListDetailed)
-                    {
-                        // ll: one FileInfo per file fills in size + CRC32 (via FtcDirInfo).
-                        _ftcState = FtcDirInfo;
-                        ftcListAdvance();
-                        return;
-                    }
-                    // ls: names only, no per-file round trips.
-                    for (size_t i = 0; i < _ftcListing.size(); i++)
-                    {
-                        char row[128];
-                        snprintf(row, sizeof(row), "%-40.40s | %s", _ftcListing[i].name,
-                                 _ftcListing[i].isDir ? "dir" : "file");
-                        ftcOut(0, "%s", row);
-                        if (_ftcListing[i].isDir)
-                            _ftcListDirs++;
-                        else
-                            _ftcListFiles++;
-                    }
-                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE78);
-                    char lsleft[41];
-                    snprintf(lsleft, sizeof(lsleft), "Files: %u   Dirs: %u", _ftcListFiles, _ftcListDirs);
-                    char lsfoot[64];
-                    snprintf(lsfoot, sizeof(lsfoot), "%-40.40s | total", lsleft);
-                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", lsfoot);
-                    ftcOut(CONSOLE_HEADLINE_COLOR, "%s", RULE78);
-                    // ls done -- ftcFinish() releases _ftcListing (size/crc are 0 here anyway, hasInfo=false).
-                    _status.ok = true;
-                    ftcFinish();
-                    return;
-                }
-                // One entry -> store name + kind, then continue the iterator.
-                uint8_t nl = (_ftcRespLen > 2) ? (uint8_t)(_ftcRespLen - 2) : 0;
-                char name[64];
-                if (nl >= sizeof(name)) nl = sizeof(name) - 1;
-                memcpy(name, _ftcResp + 2, nl);
-                name[nl] = 0;
-                if (_ftcListing.size() < FTC_SCAN_MAX_LIST) // cap collected entries (RAM + the one-pass ll/ls emit); mirrors scanRecord
-                {
-                    FtcEntry e;
-                    strncpy(e.name, name, sizeof(e.name) - 1);
-                    e.isDir = (type == 2);
-                    _ftcListing.push_back(e);
-                }
-                ftcSendDirList();
-                return;
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                openknx.logger.logWithPrefix("FTC", "list: no answer");
-                _ftcListing.clear();
-                ftcFinish();
-            }
-            return;
-        }
-
         case FtcDirInfo:
-        {
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                // Same duplicate guard: a stale DirList mirror would be misread as size+CRC, a FileInfo
-                // mirror would land on the next file -- accept only the real, on-time FileInfo echo.
-                if (_ftcRespProp != FTC_CMD_FILE_INFO || (_ftcRespT && millis() - _ftcRespT < FTC_DUP_WINDOW_MS))
-                    return;
-                _ftcRespT = millis();
-                const char *nm = (_ftcDirIdx < _ftcListing.size()) ? _ftcListing[_ftcDirIdx].name : "?";
-                char row[128];
-                const bool haveEntry = _ftcDirIdx < _ftcListing.size();
-                if (_ftcRespLen >= 9 && _ftcResp[0] == 0x00)
-                {
-                    const uint32_t size = rd32be(_ftcResp + 1);
-                    const uint32_t crc = rd32be(_ftcResp + 5);
-                    char sz[16];
-                    ftcFmtBytes(size, sz, sizeof(sz));
-                    snprintf(row, sizeof(row), "%-40.40s | %12s | 0x%08X | file", nm, sz, (unsigned)crc);
-                    if (haveEntry)
-                    {
-                        _ftcListing[_ftcDirIdx].size = size;
-                        _ftcListing[_ftcDirIdx].crc = crc;
-                        _ftcListing[_ftcDirIdx].hasInfo = true;
-                        _ftcListing[_ftcDirIdx].hasCrc = true;
-                    }
-                    _ftcListBytes += size;
-                    _ftcListFiles++;
-                }
-                else if (_ftcRespLen >= 5 && _ftcResp[0] == 0x01) // size valid, CRC not computed (SD/EFC default)
-                {
-                    const uint32_t size = rd32be(_ftcResp + 1);
-                    char sz[16];
-                    ftcFmtBytes(size, sz, sizeof(sz));
-                    snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | file", nm, sz, "n/a");
-                    if (haveEntry)
-                    {
-                        _ftcListing[_ftcDirIdx].size = size;
-                        _ftcListing[_ftcDirIdx].hasInfo = true;
-                        _ftcListing[_ftcDirIdx].hasCrc = false;
-                    }
-                    _ftcListBytes += size;
-                    _ftcListFiles++;
-                }
-                else
-                    snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | file?", nm, "?", "?");
-                ftcOut(0, "%s", row);
-                _ftcDirIdx++;
-                ftcListAdvance();
-                return;
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                const char *nm = (_ftcDirIdx < _ftcListing.size()) ? _ftcListing[_ftcDirIdx].name : "?";
-                char row[128];
-                snprintf(row, sizeof(row), "%-40.40s | %12s | %-10s | (no answer)", nm, "?", "?");
-                ftcOut(0, "%s", row);
-                _ftcDirIdx++;
-                ftcListAdvance();
-            }
+            loopDirOps();
             return;
-        }
-
         case FtcFsInfoReq:
         {
             if (_ftcRespPending)
@@ -4946,6 +6357,7 @@ void FileTransferClient::loop(bool configured)
                 // resets _ftcTransferRetries (fresh-request semantics), so save+restore the auto-retry count
                 // across it -- exactly the counter must survive, only a real user request resets it. ALWAYS
                 // resumes (noResume=false), never a fresh truncate, even if the original was no-resume.
+#if OPENKNX_FTC_DOWNLOAD
                 if (_ftcDownload)
                 {
                     const uint8_t savedRetries = _ftcTransferRetries;
@@ -4953,6 +6365,7 @@ void FileTransferClient::loop(bool configured)
                     _ftcTransferRetries = savedRetries;
                     return;
                 }
+#endif
                 // pkg-auto degrade is applied in ftcProceedToUpload (fresh-only, offset-safe) -- not here.
                 const bool wasPerf = _ftcIsPerf;
                 ftcStart(_ftcTarget, true, _ftcMode);
@@ -4965,1311 +6378,46 @@ void FileTransferClient::loop(bool configured)
             return;
         }
 
+#if OPENKNX_FTC_SCAN
         case FtcScan:
-        {
-            // 1) Drain every queued answer. Matched by the responder's own PA, so probe order and
-            //    answer order need not line up -- that is what lets the probes be pipelined.
-            while (_ftcDdTail != _ftcDdHead)
-            {
-                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
-                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
-                if (m.pa <= (uint16_t)_scanEnd)
-                {
-                    scanRecord(m.pa, m.mask);
-                    _ftcSince = millis(); // an answer just arrived -> keep the drain window open (adaptive)
-                }
-            }
-
-            // 2) Fire the next probe once the spacing has elapsed (_scanLastSend == 0 -> first one now).
-            if (_scanNext <= _scanEnd)
-            {
-                if (_scanLastSend == 0 || millis() - _scanLastSend >= _scanSpacingMs)
-                {
-                    const uint16_t pa = (uint16_t)_scanNext;
-                    _scanNext++;
-                    if (pa != 0 && pa != knx.individualAddress()) // never probe ourselves
-                    {
-                        SecurityControl sec = {false, None};
-                        knx.bau().ftcSendDeviceDescriptorRead(pa, sec);
-                        _scanProbed++;
-                        _status.done = _scanProbed;
-                    }
-                    _scanLastSend = millis();
-                    _ftcSince = millis(); // hold the drain timer off while probes are still going out
-                }
-                return;
-            }
-
-            // 3) All probes sent -> let the slowest answer drain in. Then either start the next deep
-            //    pass (accumulating the union, since IP drops different answers each time) or finish.
-            if (millis() - _ftcSince > _scanDrainMs)
-            {
-                if (_scanSweep < _scanSweeps)
-                {
-                    _scanSweep++;
-                    openknx.logger.logWithPrefixAndValues("FTC", "  deep sweep %u/%u (%u found so far)...",
-                                                          _scanSweep, _scanSweeps, _scanFound);
-                    _scanNext = _scanStart;
-                    _scanLastSend = 0;
-                    _ftcSince = millis();
-                    return;
-                }
-                scanReport();
-                ftcFinish();
-            }
-            return;
-        }
-
         case FtcScanCo:
-        {
-            // ETS-parity scan: strictly serial, one address in flight. T_Connect -> CO
-            // DeviceDescriptor_Read -> disconnect. Reaches old BCU1/BCU2 masks that answer ONLY
-            // connection-oriented. RULE: ftcScanDisconnect() on EVERY exit (present/absent/timeout) --
-            // a half-open TP connection would wedge the next address.
-
-            // a) Drain answers exactly like FtcScan; flag the address in flight (_scanNext) as present.
-            while (_ftcDdTail != _ftcDdHead)
-            {
-                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
-                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
-                if (m.pa <= (uint16_t)_scanEnd)
-                {
-                    scanRecord(m.pa, m.mask);
-                    if (m.pa == (uint16_t)_scanNext) _scanCoGot = true;
-                }
-            }
-
-            if (_scanCoPhase == 0)
-            {
-                if (_scanNext > _scanEnd)
-                {
-                    scanReport();
-                    ftcFinish();
-                    return;
-                }
-                const uint16_t pa = (uint16_t)_scanNext;
-                if (pa == 0 || pa == knx.individualAddress())
-                {
-                    _scanNext++;
-                    return;
-                } // never probe ourselves
-                if (_scanLastSend != 0 && millis() - _scanLastSend < FTC_CO_SETTLE_MS) return;
-                if (!knx.bau().ftcScanConnect(pa))
-                {
-                    // Busy = the TP link is owned (ETS/mgmt). Back off, but bound it: without a deadline a
-                    // phase-0 scan spins forever while ETS holds the link -> abort + report after FTC_CO_BUSY_TMO.
-                    if (_scanCoBusyT0 == 0)
-                        _scanCoBusyT0 = millis();
-                    else if (millis() - _scanCoBusyT0 > FTC_CO_BUSY_TMO)
-                    {
-                        openknx.logger.logWithPrefix("FTC", "scan: TP connection busy (ETS/mgmt?) -- aborting CO scan");
-                        scanReport();
-                        ftcFinish();
-                    }
-                    return;
-                }
-                _scanCoBusyT0 = 0; // connected -> clear the busy deadline
-                _scanProbed++;
-                _status.done = _scanProbed;
-                _scanCoGot = false;
-                _scanCoAckT0 = 0;
-                _scanCoT0 = millis();
-                _scanCoPhase = 1;
-                return;
-            }
-
-            if (_scanCoPhase == 1)
-            {
-                if (knx.bau().ftcScanConnected()) // T_Connect up -> read on the connection
-                {
-                    SecurityControl sec = {false, None};
-                    knx.bau().ftcScanReadDescriptor(sec);
-                    _scanCoT0 = millis();
-                    _scanCoPhase = 2;
-                }
-                else if (millis() - _scanCoT0 > FTC_CO_CONNECT_TMO)
-                {
-                    knx.bau().ftcScanDisconnect();
-                    _scanLastSend = millis();
-                    _scanNext++;
-                    _scanCoPhase = 0;
-                }
-                return;
-            }
-
-            // _scanCoPhase == 2: WaitResp. Presence-on-ACK: the device T_ACKing our CO read confirms it is present
-            // faster AND more reliably than waiting for the DeviceDescriptor response (BCU1 never sends one; slow
-            // devices drop it under bus load -> the old scan missed them). On the T_ACK we give a short grace for
-            // the DD (to learn the class), then record + advance; absent addresses still fall out on the timeout.
-            {
-                const bool acked = knx.bau().ftcScanReadAcked();
-                if (acked && _scanCoAckT0 == 0) _scanCoAckT0 = millis();
-                bool done = false, recordUnknown = false;
-                if (_scanCoGot)
-                    done = true; // DD arrived -> already recorded with its real class in the ring drain above
-                else if (_scanCoAckT0 != 0 && millis() - _scanCoAckT0 > FTC_CO_ACK_GRACE)
-                    done = recordUnknown = true; // present (T_ACK) but no DD in the grace (e.g. BCU1) -> record, class unknown
-                else if (millis() - _scanCoT0 > FTC_CO_READ_TMO)
-                    done = true;
-                if (done)
-                {
-                    if (recordUnknown) scanRecord((uint16_t)_scanNext, 0);
-                    knx.bau().ftcScanDisconnect();
-                    _scanLastSend = millis();
-                    _scanNext++;
-                    _scanCoPhase = 0;
-                }
-            }
-            return;
-        }
-
         case FtcScanPost:
-        {
-            // Post-sweep OpenKNX/info probe + cooperative CSV write (Feature B/C). Strictly non-blocking:
-            // ONE PID read per device (in flight, bounded by FTC_TIMEOUT) and at most a few file rows per
-            // loop() pass (gated on freeLoopTime()). Every path advances -> cannot wedge.
-
-            // (1) Resolve a LIGHT probe in flight (FULL probes resolve via the FtcDevProp short-circuit).
-            if (_scanProbeInFlight == 1)
-            {
-                if (_propPending)
-                {
-                    _propPending = false;
-                    if (_propObj == 0 && _propPid == FTC_PID_SERIAL && _propLen >= 2)
-                    {
-                        _devMfr = (uint16_t)((_propData[0] << 8) | _propData[1]); // first 2 of the 6-byte serial = mfr id
-                        _scanProbeAnswered = true;
-                    }
-                    _scanProbeDone = true;
-                }
-                else if (millis() - _ftcSince > FTC_TIMEOUT)
-                    _scanProbeDone = true; // no answer -> leave unmarked, advance
-                else
-                    return;
-            }
-
-            // (2) A completed probe -> consume it (mark OpenKNX + log + stream row), then advance.
-            if (_scanProbeInFlight && _scanProbeDone)
-            {
-                ftcScanPostConsume();
-                _scanOkIdx++;
-                _scanProbeInFlight = 0;
-                _scanProbeDone = false;
-            }
-
-            // (3) Walk the remaining entries, a bounded few per pass. Launch the next System B probe (and
-            //     return to wait), or write an unprobed row (non-System-B / save-only) and advance.
-            while (_scanOkIdx < _ftcListing.size())
-            {
-                if (!openknx.freeLoopTime()) return; // out of loop budget -> resume next pass
-                const uint16_t m = (uint16_t)_ftcListing[_scanOkIdx].crc;
-                const bool sysB = ((m & 0x0FFF) == 0x07B0 || (m & 0x0FFF) == 0x07B1);
-                if (_scanOpenKnx && sysB)
-                {
-                    if (ftcScanProbeStart(_ftcListing[_scanOkIdx])) return; // one probe launched -> wait for it
-                    // else: unparseable PA -> fall through, write an unprobed row + advance
-                }
-                ftcScanWriteRow(_ftcListing[_scanOkIdx], false); // no-op when not saving
-                _scanOkIdx++;
-            }
-
-            // (4) All entries processed -> close the sink, then re-enter scanReport() to print + finish.
-            _scanPostDone = true;
-            if (_scanSinkOpen)
-            {
-                if (_scanSaveBe && _scanSaveBe->sink.close) _scanSaveBe->sink.close();
-                _scanSinkOpen = false;
-                openknx.logger.logWithPrefixAndValues("FTC", "scan saved: %s (%u device rows)", _scanSavePath, _scanSaveN);
-            }
-            scanReport();
-            ftcFinish();
+            loopScan();
             return;
-        }
-
+#endif
+#if OPENKNX_FTC_DEVICEINFO
         case FtcDevDescr:
-        {
-            // Mask (DeviceDescriptor) arrives via the scan ring; then ask for the FTM version.
-            if (_ftcDdTail != _ftcDdHead)
-            {
-                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
-                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
-                if (m.pa == _ftcTarget)
-                {
-                    _devMask = m.mask;
-                    _devHasMask = true;
-                }
-            }
-            // Move on as soon as the mask is in, or after the timeout (device may not answer DD at all).
-            if (_devHasMask || millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                // No connectionless answer -> one connection-oriented retry (BCU1/old masks answer only CO). Not during
-                // a scan probe (the scan drives its own CO sweep), and only once per probe.
-                if (!_devHasMask && !_devCoTried && !_scanInfoActive)
-                {
-                    _devCoTried = true;
-                    if (knx.bau().ftcScanConnect(_ftcTarget))
-                    {
-                        _devCoConn = true;
-                        _ftcSince = millis();
-                        _ftcState = FtcDevCoConn;
-                        return;
-                    }
-                }
-                _ftcTxLen = 0;
-                if (ftcSend(FTC_CMD_MODULE_VERSION, 0))
-                    _ftcState = FtcDevVer;
-                else if (_scanInfoActive) // scan FULL probe: cannot send -> bail to the next device, not abort the scan
-                    ftcScanInfoBail();
-                else
-                    ftcDevReport(), ftcFinish();
-            }
-            return;
-        }
-
         case FtcDevCoConn:
-        {
-            // T_Connect opening for the connection-oriented DeviceDescriptor retry.
-            if (knx.bau().ftcScanConnected())
-            {
-                SecurityControl sec{false, None};
-                knx.bau().ftcScanReadDescriptor(sec); // CO DeviceDescriptor_Read over the open connection
-                _ftcSince = millis();
-                _ftcState = FtcDevCoDescr;
-            }
-            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
-            {
-                knx.bau().ftcScanDisconnect();
-                _devCoConn = false;
-                ftcDevReport(), ftcFinish(); // no CO link either -> report what we have (single-device info only, never a scan)
-            }
-            return;
-        }
-
         case FtcDevCoDescr:
-        {
-            // CO DeviceDescriptor answer arrives via the same scan ring as the connectionless read.
-            while (_ftcDdTail != _ftcDdHead)
-            {
-                const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
-                _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
-                if (m.pa == _ftcTarget)
-                {
-                    _devMask = m.mask;
-                    _devHasMask = true;
-                }
-            }
-            if (_devHasMask || millis() - _ftcSince > FTC_CO_READ_TMO)
-            {
-                if (!_devHasMask)
-                {
-                    knx.bau().ftcScanDisconnect();
-                    _devCoConn = false;
-                    ftcDevReport(), ftcFinish();
-                    return;
-                }
-                // Got the mask over CO -> the device is memory-mapped (BCU1/old). Keep the CO link open (ftcFinish
-                // closes it). For `info ga`, walk the tables on it; for plain `info` on BCU1, read the fixed identity
-                // block, then report.
-                if (_gaMode)
-                {
-                    ftcGaBeginWalk(); // reuses the open CO link (ftcScanConnect self-guards)
-                }
-                else if (KnxDeviceMap::memoryMapped(KnxDeviceMap::family(_devMask)))
-                    ftcBcuStartBlockRead(); // BCU1/BCU2 over the open CO link
-                else
-                    ftcDevReport(), ftcFinish();
-            }
-            return;
-        }
-
         case FtcBcuConn:
-        {
-            // T_Connect opening before the BCU2 memory-mapped identity block read.
-            if (knx.bau().ftcScanConnected())
-                ftcBcuStartBlockRead();
-            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
-            {
-                knx.bau().ftcScanDisconnect();
-                _devCoConn = false;
-                ftcDevReport(), ftcFinish(); // no CO link -> report what we have (mask etc.)
-            }
-            return;
-        }
-
         case FtcBcu1Mem:
-        {
-            // BCU1/BCU2 identity block (0x0100..): accumulate, then KnxDeviceMap::decodeIdentity -> the device-info extras.
-            if (_memPending)
-            {
-                _memPending = false;
-                if (ftcDropDup()) return;
-                if (_memLen == 0) return;
-                _gaGot = (uint16_t)(_gaGot + _memLen);
-                if (_gaGot > FTC_GA_MAX_BYTES) _gaGot = FTC_GA_MAX_BYTES;
-                if (_gaGot < _gaExpect && _gaGot < FTC_GA_MAX_BYTES)
-                {
-                    uint8_t step = FTC_GA_STEP;
-                    if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
-                    _ftcSince = millis();
-                    SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot));
-                    return;
-                }
-            }
-            else if (millis() - _ftcSince <= FTC_TIMEOUT)
-                return;
-            // complete (or timed out with a partial block) -> decode (BCU1 + BCU2 share the fixed map), then report
-            {
-                KnxDeviceMap::Identity id = KnxDeviceMap::decodeIdentity(_memBuf, _gaGot);
-                _devBcuRunState = id.runState;
-                _devBcuPei = id.peiType;
-                _devBcuRunError = id.runError;
-                _devBcuMfr = id.manufacturer;
-                memcpy(_devBcuApp, id.appBcd, 3);
-                _devHasBcuApp = id.haveApp;
-                _devHasBcu1 = id.valid && _gaGot > 0;
-            }
-            // Identity done -> read the bus voltage via A_ADC_Read over the open CO link (BCU has a real ADC;
-            // OpenKNX devices answer zero). Channel 1, 8 conversions (the ETS bus-voltage probe).
-            _adcPending = false;
-            _adcVal = 0;
-            _adcCnt = 0;
-            knx.bau().ftcSetAdcCallback(ftcOnAdc);
-            _ftcSince = millis();
-            {
-                SecurityControl sec{false, None};
-                knx.bau().ftcSendAdcRead(_ftcTarget, sec, 1, 8);
-            }
-            _ftcState = FtcBcuAdc;
-            return;
-        }
-
         case FtcBcuAdc:
-        {
-            if (_adcPending)
-            {
-                _adcPending = false;
-                if (_adcCnt > 0 && _adcVal > 0)
-                {
-                    // The BCU sums `count` 8-bit conversions of the divided bus voltage; each averaged unit is 0.15 V
-                    // (calibrated vs ETS: 1.1.9 raw 1520 / 8 = 190 -> 190 * 0.15 = 28.5 V). mV = raw * 150 / count.
-                    _devBusVoltmV = (uint16_t)(((int32_t)_adcVal * 150) / _adcCnt);
-                    _devHasBusVolt = true;
-                }
-                ftcDevReport();
-                ftcFinish();
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                ftcDevReport(); // no ADC answer (device has no ADC / did not respond) -> report without voltage
-                ftcFinish();
-            }
-            return;
-        }
-
         case FtcDevVer:
-        {
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                // The router mirrors answers TP->IP, so a late duplicate of a PREVIOUS command can land
-                // in this window. Only accept the echo whose propertyId is the command we sent here.
-                if (_ftcRespProp != FTC_CMD_MODULE_VERSION) return;
-                if (_ftcRespLen >= 6) // 6 bytes: major/minor/revision, each big-endian
-                {
-                    _devVerMaj = (uint16_t)((_ftcResp[0] << 8) | _ftcResp[1]);
-                    _devVerMin = (uint16_t)((_ftcResp[2] << 8) | _ftcResp[3]);
-                    _devVerRev = (uint16_t)((_ftcResp[4] << 8) | _ftcResp[5]);
-                    _devHasVer = true;
-                }
-                _ftcTxLen = 0;
-                if (ftcSend(FTC_CMD_CHECK_FEATURES, 0))
-                    _ftcState = FtcDevFeat;
-                else
-                {
-                    _devPropStep = 0;
-                    ftcDevSendProp();
-                    _ftcState = FtcDevProp;
-                }
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                // No ModuleVersion answer. If a mask came back the device is still there (just no FTC
-                // server) -> read its Device-Object identity. If nothing answered at all, it is absent.
-                if (_devHasMask)
-                {
-                    _devPropStep = 0;
-                    ftcDevSendProp();
-                    _ftcState = FtcDevProp;
-                }
-                else if (_scanInfoActive) // scan FULL probe: nothing answered -> bail to the next device
-                {
-                    ftcScanInfoBail();
-                }
-                else
-                {
-                    ftcDevReport();
-                    ftcFinish();
-                }
-            }
-            return;
-        }
-
         case FtcDevFeat:
-        {
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale duplicate -> keep waiting
-                if (_ftcRespLen >= 1) _devFeat = _ftcResp[0];
-            }
-            else if (millis() - _ftcSince <= FTC_TIMEOUT)
-            {
-                return;
-            }
-            _devPropStep = 0;
-            ftcDevSendProp();
-            _ftcState = FtcDevProp;
-            return;
-        }
-
         case FtcDevProp:
-        {
-            if (_propPending)
-            {
-                _propPending = false;
-                // Store by the RESPONSE's propertyId, not _devPropStep: a late duplicate of a prior read
-                // must land in ITS field, not the one we are currently waiting on.
-                if (_propObj == 0)
-                {
-                    switch (_propPid)
-                    {
-                        case FTC_PID_SERIAL:
-                            if (_propLen >= 6)
-                            {
-                                memcpy(_devSerial, _propData, 6);
-                                _devMfr = (uint16_t)((_propData[0] << 8) | _propData[1]);
-                                _devHasSerial = true;
-                            }
-                            break;
-                        case FTC_PID_ORDER:
-                            if (_propLen > 0)
-                            {
-                                const uint8_t n = _propLen > sizeof(_devOrder) ? (uint8_t)sizeof(_devOrder) : _propLen;
-                                memset(_devOrder, 0, sizeof(_devOrder));
-                                memcpy(_devOrder, _propData, n);
-                                _devHasOrder = true;
-                            }
-                            break;
-                        case FTC_PID_VERSION:
-                            if (_propLen > 0)
-                            {
-                                _devFwLen = _propLen > sizeof(_devFw) ? (uint8_t)sizeof(_devFw) : _propLen;
-                                memcpy(_devFw, _propData, _devFwLen);
-                                _devHasFw = true;
-                            }
-                            break;
-                        case FTC_PID_PROGMODE:
-                            if (_propLen >= 1)
-                            {
-                                _devProgMode = _propData[0];
-                                _devHasProg = true;
-                            }
-                            break;
-                        case FTC_PID_HARDWARE:
-                            if (_propLen >= 6)
-                            {
-                                memcpy(_devHw, _propData, 6);
-                                _devHasHw = true;
-                            }
-                            break;
-                    }
-                }
-                // Advance only when THIS step's property answered; a stale answer for another PID was
-                // stored above but we keep waiting for the one we asked for.
-                if (_propPid == FTC_DEV_PIDS[_devPropStep])
-                    _devPropStep++;
-                else
-                    return;
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                _devPropStep++; // this property never answered -> skip it
-            }
-            else
-            {
-                return;
-            }
-
-            if (_devPropStep >= FTC_DEV_PROP_COUNT)
-            {
-                if (_scanInfoActive)
-                {
-                    ftcScanInfoBail();
-                    return;
-                } // scan info-probe: skip phase-2 enum, hand the identity back
-                // Device-Object identity done -> phase 2: enumerate objects to find app-program + tables.
-                _devObjProbe = 1;
-                ftcDevSendObjType();
-                _ftcState = FtcDevEnum;
-            }
-            else
-            {
-                ftcDevSendProp();
-            }
-            return;
-        }
-
         case FtcDevEnum:
-        {
-            if (_propPending)
-            {
-                _propPending = false;
-                // Answers are all PID_OBJECT_TYPE; tell them apart by the object index they came from.
-                if (_propObj == _devObjProbe)
-                {
-                    if (_propLen >= 2)
-                    {
-                        const uint16_t ot = (uint16_t)((_propData[0] << 8) | _propData[1]);
-                        if (ot == FTC_OT_ADDR) _devIdxAddr = (int8_t)_devObjProbe;
-                        else if (ot == FTC_OT_ASSOC)
-                            _devIdxAssoc = (int8_t)_devObjProbe;
-                        else if (ot == FTC_OT_APP)
-                            _devIdxApp = (int8_t)_devObjProbe;
-                        else if (ot == FTC_OT_GRP)
-                            _devIdxGrp = (int8_t)_devObjProbe;
-                    }
-                    _devObjProbe++;
-                }
-                else
-                {
-                    return; // stale answer for another index -> keep waiting for this one
-                }
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                _devObjProbe++; // no answer for this index -> move on
-            }
-            else
-            {
-                return;
-            }
-
-            if (_devObjProbe > FTC_ENUM_MAX)
-            {
-                if (_gaMode)
-                {
-                    // `info ga`: skip the load-state reads; walk the GA + association tables (_devIdxAddr/_devIdxAssoc).
-                    // The walk goes connection-oriented (ETS-style) -- ftcGaBeginWalk opens the T_Connect first.
-                    _gaWhich = 0;
-                    ftcGaBeginWalk();
-                    return;
-                }
-                if (KnxDeviceMap::memoryMapped(KnxDeviceMap::family(_devMask)) && _devIdxAddr < 0)
-                {
-                    // Memory-mapped classic device with no property table objects (BCU2 0025 etc.): its identity is
-                    // not in properties -> open a T_Connect and read the fixed memory block over CO (BCU1 already did
-                    // this via the CO fallback). Then decode via the family map + report.
-                    if (knx.bau().ftcScanConnect(_ftcTarget))
-                    {
-                        _devCoConn = true;
-                        _ftcSince = millis();
-                        _ftcState = FtcBcuConn;
-                        return;
-                    }
-                    ftcBcuStartBlockRead();
-                    return;
-                }
-                ftcDevBuildLoadQueue();
-                if (_loadQN == 0)
-                {
-                    ftcDevReport();
-                    ftcFinish();
-                }
-                else
-                {
-                    _loadQi = 0;
-                    ftcDevSendLoad();
-                    _ftcState = FtcDevLoad;
-                }
-            }
-            else
-            {
-                ftcDevSendObjType();
-            }
-            return;
-        }
-
         case FtcDevLoad:
-        {
-            if (_propPending)
-            {
-                _propPending = false;
-                const uint8_t wObj = _loadQObj[_loadQi], wPid = _loadQPid[_loadQi];
-                if (_propObj == wObj && _propPid == wPid)
-                {
-                    if (wPid == FTC_PID_PROG_VERSION && _propLen >= 5)
-                    {
-                        _devAppMfr = (uint16_t)((_propData[0] << 8) | _propData[1]);
-                        _devAppNum = (uint16_t)((_propData[2] << 8) | _propData[3]);
-                        _devAppVer = _propData[4];
-                        _devHasApp = true;
-                    }
-                    else if (wPid == FTC_PID_LOAD_STATE && _propLen >= 1)
-                    {
-                        int slot = -1;
-                        if (wObj == _devIdxAddr) slot = 0;
-                        else if (wObj == _devIdxAssoc)
-                            slot = 1;
-                        else if (wObj == _devIdxApp)
-                            slot = 2;
-                        else if (wObj == _devIdxGrp)
-                            slot = 3;
-                        if (slot >= 0)
-                        {
-                            _devLoad[slot] = _propData[0];
-                            _devLoadHas[slot] = true;
-                        }
-                    }
-                    _loadQi++;
-                }
-                else
-                {
-                    return; // stale/duplicate -> keep waiting for the queued read
-                }
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                _loadQi++;
-            }
-            else
-            {
-                return;
-            }
-
-            if (_loadQi >= _loadQN)
-            {
-                ftcDevReport();
-                ftcFinish();
-            }
-            else
-            {
-                ftcDevSendLoad();
-            }
-            return;
-        }
-
         case FtcGaConnect:
-        {
-            // T_Connect opening for the (ETS-style) connection-oriented memory walk. Once up, individualSend()
-            // routes every read on the connection; on no-ack we clear the half-open state and walk connectionless.
-            if (knx.bau().ftcScanConnected())
-            {
-                _gaConnected = true; // ours to close -> ftcFinish() disconnects (never an existing ETS session)
-                ftcGaAdvance();
-            }
-            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
-            {
-                knx.bau().ftcScanDisconnect();
-                ftcGaAdvance();
-            }
-            return;
-        }
-
         case FtcGaRef:
-        {
-            // PID_TABLE_REFERENCE answer -> the current table's memory base; then start the A_Memory_Read walk.
-            if (_propPending)
-            {
-                _propPending = false;
-                const uint8_t idx = (uint8_t)((_gaWhich == 0) ? _devIdxAddr : (_gaWhich == 1) ? _devIdxAssoc
-                                                                                              : (_devIdxGrp >= 0 ? _devIdxGrp : _devIdxApp));
-                if (_propObj != idx || _propPid != FTC_PID_TABLE_REFERENCE)
-                    return; // stale/duplicate answer for another read -> keep waiting
-                if (_propLen >= 2)
-                {
-                    // 4-byte PDT_UNSIGNED_LONG; the memory address is the low word (big-endian).
-                    _gaRef = (uint16_t)((_propData[_propLen - 2] << 8) | _propData[_propLen - 1]);
-                    _gaGot = 0;
-                    _gaExpect = 0;
-                    _ftcSince = millis();
-                    SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef); // CO over the open T_Connect
-                    _ftcState = FtcGaMem;
-                }
-                else
-                {
-                    _gaWhich++; // no usable reference -> skip this table
-                    ftcGaAdvance();
-                }
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                _gaWhich++; // no answer -> skip this table
-                ftcGaAdvance();
-            }
-            return;
-        }
-
         case FtcGaPtr:
-        {
-            // BCU1 only: the 1-byte table pointer (read from 0x0111/0x0112) -> the table sits at 0x100 + pointer.
-            if (_memPending)
-            {
-                _memPending = false;
-                if (ftcDropDup()) return;
-                // 0x00 / 0xFF are "absent" pointer values (System 2 stores its assoc/GrOT elsewhere) -> skip the
-                // table cleanly instead of reading 0x0100 / 0x01FF junk.
-                if (_memLen >= 1 && _memBuf[0] != 0x00 && _memBuf[0] != 0xFF)
-                {
-                    _gaRef = (uint16_t)(0x0100 + _memBuf[0]); // _memBuf[0] = pointer byte (written at offset addr-_gaRef = 0)
-                    _gaGot = 0;
-                    _gaExpect = 0;
-                    _ftcSince = millis();
-                    SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef);
-                    _ftcState = FtcGaMem;
-                }
-                else
-                {
-                    _gaWhich++; // no / absent pointer -> skip this table
-                    ftcGaAdvance();
-                }
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                _gaWhich++;
-                ftcGaAdvance();
-            }
-            return;
-        }
-
         case FtcGaMem:
-        {
-            if (_memPending)
-            {
-                _memPending = false;
-                if (ftcDropDup()) return; // late IP-mirror of a memory answer -> ignore
-                if (_memLen == 0) return; // rejected/empty chunk -> let the timeout end the table
-                _gaGot = (uint16_t)(_gaGot + _memLen);
-                if (_gaGot > FTC_GA_MAX_BYTES) _gaGot = FTC_GA_MAX_BYTES;
-                if (_gaExpect == 0 && _gaGot >= (_gaClassic ? 1u : 2u))
-                {
-                    // first chunk carries the entry count -> total length, mask-aware.
-                    uint32_t need;
-                    if (_gaClassic)
-                    {
-                        // BCU RT1/2: address/assoc = [count:1] + 2-octet entries; GrOT = [size:1][ram-ptr:1] + 3-octet descriptors.
-                        const uint16_t count = _memBuf[0];
-                        need = (_gaWhich == 2) ? (2u + (uint32_t)count * 3u) : (1u + (uint32_t)count * 2u);
-                    }
-                    else
-                    {
-                        // System B: [count:2] then address 2B/entry, association 4B/entry, GrOT 2B/entry (one 16-bit descriptor word per KO).
-                        const uint16_t count = (uint16_t)((_memBuf[0] << 8) | _memBuf[1]);
-                        need = 2u + (uint32_t)count * (_gaWhich == 1 ? 4u : 2u);
-                    }
-                    _gaExpect = (uint16_t)(need > FTC_GA_MAX_BYTES ? FTC_GA_MAX_BYTES : need);
-                }
-                if (_gaGot < _gaExpect && _gaGot < FTC_GA_MAX_BYTES)
-                {
-                    uint8_t step = FTC_GA_STEP;
-                    if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
-                    _ftcSince = millis();
-                    SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot)); // CO over the open T_Connect
-                    return;
-                }
-                // table complete -> parse it, then advance to the next table (or emit the report).
-                ftcGaParse();
-                _gaWhich++;
-                ftcGaAdvance();
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                // partial table: parse what arrived and note it (same skip-on-timeout pattern as FtcDevProp/FtcDevLoad).
-                ftcOut(CONSOLE_HEADLINE_COLOR, "  (%s table read timed out -- partial)", _gaWhich == 0 ? "address" : "association");
-                ftcGaParse();
-                _gaWhich++;
-                ftcGaAdvance();
-            }
+            loopDeviceInfo();
             return;
-        }
-
+#endif
+#if OPENKNX_FTC_DOWNLOAD
         case FtcDownloadOpen:
-        {
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (ftcDropDup()) return;
-                // Answer: [0x00][size:4 BE][0x00]. Errors: 0x42 not found, 0x4 requested pkg too big.
-                if (_ftcRespLen < 5 || _ftcResp[0] != 0x00)
-                {
-                    openknx.logger.logWithPrefixAndValues("FTC", "download open rejected (0x%02X)",
-                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
-                    _status.phase = FtcPhase::Failed;
-                    ftcStatusMsg("open rejected");
-                    ftcFinish();
-                    return;
-                }
-                _dlSize = rd32be(_ftcResp + 1);
-                _status.total = _dlSize;
-                _dlChunks = (uint16_t)((_dlSize + _dlPayload - 1) / _dlPayload);
-                _status.chunks = _dlChunks;
-                _xferSetup.size = _dlSize;
-                _xferSetup.chunks = _dlChunks;
-                if (_dlBackend && _dlBackend->freeBytes) // pre-write space gate (backends that can report it)
-                {
-                    const uint64_t freeB = _dlBackend->freeBytes();
-                    if (freeB < _dlSize)
-                    {
-                        openknx.logger.logWithPrefixAndValues("FTC", "not enough space on '%s' (need %u B, free %u B)",
-                                                              _dlBackend->prefix, (unsigned)_dlSize, (unsigned)freeB);
-                        _status.phase = FtcPhase::Failed;
-                        ftcStatusMsg("no space");
-                        ftcFinish();
-                        return;
-                    }
-                }
-                // RESUME decision (additive; a fresh download falls straight through to the code below and
-                // stays byte-identical). Resume iff: not forced-fresh, the backend can report the local size
-                // AND resume-open a sink, a matching whole-chunk prefix exists (0 < keepBytes < _dlSize).
-                if (!_dlNoResume && _dlBackend && _dlBackend->src.open != nullptr &&
-                    _activeSink->resumeOpen != nullptr)
-                {
-                    const int32_t have = _dlBackend->src.open(_dlLocal); // local partial size (or <0 = no file)
-                    if (_dlBackend->src.close) _dlBackend->src.close();
-                    if (have > 0 && (uint32_t)have < _dlSize && _dlPayload > 0)
-                    {
-                        const uint32_t keepBytes = ((uint32_t)have / _dlPayload) * _dlPayload; // whole-chunk floor
-                        if (keepBytes > 0)
-                        {
-                            // Reopen the source and cooperatively fold [0,keepBytes) into _dlCrc, then
-                            // resume-open the sink for append. Seed the continuation counters so the %-bar,
-                            // seq and byte count pick up where the partial left off.
-                            if (_dlBackend->src.open(_dlLocal) >= 0)
-                            {
-                                _dlResumeBase = keepBytes;
-                                _dlWritten = keepBytes;
-                                _dlSeq = (uint16_t)(keepBytes / _dlPayload + 1); // first chunk to (re)fetch
-                                _dlCrc = 0;
-                                _dlCrcOff = 0;
-                                _dlStartMs = millis();
-                                ftcArmHardDeadline(_dlSize); // covers the cooperative CRC prefix + the chunks
-                                _status.done = _dlWritten;
-                                openknx.logger.logWithPrefixAndValues("FTC",
-                                                                      "resuming %u/%u bytes (from chunk %u, %u B/chunk) -- folding local prefix",
-                                                                      (unsigned)keepBytes, (unsigned)_dlSize, _dlSeq, _dlPayload);
-                                ftcStatusMsg("resuming");
-                                _ftcState = FtcDownloadCrcPrefix;
-                                _ftcSince = millis();
-                                return;
-                            }
-                            // reopen for the fold failed -> fall through to a fresh (truncating) download
-                        }
-                    }
-                }
-                if (!_activeSink->open(_dlLocal))
-                {
-                    openknx.logger.logWithPrefixAndValues("FTC", "open failed on '%s' backend: \"%s\"",
-                                                          _dlBackend ? _dlBackend->prefix : "", _dlLocal);
-                    _status.phase = FtcPhase::Failed;
-                    ftcStatusMsg("sink open failed");
-                    ftcFinish();
-                    return;
-                }
-                _dlSinkOpen = true;
-                _dlStartMs = millis();
-                ftcArmHardDeadline(_dlSize); // wedge backstop for the download
-                openknx.logger.logWithPrefixAndValues("FTC", "downloading %u bytes (%u chunks, %u B/chunk)",
-                                                      (unsigned)_dlSize, _dlChunks, _dlPayload);
-                if (_dlSize == 0)
-                {
-                    ftcCloseSink();
-                    _status.ok = true;
-                    ftcStatusMsg("downloaded (empty)");
-                    ftcFinish();
-                    return;
-                }
-                _dlSeq = 1;
-                ftcDlSendChunk();
-                _ftcState = FtcDownloadChunk;
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                // Transient (target busy): route through ftcAbort so a download auto-resumes (bounded by
-                // _cfgTransferRetries; a fresh re-run finds no partial and just retries the open).
-                ftcAbort("download: no open answer");
-            }
-            return;
-        }
-
         case FtcDownloadCrcPrefix:
-        {
-            // Cooperative fold of the on-disk prefix [0,keepBytes) into _dlCrc before appending new chunks
-            // (VORGABE non-blocking): a bounded chunk per pass, gated on the loop budget. The whole-transfer
-            // hard-deadline (armed before entering) backstops it -- it has no wire round-trip of its own.
-            if (_dlCrcOff >= _dlResumeBase)
-            {
-                ftcDlAfterPrefixFold();
-                return;
-            }
-            uint8_t buf[240];
-            do
-            {
-                uint32_t want = _dlResumeBase - _dlCrcOff;
-                if (want > sizeof(buf)) want = sizeof(buf);
-                // src read ABI is uint8_t-length; want is <= sizeof(buf) (240) so the cast never truncates.
-                const uint8_t n = (_dlBackend && _dlBackend->src.read)
-                                      ? _dlBackend->src.read(_dlCrcOff, buf, (uint8_t)want)
-                                      : 0;
-                if (n == 0) // < keepBytes <= on-disk size here, so a 0 is a genuine local read failure
-                {
-                    // Cannot fold the partial -> give up the resume, restart this download FRESH (the remote
-                    // file is fine; re-fetching from 0 is always correct). The sink/deadline are already set up.
-                    if (_dlBackend->src.close) _dlBackend->src.close();
-                    openknx.logger.logWithPrefix("FTC", "resume prefix read failed -- restarting fresh");
-                    _dlResumeBase = 0;
-                    _dlWritten = 0;
-                    _dlSeq = 1;
-                    _dlCrc = 0;
-                    _dlCrcOff = 0;
-                    _status.done = 0;
-                    if (!_activeSink->open(_dlLocal)) // fresh (truncating) sink
-                    {
-                        _status.phase = FtcPhase::Failed;
-                        ftcStatusMsg("sink open failed");
-                        ftcFinish();
-                        return;
-                    }
-                    _dlSinkOpen = true;
-                    ftcDlSendChunk();
-                    _ftcState = FtcDownloadChunk;
-                    _ftcSince = millis();
-                    return;
-                }
-                _dlCrc = ftcCrc32Posix(_dlCrc, buf, n, (_dlCrcOff == 0)); // first read seeds the fold
-                _dlCrcOff += n;
-            }
-            while (_dlCrcOff < _dlResumeBase && openknx.freeLoopTime());
-            if (_dlCrcOff < _dlResumeBase) return; // budget spent -> continue next pass
-            ftcDlAfterPrefixFold();
-            return;
-        }
-
         case FtcDownloadChunk:
-        {
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (ftcDropDup()) return;
-                // Answer: [0x00][seq:2 BE][readed:1][data:readed][crc16:2 BE].
-                if (_ftcRespLen < 6 || _ftcResp[0] != 0x00)
-                {
-                    openknx.logger.logWithPrefixAndValues("FTC", "download chunk error (0x%02X)",
-                                                          _ftcRespLen ? _ftcResp[0] : 0xFF);
-                    ftcCloseSink();
-                    _status.phase = FtcPhase::Failed;
-                    ftcFinish();
-                    return;
-                }
-                const uint16_t seq = (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]);
-                const uint8_t readed = _ftcResp[3];
-                if ((int)4 + readed + 2 > (int)_ftcRespLen) // data + trailing CRC must fit
-                {
-                    openknx.logger.logWithPrefix("FTC", "download chunk truncated");
-                    ftcCloseSink();
-                    _status.phase = FtcPhase::Failed;
-                    ftcFinish();
-                    return;
-                }
-                const uint16_t rxCrc = (uint16_t)((_ftcResp[4 + readed] << 8) | _ftcResp[5 + readed]);
-                const uint16_t calcCrc = ftcCrc16Modbus(_ftcResp + 1, (uint8_t)(readed + 3));
-                if (seq != _dlSeq || rxCrc != calcCrc)
-                {
-                    if (++_ftcRetries > _cfgMaxRetries)
-                    {
-                        openknx.logger.logWithPrefixAndValues("FTC", "download chunk %u failed (seq %u, crc %04X/%04X)",
-                                                              _dlSeq, seq, rxCrc, calcCrc);
-                        ftcCloseSink();
-                        _status.phase = FtcPhase::Failed;
-                        ftcFinish();
-                        return;
-                    }
-                    ftcDlSendChunk(); // retry the same chunk
-                    return;
-                }
-                _ftcRetries = 0;
-                if (readed > 0)
-                {
-                    const int w = _activeSink->write(_ftcResp + 4, readed);
-                    if (w != (int)readed)
-                    {
-                        openknx.logger.logWithPrefix("FTC", "sink write failed (SD full?)");
-                        ftcCloseSink();
-                        _status.phase = FtcPhase::Failed;
-                        ftcStatusMsg("write failed");
-                        ftcFinish();
-                        return;
-                    }
-                    _dlWritten += readed;
-                    _dlCrc = ftcCrc32Posix(_dlCrc, _ftcResp + 4, readed, (_dlSeq == 1)); // fold received stream (chunk 1 seeds)
-                    _status.done = _dlWritten;
-                    _status.chunk = _dlSeq;
-                    if (_dlStartMs != 0)
-                    {
-                        const uint32_t el = millis() - _dlStartMs;
-                        const uint32_t liveBps = el ? (uint32_t)(((uint64_t)_dlWritten * 1000ULL) / el) : 0;
-                        _status.bps = (uint16_t)(liveBps > 0xFFFF ? 0xFFFF : liveBps);
-                    }
-                    ftcMaybeProgress(false, _dlSeq, _dlChunks, _dlWritten, _dlSize, _dlStartMs);
-                }
-                // Last chunk = a short/empty chunk OR all bytes received. The `>=` arm is essential: a file whose
-                // size is an exact multiple of the chunk size returns readed==_dlPayload on its last chunk (never
-                // short), and the server has already closed the file at EOF -> without it we'd request one chunk
-                // too many (server answers 0x43) and wrongly report the download FAILED.
-                if (readed < _dlPayload || _dlWritten >= _dlSize)
-                {
-                    ftcCloseSink();
-                    _dlEndMs = millis(); // freeze the pure-transfer end BEFORE the verify round-trip
-                    _status.done = _dlWritten;
-                    // End-to-end proof (mirrors the upload): ask the target for size + CRC32, compare in
-                    // FtcDownloadVerify against the received-stream CRC32 + _dlWritten. The DOWNLOAD panel prints there.
-                    ftcSendInfo();
-                    if (_ftcState == FtcVerify)
-                    {
-                        _ftcState = FtcDownloadVerify;
-                        _ftcSince = millis();
-                    }
-                    return;
-                }
-                _dlSeq++;
-                ftcDlSendChunk();
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                openknx.logger.logWithPrefixAndValues("FTC", "download: no answer for chunk %u", _dlSeq);
-                // Transient: route through ftcAbort -> auto-resume from the flushed local partial (mid-stream
-                // recovery). ftcAbort's retry branch closes (flushes) the sink first.
-                ftcAbort("download: no chunk answer");
-            }
-            return;
-        }
-
         case FtcDownloadVerify:
-        {
-            // End-to-end proof: the target's FileInfo(43) CRC32 vs the CRC32 folded over the received stream
-            // (mirrors the upload's FtcVerify). Also catches truncation via _dlWritten == _dlSize.
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (_ftcRespProp != FTC_CMD_FILE_INFO) return; // only the FileInfo(43) echo is our verify result
-                if (_ftcRespLen >= 5 && _ftcResp[0] == 0x01)   // SD/EFC: source CRC is opt-in -> delivered, unverified
-                {
-                    const bool sizeOk = (_dlWritten == _dlSize); // still catch truncation
-                    _status.ok = sizeOk;
-                    _status.crc = _dlCrc ^ 0xFFFFFFFFu;
-                    _status.done = _dlWritten;
-                    _status.phase = sizeOk ? FtcPhase::Done : FtcPhase::Failed;
-                    _ftcNoTargetCrc = true; // SD/EFC source: CRC unavailable, size verified
-                    ftcDownloadPanel(sizeOk, false, 0);
-                    ftcStatusMsg(sizeOk ? "downloaded (unverified: SD/EFC source CRC off)" : "download FAILED (truncated)");
-                    ftcFinish();
-                    return;
-                }
-                if (_ftcRespLen != 9) return; // a shorter frame (close ack / stale) -> keep waiting
-                const bool statOk = (_ftcResp[0] == 0x00);
-                const uint32_t tsize = statOk ? (rd32be(_ftcResp + 1))
-                                              : 0;
-                const uint32_t tcrc = statOk ? (rd32be(_ftcResp + 5))
-                                             : 0;
-                const uint32_t mine = _dlCrc ^ 0xFFFFFFFFu;
-                const bool ok = statOk && (_dlWritten == _dlSize) && (tsize == _dlSize) && (tcrc == mine);
-                _status.ok = ok;
-                _status.crc = mine;
-                _status.done = _dlWritten;
-                _status.phase = ok ? FtcPhase::Done : FtcPhase::Failed;
-                ftcDownloadPanel(ok, statOk, tcrc);
-                ftcStatusMsg(ok ? "downloaded (verified)" : (statOk ? "download verify FAILED" : "downloaded (unverified)"));
-                ftcFinish();
-                return;
-            }
-            if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                // No FileInfo answer (old / silent server): the bytes ARE written -> report, flagged unverified.
-                _status.ok = true;
-                _status.done = _dlWritten;
-                _status.phase = FtcPhase::Done;
-                ftcDownloadPanel(true, false, 0);
-                ftcStatusMsg("downloaded (unverified)");
-                ftcFinish();
-            }
+            loopDownload();
             return;
-        }
+#endif
 
     #ifdef OPENKNX_FTC_CONSOLE
         case FtcConsoleProbe:
-        {
-            // Capability pre-flight: accept only the CheckFeatures echo, cache it per PA, then open or bail.
-            if (_ftcRespPending)
-            {
-                _ftcRespPending = false;
-                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
-                const uint8_t feat = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
-                _ftcFeatPa = _ftcTarget;
-                _ftcFeatBits = feat;
-                _ftcFeatValid = true;
-                conAfterProbe(feat, true);
-            }
-            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
-            {
-                // Congested bus can starve a single probe. Resend the idempotent CheckFeatures a few times
-                // (ftcSend re-arms _ftcSince) before giving up -> the console opens under load instead of
-                // failing with a misleading "no answer".
-                if (_conProbeTries < FTC_CON_PROBE_RETRIES && ftcSend(FTC_CMD_CHECK_FEATURES, 0))
-                    _conProbeTries++;
-                else
-                    conAfterProbe(0, false); // still nothing after the retries -> absent / not an FTC device
-            }
-            return;
-        }
-
         case FtcConsole:
-        {
-            if (_conSub == 3)
-            {
-                if (_ftcRespPending)
-                {
-                    _ftcRespPending = false;
-                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_IN) return; // stale mirror
-                    if (ftcDropDup()) return;
-                    const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
-                    if (st == 0x00) // accepted -> NOW it is a real session: stamp, hijack local input, banner, drain
-                    {
-                        _conStartMs = millis();
-                        openknx.console.setLineSink(&consoleFeedLineStatic);
-                        ftcOut(CONSOLE_HEADLINE_COLOR, "-- console %u.%u.%u -- 'quit'/'exit' to leave, 'ftc cancel' to escape --",
-                               FTC_PA_ARGS(_ftcTarget));
-                        _conSub = 2;
-                        conSend(CON_PID_OUT, &_conMaxDrain, 1);
-                        return;
-                    }
-                    if (st == 0xA0) // password stage, not logged in -- guide the user, do NOT open a doomed session
-                    {
-                        _conSub = 0;
-                        _conStartMs = 0;
-                        _status.phase = FtcPhase::Failed;
-                        ftcOut(CONSOLE_HEADLINE_COLOR, "%u.%u.%u: password-protected -- run: ftc %u.%u.%u login <pw>, then retry",
-                               FTC_PA_ARGS(_ftcTarget),
-                               FTC_PA_ARGS(_ftcTarget));
-                        ftcFinish();
-                        return;
-                    }
-                    if (st == 0xA2) // writes disabled: prog-mode stage (not in prog) or ETS access = "Aus"
-                    {
-                        conRefuse("console locked -- set prog mode, or ETS access is \"Aus\"");
-                        return;
-                    }
-                    if (st == 0x01) // another PA already owns the console
-                    {
-                        conRefuse("console in use -- try again later");
-                        return;
-                    }
-                    conRefuse("unexpected target response -- console not opened"); // incl. 0x43 / malformed / future codes
-                    return;
-                }
-                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // longer window: probe proved presence, so a slow OPEN ack is congestion, not absence
-                    conRefuse("no answer from the target -- console not opened");
-                return;
-            }
-            if (_conSub == 1)
-            {
-                if (_ftcRespPending)
-                {
-                    _ftcRespPending = false;
-                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_IN) return; // stale mirror
-                    if (ftcDropDup()) return;
-                    const uint8_t st = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
-                    if (st == 0x00) // accepted -> pull whatever the command produced
-                    {
-                        _conSub = 2;
-                        conSend(CON_PID_OUT, &_conMaxDrain, 1);
-                        return;
-                    }
-                    // Reasons stay short: conClose() already frames them as "-- <pa>: <reason> (session time) --".
-                    _status.phase = FtcPhase::Failed; // any non-OK ends the session with a clear reason (no zombie)
-                    if (st == 0xA0)                   // PW window lapsed mid-session: the server re-gates each command (F1a)
-                        conClose("authorization expired -- log in again", true);
-                    else if (st == 0xA2) // locked mid-session (prog mode left, or mode reprogrammed)
-                        conClose("console locked", true);
-                    else if (st == 0x43) // target dropped the session (idle-reaped or closed)
-                        conClose("target idle timeout", true);
-                    else // 0x01 previous command still running, or any unknown code -> fail safe
-                        conClose("target busy or unexpected response", true);
-                }
-                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant: wait, do NOT resend (command is not idempotent)
-                {
-                    _status.phase = FtcPhase::Failed;
-                    conClose("no answer from target", true);
-                }
-                return;
-            }
-            if (_conSub == 2) // draining the target's log ring
-            {
-                if (_ftcRespPending)
-                {
-                    _ftcRespPending = false;
-                    if (_ftcRespObj != CON_OBJECT_INDEX || _ftcRespProp != CON_PID_OUT) return; // stale mirror
-                    if (ftcDropDup()) return;
-                    if (_ftcRespLen >= 1 && _ftcResp[0] != 0x00) // 0x43 = session gone on the target (#3: kill the zombie)
-                    {
-                        _status.phase = FtcPhase::Failed;
-                        conClose("target idle timeout", false);
-                        return;
-                    }
-                    const uint8_t more = (_ftcRespLen >= 2) ? _ftcResp[1] : 0;
-                    const uint8_t ovf = (_ftcRespLen >= 3) ? _ftcResp[2] : 0;
-                    // Payload is already-formatted remote console text -> write it verbatim to our serial
-                    // (bounded <=247 B), NOT through logger.log() which would re-timestamp every chunk. Hold
-                    // the logger mutex so it cannot interleave with a concurrent log line (ESP dual-core).
-                    if (_ftcRespLen > 3)
-                    {
-                        logBegin();
-                        OPENKNX_LOGGER_DEVICE.write(_ftcResp + 3, _ftcRespLen - 3);
-                        logEnd();
-                    }
-                    if (ovf) ftcOut(31, "[...output truncated...]");
-                    if (more)
-                        conSend(CON_PID_OUT, &_conMaxDrain, 1); // keep draining
-                    else
-                    {
-                        _conSub = 0;
-                        _conKeepNext = millis() + CON_KEEP_MS;
-                    }
-                }
-                else if (millis() - _ftcSince > FTC_CON_TIMEOUT) // congestion-tolerant per-chunk window; re-armed on every chunk that arrives -> big outputs drain slowly but completely under load
-                {
-                    _status.phase = FtcPhase::Failed; // F1: a silent-drain timeout is an error, not a clean exit
-                    // sendClose = true: the target likely still owns the session (e.g. a drain answer that never
-                    // crossed a constrained interface); the 1-byte CLOSE fits any tunnel and releases it now
-                    // instead of leaving it wedged until CON_IDLE_TMO. Fire-and-forget: harmless if it is gone.
-                    conClose("no answer while draining", true);
-                }
-                return;
-            }
-            // _conSub == 0: idle in-session -> periodic keepalive poll (async logs + keep the session fresh).
-            // Suppress the poll while the user is actively typing (last local line < CON_KEEP_MS ago): over a
-            // TP tunnel each drain round-trips 1-2 s, and a line typed into that window would be dropped as
-            // "busy". Deferring keeps _conSub==0 so the command is sent immediately; async logs still flow once
-            // typing pauses for CON_KEEP_MS (and every command's own drain carries the ring in the meantime).
-            if (millis() >= _conKeepNext && (millis() - _conLastInputMs) >= CON_KEEP_MS)
-            {
-                _conKeepNext = millis() + CON_KEEP_MS;
-                conSend(CON_PID_OUT, &_conMaxDrain, 1);
-                _conSub = 2;
-            }
+            loopConsole();
             return;
-        }
     #endif
 
         default:
