@@ -514,6 +514,11 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
     if (secIsWriteCommand(propertyId)) secRefreshWindow(); // accepted write extends the idle window
 #endif
 
+    // A cmdFileInfo CRC job holds a persistent file/store handle across loop() passes. Any OTHER command means
+    // the client moved on -> drop it, so a format/upload/delete can never run against an open handle (UAF /
+    // concurrent second handle). FileInfo manages its own job (re-poll same path / switch path).
+    if ((FtmCommands)propertyId != FtmCommands::FileInfo) crcCancel();
+
     switch ((FtmCommands)propertyId)
     {
         case FtmCommands::Format:
@@ -832,6 +837,7 @@ void FileTransferModule::crcCancel()
 void FileTransferModule::cmdFormat(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     resultLength = 1;
+    if (_fileOpen) { ftmXferClose(); _fileOpen = false; } // release an open transfer handle before wiping the FS
 
     if (!LittleFS.format())
     {
@@ -1056,6 +1062,7 @@ void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *res
                 return;
             }
 
+            crcCancel(); // a size-only probe is not a CRC re-poll -> drop any active job before touching the single-slot store
             int32_t sz = -1;
     #ifdef OPENKNX_SDCARD
             if (drive == FD_SD) sz = sd::fileStore.open(rel);
