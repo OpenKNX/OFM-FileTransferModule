@@ -72,6 +72,7 @@ typedef int sock_t;
 #include "core/DeviceMgmt.h"
 #include "core/Discovery.h"
 #include "core/Gzip.h"
+#include "core/SelfInstall.h"
 static ftc::Term g_term;
 static ftc::I18n g_i18n;
 static ftc::Theme g_theme(g_term);
@@ -1341,6 +1342,7 @@ static void usage()
     U.cmdRow("<pa> format yes", L.tr("erase the WHOLE filesystem (gated)", "GANZES Dateisystem löschen (gesichert)"));
     U.cmdRow("gzip <in> <out>", L.tr("gzip a local file (RP firmware prep; in-process, no tunnel)", "lokale Datei gzip'en (RP-Firmware; in-process, kein Tunnel)"));
     U.cmdRow("decode <hex LPDU>", L.tr("offline-decode a raw TP1 frame (APCI + FTC/console; no tunnel)", "Roh-TP1-Frame offline dekodieren (APCI + FTC/Console; kein Tunnel)"));
+    U.cmdRow("install | uninstall [--system] [--dir <path>] [--force]", L.tr("install/remove this ftc onto PATH (version-aware: up-to-date/upgrade, asks before downgrade; ~/.local/bin, --system=/usr/local/bin; no dependency)", "ftc in den PATH installieren/entfernen (versionsbewusst: aktuell/Upgrade, fragt vor Downgrade; ~/.local/bin, --system=/usr/local/bin; ohne Abhängigkeit)"));
     U.cmdRow("[sd/|efc/] on a remote path", L.tr("prefix a REMOTE path (else LittleFS): df ll ls rm mkdir rmdir mv info get perf",
                                                  "REMOTE-Pfad voranstellen (sonst LittleFS): df ll ls rm mkdir rmdir mv info get perf"));
     std::printf("\n");
@@ -3489,6 +3491,9 @@ int main(int argc, char** argv)
     bool cmpCollapse = false;     // --collapse: compare view starts collapsing consecutive identical frames
     bool cmpMarkers = true;       // --no-markers: start with per-frame markers off (default on)
     bool cmpSkew = false;         // --skew: compare view starts showing the A/B time-skew
+    bool installSystem = false;   // --system: install/uninstall to the system dir (/usr/local/bin) instead of ~/.local/bin
+    bool installForce = false;    // --force: install even when it would downgrade a newer installed copy (no prompt)
+    std::string installDirArg;    // --dir <path>: explicit install/uninstall directory (overrides the default)
     std::vector<std::string> pos; // positional tokens -> the `ftc ...` command tail
 
     for (int i = 1; i < argc; ++i)
@@ -3582,6 +3587,12 @@ int main(int argc, char** argv)
             cmpMarkers = false; // compare: start with per-frame markers off
         else if (a == "--skew")
             cmpSkew = true; // compare: start showing the A/B time-skew
+        else if (a == "--system")
+            installSystem = true; // install/uninstall to the system dir instead of the per-user default
+        else if (a == "--force")
+            installForce = true; // allow a downgrade install without prompting (scripts)
+        else if (a == "--dir" && i + 1 < argc)
+            installDirArg = argv[++i]; // explicit install/uninstall directory
         else if (a == "--lang" && i + 1 < argc)
             ++i; // consumed here; already applied in the pre-scan above
         else if (a == "--theme" && i + 1 < argc)
@@ -3759,6 +3770,144 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "%s\n", L.tr("gzip failed", "gzip fehlgeschlagen"));
         socketCleanup();
         return ok ? 0 : 1;
+    }
+
+    // `ftc install|uninstall [--system] [--dir <path>]` — the running binary copies/removes itself onto PATH.
+    // Zero external dependency (no pwsh/sh/python) so it works identically on macOS, Linux, Raspberry Pi and
+    // Windows. No tunnel; short-circuits here like gzip/decode.
+    if (!pos.empty() && (pos[0] == "install" || pos[0] == "uninstall"))
+    {
+        ftc::I18n& L = g_i18n;
+        const std::string gOk = g_theme.green(g_term.glyph("●", "*"));
+        const std::string gArr = g_theme.dim(g_term.glyph("→", "->"));
+        const std::string gWarn = g_theme.amber(g_term.glyph("!", "!"));
+        const std::string gErr = g_theme.red(g_term.glyph("✗", "x"));
+        const std::string arr = g_term.glyph("→", "->");
+
+        // Show the version banner first, then a dotted headline for the install/uninstall output below it.
+        if (!quiet)
+        {
+            printVersion();
+            g_tpl.section(pos[0] == "uninstall" ? L.tr("uninstall", "Deinstallation") : L.tr("install", "Installation"));
+        }
+
+        // Common success footer: a "--help" hint line + a green closing headline (skipped in --quiet).
+        auto finishBanner = [&](const std::string& footer) {
+            if (quiet) return;
+            std::printf("\n  %s\n",
+                        g_theme.dim(L.tr("Run `ftc --help` for all commands, or `ftc <pa> info` to query a device.",
+                                         "`ftc --help` zeigt alle Befehle, `ftc <pa> info` fragt ein Gerät ab."))
+                            .c_str());
+            g_tpl.section(footer);
+        };
+
+        if (pos[0] == "uninstall")
+        {
+            const ftc::InstallResult res = ftc::uninstall(installSystem, installDirArg);
+            if (res.ok)
+            {
+                std::printf("  %s %s %s %s\n", gOk.c_str(), g_theme.txt(L.tr("uninstalled", "deinstalliert")).c_str(),
+                            gArr.c_str(), g_theme.green(res.dest.string()).c_str());
+                finishBanner(L.tr("successfully uninstalled", "erfolgreich deinstalliert"));
+            }
+            else
+                std::fprintf(stderr, "  %s %s\n", gErr.c_str(),
+                             g_theme.txt(L.tr("uninstall failed", "Deinstallation fehlgeschlagen") +
+                                         (res.note.empty() ? std::string() : ": " + res.note))
+                                 .c_str());
+            socketCleanup();
+            return res.ok ? 0 : 1;
+        }
+
+        // install — version-aware plan first (byte-identical skip, upgrade/reinstall report, downgrade prompt)
+        ftc::InstallPlan plan = ftc::planInstall(installSystem, installDirArg, FTC_CLI_VERSION);
+        if (!plan.error.empty())
+        {
+            std::fprintf(stderr, "  %s %s\n", gErr.c_str(),
+                         g_theme.txt(std::string(L.tr("install failed", "Installation fehlgeschlagen")) + ": " + plan.error).c_str());
+            socketCleanup();
+            return 1;
+        }
+
+        if (plan.destExists && plan.identical) // exact same binary already installed -> no-op
+        {
+            std::printf("  %s %s %s %s\n", gOk.c_str(),
+                        g_theme.txt(std::string(L.tr("already up to date", "bereits aktuell")) + " (" + plan.selfVersion + ")").c_str(),
+                        gArr.c_str(), g_theme.green(plan.dest.string()).c_str());
+            finishBanner(L.tr("already up to date", "bereits aktuell"));
+            socketCleanup();
+            return 0;
+        }
+
+        if (plan.destExists && plan.oldKnown && plan.cmp < 0 && !installForce) // installed copy is newer
+        {
+            std::printf("  %s %s\n", gWarn.c_str(),
+                        g_theme.amber(std::string(L.tr("the installed version is NEWER", "die installierte Version ist NEUER")) +
+                                      " (" + plan.oldVersion + " > " + plan.selfVersion + ")")
+                            .c_str());
+            std::fflush(stdout); // keep the warning before the prompt/refusal even when piped
+            if (!(g_term.isTty() && !quiet))
+            {
+                std::fprintf(stderr, "  %s %s\n", gErr.c_str(),
+                             g_theme.txt(L.tr("refusing to downgrade in a non-interactive run (use --force)",
+                                              "Downgrade in nicht-interaktivem Lauf abgelehnt (nutze --force)"))
+                                 .c_str());
+                socketCleanup();
+                return 2;
+            }
+            std::printf("  %s ", g_theme.cyan(L.tr("really downgrade? [y/N]: ", "wirklich downgraden? [j/N]: ")).c_str());
+            std::fflush(stdout);
+            char line[16] = {0};
+            const bool yes = std::fgets(line, sizeof(line), stdin) &&
+                             (line[0] == 'y' || line[0] == 'Y' || line[0] == 'j' || line[0] == 'J');
+            if (!yes)
+            {
+                std::printf("  %s %s\n", gArr.c_str(), g_theme.dim(L.tr("cancelled", "abgebrochen")).c_str());
+                socketCleanup();
+                return 0;
+            }
+        }
+
+        const ftc::InstallResult res = ftc::commitInstall(plan);
+        if (!res.ok)
+        {
+            std::fprintf(stderr, "  %s %s\n", gErr.c_str(),
+                         g_theme.txt(L.tr("install failed", "Installation fehlgeschlagen") +
+                                     (res.note.empty() ? std::string() : ": " + res.note))
+                             .c_str());
+            socketCleanup();
+            return 1;
+        }
+
+        std::string msg;
+        if (plan.selfIsDest)
+            msg = std::string(L.tr("already installed here", "bereits hier installiert")) + " (" + plan.selfVersion + ")";
+        else if (!plan.destExists)
+            msg = std::string(L.tr("installed", "installiert")) + " " + plan.selfVersion;
+        else if (!plan.oldKnown)
+            msg = std::string(L.tr("replaced an existing ftc (previous version unknown), installed",
+                                   "vorhandene ftc ersetzt (alte Version unbekannt), installiert")) +
+                  " " + plan.selfVersion;
+        else if (plan.cmp > 0)
+            msg = std::string(L.tr("upgraded", "aktualisiert")) + " " + plan.oldVersion + " " + arr + " " + plan.selfVersion;
+        else if (plan.cmp < 0)
+            msg = std::string(L.tr("downgraded", "heruntergestuft")) + " " + plan.oldVersion + " " + arr + " " + plan.selfVersion;
+        else
+            msg = std::string(L.tr("reinstalled (same version, different build)",
+                                   "neu installiert (gleiche Version, anderer Build)")) +
+                  " " + plan.selfVersion;
+
+        std::printf("  %s %s %s %s\n", gOk.c_str(), g_theme.txt(msg).c_str(), gArr.c_str(),
+                    g_theme.green(res.dest.string()).c_str());
+        if (res.note.find("PATH") != std::string::npos)
+        {
+            std::printf("  %s %s\n", gWarn.c_str(), g_theme.dim(res.note).c_str());
+            std::printf("  %s %s\n", gArr.c_str(),
+                        g_theme.cyan(ftc::pathHint(ftc::installDir(installSystem, installDirArg))).c_str());
+        }
+        finishBanner(L.tr("successfully installed", "erfolgreich installiert"));
+        socketCleanup();
+        return 0;
     }
 
     // `ftc decode <hex…>` — offline decode of a raw TP1 LPDU (no tunnel): addresses · TPCI/APCI · OpenKNX FTC /
