@@ -7,6 +7,7 @@
  *              Licensed under GNU GPL v3.0
  */
 #include "OpenKNX.h"
+#include "FileTransferConfig.h"
 
 #ifdef OPENKNX_FTC
     #include "FileTransferClientConsole.h"

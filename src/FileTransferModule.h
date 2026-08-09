@@ -1,4 +1,5 @@
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
+#include "FileTransferConfig.h"
 #include "FastCRC.h"
 #include "OpenKNX.h"
 #include <Arduino.h>
