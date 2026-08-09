@@ -57,6 +57,7 @@ typedef int sock_t;
 // ftc CLI presentation layer (host-only, header-only, NO lib/knx dependency): terminal caps, i18n,
 // the phosphor theme registry, and the reusable Ui building blocks. main() stays thin — Ui draws.
 #include "cli/Config.h"
+#include "cli/Compare.h"
 #include "cli/ConsoleUi.h"
 #include "cli/I18n.h"
 #include "cli/Monitor.h"
@@ -642,6 +643,10 @@ static void renderUiDemoExtras(ftc::Tpl& t)
     // «keybar»
     t.section("«keybar» · keybar()  — function-key action bar (console)");
     t.keybar({{"F3", "View"}, {"F4", "Edit"}, {"F5", "Copy"}, {"F7", "Mkdir"}, {"F8", "Delete"}, {"F9", "Menu"}, {"F10", "Quit"}});
+
+    t.section("«counters» · counters()  — stat tiles (monitor compare / multi summary)");
+    t.counters({{"1284", "A", 'g'}, {"1281", "B", 'a'}, {"1279", "common", 'd'}, {"4", "only-A", 'g'}, {"1", "only-B", 'a'}, {"1", "mismatch", 'r'}});
+    t.keybar({{"v", "layout"}, {"d", "diff"}, {"l", "save.xml"}, {"p", "pause"}, {"r", "reconnect"}, {"x", "exit"}, {"?", "help"}});
 
     // «selrow» — the MC-style current-row highlight bar.
     t.section("«selrow» · selection highlight  — the current-row bar (Theme::sel)");
@@ -1304,6 +1309,10 @@ static void usage()
     U.cmdRow("info", L.tr("full interface report (DESCRIPTION + device-mgmt)", "kompletter Interface-Report (DESCRIPTION + Device-Mgmt)"));
     U.cmdRow("groupmon | gm", L.tr("live group monitor — decoded telegrams", "Live-Gruppenmonitor — dekodierte Telegramme"));
     U.cmdRow("busmon | bm", L.tr("live bus monitor — raw LPDU, ETS ACK colour", "Live-Busmonitor — Roh-LPDU, ETS-ACK-Farbe"));
+    U.cmdRow("gm|bm compare <ipB> [--grace ms] [--raw]", L.tr("A/B busmon fidelity diff (reassembles fragments; --raw = per-piece; --multi = two-stream)",
+                                                              "A/B-Busmon-Treuevergleich (setzt Fragmente zusammen; --raw = Einzelstücke; --multi = Zweistrom)"));
+    U.cmdRow("  compare readability", L.tr("keys f/c/m/t · flags --only-diff --collapse --no-markers --skew",
+                                          "Tasten f/c/m/t · Flags --only-diff --collapse --no-markers --skew"));
     U.cmdRow("gm|bm --frames N | --seconds N", L.tr("stop the monitor after N (scripted)", "Monitor nach N stoppen (skriptbar)"));
     U.cmdRow("progscan | ps [global|locate]", L.tr("find devices in programming mode + localise the line",
                                                    "Geräte im Programmiermodus finden + Linie lokalisieren"));
@@ -3473,6 +3482,13 @@ int main(int argc, char** argv)
     int monFrames = 0;            // --frames N: stop a monitor after N frames (0 = unlimited; for scripting/tests)
     int monSeconds = 0;           // --seconds N: stop a monitor after N seconds (0 = unlimited)
     bool secondsSet = false;      // was --seconds given? (ps: tells default 3 s apart from an explicit --seconds 0 = loop)
+    int cmpGrace = 750;           // --grace N: A/B compare match window in ms
+    bool cmpMulti = false;        // --multi: start the compare in diff-off "multi" mode
+    bool cmpRaw = false;          // --raw: start the compare with normalize OFF (raw per-piece frames)
+    bool cmpOnlyDiff = false;     // --only-diff: compare view starts filtered to divergences only
+    bool cmpCollapse = false;     // --collapse: compare view starts collapsing consecutive identical frames
+    bool cmpMarkers = true;       // --no-markers: start with per-frame markers off (default on)
+    bool cmpSkew = false;         // --skew: compare view starts showing the A/B time-skew
     std::vector<std::string> pos; // positional tokens -> the `ftc ...` command tail
 
     for (int i = 1; i < argc; ++i)
@@ -3551,6 +3567,21 @@ int main(int argc, char** argv)
             monSeconds = std::atoi(argv[++i]);
             secondsSet = true;
         }
+        else if (a == "--grace")
+            // only consume the next token if it's a number, so `--grace --multi` keeps the default (no flag-eating)
+            if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) cmpGrace = std::atoi(argv[++i]);
+        else if (a == "--multi")
+            cmpMulti = true; // start the compare in diff-off "multi" mode
+        else if (a == "--raw")
+            cmpRaw = true; // start the compare with normalize OFF (raw per-piece frames)
+        else if (a == "--only-diff")
+            cmpOnlyDiff = true; // compare: start filtered to divergences only
+        else if (a == "--collapse")
+            cmpCollapse = true; // compare: start collapsing consecutive identical frames
+        else if (a == "--no-markers")
+            cmpMarkers = false; // compare: start with per-frame markers off
+        else if (a == "--skew")
+            cmpSkew = true; // compare: start showing the A/B time-skew
         else if (a == "--lang" && i + 1 < argc)
             ++i; // consumed here; already applied in the pre-scan above
         else if (a == "--theme" && i + 1 < argc)
@@ -3796,7 +3827,31 @@ int main(int argc, char** argv)
     // `ftc --ip <ip> groupmon|gm | busmon|bm` (no PA) — live monitors over a self-owned tunnel (own KNX layer).
     // -q gives plain tab-separated lines; -V adds raw hex; --frames/--seconds cap it for scripted runs; Ctrl+C stops.
     const bool isBus = pos[0] == "busmon" || pos[0] == "bm";
-    if (pos.size() == 1 && (isBus || pos[0] == "groupmon" || pos[0] == "gm"))
+    const bool isMon = isBus || pos[0] == "groupmon" || pos[0] == "gm";
+
+    // `ftc -i <ipA> gm|bm compare <ipB> [--grace ms] [--multi]` — live A/B fidelity diff of two monitors on the
+    // same TP bus (busmon or groupmon). Diff ON = compare (divergence optics + result); diff OFF (--multi / key
+    // 'd') = a plain two-stream viewer for two interfaces on different lines. Keys: v layout · d diff · l save · …
+    if (isMon && pos.size() == 3 && pos[1] == "compare")
+    {
+        ftc::I18n& L = g_i18n;
+        const std::string ipB = pos[2];
+        if (ipB.empty() || ipB == ip)
+        {
+            std::fprintf(stderr, "%s\n", L.tr("compare: need a SECOND interface IP different from -i",
+                                              "compare: braucht eine ZWEITE Interface-IP, verschieden von -i"));
+            socketCleanup();
+            return 2;
+        }
+        ftc::Compare cmp(g_term, g_theme, g_tpl, g_i18n);
+        const int rc = cmp.run(isBus ? ftc::Monitor::Mode::Bus : ftc::Monitor::Mode::Group, ip, port, ipB, port,
+                               quiet, verbose, monFrames, monSeconds, cmpGrace, !cmpMulti, !cmpRaw,
+                               cmpOnlyDiff, cmpCollapse, cmpMarkers, cmpSkew, &g_abort);
+        socketCleanup();
+        return rc;
+    }
+
+    if (pos.size() == 1 && isMon)
     {
         ftc::Monitor mon(g_term, g_theme, g_tpl, g_i18n);
         mon.target(ip, port);

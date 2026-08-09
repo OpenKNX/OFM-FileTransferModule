@@ -630,6 +630,28 @@ class Tpl
         std::printf("%s\n", line.c_str());
     }
 
+    /** @brief One stat tile: a value in its hue over a dimmed caption. color 'd' = dim value (neutral). */
+    struct Count
+    {
+        std::string value;
+        std::string caption;
+        char color = 'g';
+    };
+
+    /** @brief A compact row of stat tiles `1284 A-seen   1281 B-seen   …` — value bold+hued, caption dim. */
+    void counters(std::initializer_list<Count> cells) const
+    {
+        std::string line = "  ";
+        bool first = true;
+        for (const auto& c : cells)
+        {
+            if (!first) line += "     ";
+            first = false;
+            line += (c.color == 'd' ? _c.dim(c.value) : _c.bold(paint(c.color, c.value))) + " " + _c.dim(c.caption);
+        }
+        std::printf("%s\n", line.c_str());
+    }
+
     /**
      * @brief A breadcrumb `sd › logs › 2026` — the last part highlighted (current), the rest dimmed.
      */

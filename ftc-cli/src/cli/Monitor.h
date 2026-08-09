@@ -13,13 +13,19 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <functional>
+#include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "I18n.h"
+#include "Keys.h"
 #include "Templates.h"
 #include "Term.h"
 #include "Theme.h"
@@ -30,6 +36,38 @@
 
 namespace ftc
 {
+
+/**
+ * @brief One decoded monitor frame, handed to a sink / capture buffer (compare + XML export use it).
+ * @details Presentation-neutral: @c body is the PLAIN decoded meaning ("src → dst  service value") so a
+ *          consumer can recolour it whole; @c raw is the busmon LPDU hex (the fidelity key) or, for a group
+ *          telegram, the src+dst+TPDU hex; @c key is the diff key (== raw). Bus telegrams carry a resolved
+ *          ACK/NAK (@c hasAck / @c acked); group telegrams do not.
+ */
+struct MonFrame
+{
+    bool bus = false;    ///< true = busmon LPDU · false = group / point-to-point
+    bool ext = false;    ///< bus: extended frame format (else standard)
+    bool group = false;  ///< destination is a group address
+    uint64_t ms = 0;     ///< capture time (monotonic ms)
+    std::string time;    ///< wall-clock HH:MM:SS.mmm
+    uint16_t src = 0;    ///< source individual address (packed)
+    uint16_t dst = 0;    ///< destination (packed individual or group)
+    std::string body;    ///< plain decoded line (no ANSI): "src → dst  service value"
+    std::string raw;     ///< bus: raw LPDU hex · group: src+dst+TPDU hex
+    std::string key;     ///< diff/match key (== raw)
+    bool hasAck = false; ///< bus telegram with a resolved acknowledge decision
+    bool acked = false;  ///< ACK (true) vs NAK / not-acknowledged (false)
+    // busmon split-integrity signals from the cEMI 0x03 status add-info (compare-path metadata diff + gate):
+    bool stat = false;   ///< a 0x03 status add-info was present on this L_Busmon.ind (else metadata unknown)
+    bool lost = false;   ///< status bit3: RX overflow / lost frame(s) before this one
+    bool ferr = false;   ///< status bit7: frame (FCS) error on the bus
+    bool berr = false;   ///< status bit6: bit error
+    bool perr = false;   ///< status bit5: parity error
+    uint8_t seq = 0;     ///< status bits2-0: busmon indication sequence number (mod 8)
+    uint8_t ackKind = 0; ///< resolved L2 acknowledge: 0 none · 1 ACK(0xCC) · 2 NAK(0x0C) · 3 BUSY(0xC0)
+    uint8_t reasm = 0;   ///< compare display marker: pieces a normalizer joined (0/1 = native, >1 = reassembled)
+};
 
 /**
  * @brief Live group / bus monitor over a self-owned KNXnet/IP tunnel.
@@ -86,9 +124,23 @@ class Monitor
                               "grün = NICHT quittiert · grau = quittiert · alle Bytes umbrochen (nie gekürzt)"));
         }
 
+        // Interactive hot-keys (TTY only, never under -q / a pipe -> the scripted output stays byte-identical).
+        // Keys enters raw mode in its ctor, so construct it ONLY when interactive (never touch the terminal under -q).
+        const bool interactive = _t.isTty() && !_quiet;
+        std::unique_ptr<Keys> keys;
+        if (interactive)
+        {
+            keys.reset(new Keys());
+            _capture = true; // buffer the run so 'l' can export it; bounded (MON_CAP_MAX)
+            _p.keybar({{"l", _i.tr("save XML", "XML sichern")}, {"p", _i.tr("pause", "Pause")},
+                       {"r", _i.tr("reconnect", "neu verbinden")}, {"?", _i.tr("help", "Hilfe")},
+                       {"x", _i.tr("quit", "beenden")}});
+        }
+
         const uint64_t startMs = detail::nowMs();
         int rc = 0;
         bool aborted = false;
+        bool userStop = false;
         for (;;)
         {
             if (abort && *abort)
@@ -96,6 +148,8 @@ class Monitor
                 aborted = true;
                 break;
             } // Ctrl+C (SIGINT/SIGTERM -> g_abort)
+            if (interactive && handleKeys(*keys, mode, abort, startMs, maxSeconds, userStop)) break;
+            if (userStop) break;
             if (maxSeconds > 0 && (int)((detail::nowMs() - startMs) / 1000) >= maxSeconds) break;
             if (maxFrames > 0 && _frames >= maxFrames) break;
             if (!pump(mode)) // tunnel gone (silent death or server DISCONNECT) -> reconnect, never hang
@@ -123,8 +177,57 @@ class Monitor
             _p.status(Tpl::Stat::Warn, _i.tr("Ctrl+C — disconnecting monitor cleanly", "Ctrl+C — Monitor wird sauber abgemeldet"), {});
         else if (aborted)
             std::fprintf(stderr, "\n[abort] Ctrl+C -- disconnecting monitor cleanly...\n");
+        else if (userStop && !_quiet)
+            _p.status(Tpl::Stat::Ok, _i.tr("monitor stopped", "Monitor beendet"), {});
         close(); // sends DISCONNECT_REQUEST + closes the socket (see close())
         return aborted ? 130 : rc;
+    }
+
+    /**
+     * @brief Poll + act on the interactive hot-keys (l/p/r/?/x). Returns true only when a forced reconnect
+     *        gave up (the caller must break); sets @p userStop on x/q.
+     */
+    bool handleKeys(Keys& keys, Mode mode, const volatile std::sig_atomic_t* abort, uint64_t startMs,
+                    int maxSeconds, bool& userStop)
+    {
+        for (char k; (k = keys.poll()) != 0;)
+        {
+            switch (k)
+            {
+                case 'x':
+                case 'q':
+                    userStop = true;
+                    return false;
+                case 'p':
+                    _paused = !_paused;
+                    _p.status(_paused ? Tpl::Stat::Warn : Tpl::Stat::Ok,
+                              _paused ? _i.tr("paused — capture continues", "pausiert — Aufzeichnung läuft weiter")
+                                      : _i.tr("resumed", "fortgesetzt"));
+                    break;
+                case 'r':
+                    _p.status(Tpl::Stat::Warn, _i.tr("reconnecting…", "neu verbinden…"));
+                    close();
+                    if (!reconnect(mode, abort, startMs, maxSeconds)) return true;
+                    break;
+                case 'l':
+                {
+                    const std::string path = saveXml(mode);
+                    if (path.empty())
+                        _p.status(Tpl::Stat::Err, _i.tr("could not write XML", "XML nicht schreibbar"));
+                    else
+                        _p.status(Tpl::Stat::Ok, _i.tr("saved run", "Lauf gesichert"),
+                                  {path, std::to_string(_cap.size()) + _i.tr(" frames", " Frames")});
+                    break;
+                }
+                case '?':
+                    _p.note(_i.tr("l save run to XML · p pause/resume · r reconnect · x/q quit · Ctrl+C quit",
+                                  "l Lauf als XML · p Pause/weiter · r neu verbinden · x/q beenden · Ctrl+C beenden"));
+                    break;
+                default:
+                    break;
+            }
+        }
+        return false;
     }
 
   private:
@@ -165,6 +268,21 @@ class Monitor
     bool _quiet = false, _verbose = false;
     int _frames = 0;
 
+    // Cooperative (non-blocking) connect state: sendConnect() arms these, pollConnect() drains without blocking.
+    bool _connecting = false;
+    Mode _connMode = Mode::Group;
+    uint64_t _connDeadline = 0;
+
+    // Optional consumer wiring (compare view + interactive save). When a sink is set the decoded frames go to it
+    // and Monitor prints NOTHING (compare renders centrally). Capture (independent of the sink) buffers frames so
+    // an interactive run can export the whole run to XML on 'l'. Paused freezes only the SCROLL (capture keeps up).
+    static constexpr size_t MON_CAP_MAX = 100000; ///< bounded run-capture (drops + logs once when full)
+    std::function<void(const MonFrame&)> _sink;
+    bool _capture = false;
+    bool _capWarned = false;
+    bool _paused = false;
+    std::vector<MonFrame> _cap;
+
     // Deferred busmon telegram (for the ETS ACK colour): the L2 ACK is a SEPARATE single-octet frame that
     // follows the telegram, so we hold the last telegram one beat and colour it once we know whether an ACK came.
     struct Pending
@@ -172,8 +290,16 @@ class Monitor
         bool active = false;
         uint64_t ms = 0;
         std::string tag, dec, raw, time;
+        uint16_t src = 0, dst = 0;
+        bool ext = false, group = false;
+        std::string bodyPlain, key;
+        bool stat = false, lost = false, ferr = false, berr = false, perr = false;
+        uint8_t seq = 0;
     };
     Pending _pend;
+    // scratch for the current L_Busmon.ind's 0x03 status add-info (parsed in decodeBusmon, copied into _pend)
+    bool _abStat = false, _abLost = false, _abFerr = false, _abBerr = false, _abPerr = false;
+    uint8_t _abSeq = 0;
 
     /**********************************************************************
      ***************************** LIFECYCLE *****************************
@@ -185,7 +311,25 @@ class Monitor
      */
     bool open(Mode mode, std::string& err)
     {
+        // Blocking wrapper (standalone Monitor::run): fire the request, then poll in 200 ms slices to the deadline.
+        if (!sendConnect(mode, err)) return false;
+        for (;;)
+        {
+            const int r = pollConnect(err, 200);
+            if (r == 1) return true;
+            if (r == -1) return false;
+        }
+    }
+
+    /**
+     * @brief Open the socket + send CONNECT_REQUEST, then RETURN (no wait). Arms the connect deadline.
+     * @details The cooperative half of open(): callers poll pollConnect() across their own loop so nothing
+     *          blocks. Layer 0x80 = BUSMONITOR, 0x02 = LINK_LAYER; route-back HPAI 0.0.0.0:localport.
+     */
+    bool sendConnect(Mode mode, std::string& err)
+    {
         using namespace detail;
+        _connecting = false;
         _sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (!sockValid(_sock))
         {
@@ -240,21 +384,31 @@ class Monitor
             close();
             return false;
         }
+        _connMode = mode;
+        _connDeadline = detail::nowMs() + 3000;
+        _connecting = true;
+        return true;
+    }
 
-        // Bounded wait for CONNECT_RESPONSE (setup-only blocking; the run loop never blocks).
+    /**
+     * @brief One non-blocking poll for the CONNECT_RESPONSE (wait at most @p waitMs). 1 = connected · 0 = still
+     *        waiting · -1 = refused / timed out (socket closed). Datagrams are buffered, so waitMs 0 is fine.
+     */
+    int pollConnect(std::string& err, int waitMs)
+    {
+        using namespace detail;
+        if (!_connecting) return -1;
         uint8_t buf[512];
-        const uint64_t deadline = nowMs() + 3000;
-        while ((int64_t)(deadline - nowMs()) > 0)
+        const int n = recvWait(buf, sizeof(buf), waitMs);
+        if (n >= 8 && ((buf[2] << 8) | buf[3]) == ST_CONNECT_RES)
         {
-            int n = recvWait(buf, sizeof(buf), 200);
-            if (n < 8) continue;
-            if (((buf[2] << 8) | buf[3]) != ST_CONNECT_RES) continue;
             const uint8_t status = buf[7];
             if (status != 0x00)
             {
-                err = connStatus(status, mode);
+                err = connStatus(status, _connMode);
+                _connecting = false;
                 close();
-                return false;
+                return -1;
             }
             _channelId = buf[6];
             // CRD at header(6)+ch(1)+status(1)+HPAI(8) = 16: [len][type][iaHi][iaLo]
@@ -262,11 +416,17 @@ class Monitor
             _lastKeepalive = _lastAlive = nowMs();
             _rxSeqValid = false; // fresh tunnel: no prior RX seq to dedup against
             _pend.active = false;
-            return true;
+            _connecting = false;
+            return 1;
         }
-        err = _i.tr("no CONNECT_RESPONSE (timeout)", "keine CONNECT_RESPONSE (Timeout)");
-        close();
-        return false;
+        if ((int64_t)(_connDeadline - nowMs()) <= 0)
+        {
+            err = _i.tr("no CONNECT_RESPONSE (timeout)", "keine CONNECT_RESPONSE (Timeout)");
+            _connecting = false;
+            close();
+            return -1;
+        }
+        return 0; // a non-CONNECT_RESPONSE datagram or nothing yet -> keep waiting
     }
 
     /**
@@ -421,6 +581,49 @@ class Monitor
      ******************* GROUP MONITOR (L_Data.ind) ********************
      **********************************************************************/
     /**
+     * @brief Hand a decoded frame to the sink (if any) and/or the capture buffer.
+     * @return true when a sink consumed it — the caller must then NOT print (compare renders centrally).
+     */
+    bool pushFrame(const MonFrame& f)
+    {
+        if (_sink)
+        {
+            _sink(f);
+            return true;
+        }
+        if (_capture)
+        {
+            if (_cap.size() >= MON_CAP_MAX)
+            {
+                if (!_capWarned)
+                {
+                    _capWarned = true;
+                    if (!_quiet)
+                        _p.status(Tpl::Stat::Warn, _i.tr("capture buffer full — not recording more",
+                                                         "Aufzeichnungspuffer voll — keine weiteren Frames"),
+                                  {std::to_string(MON_CAP_MAX)});
+                }
+            }
+            else
+                _cap.push_back(f);
+        }
+        return false;
+    }
+
+    /** @brief The group/p2p diff key + XML "raw": src(2) + dst(2) + TPDU hex. */
+    static std::string keyHex(uint16_t src, uint16_t dst, const uint8_t* tpdu, int tpduLen)
+    {
+        uint8_t h[4] = {(uint8_t)(src >> 8), (uint8_t)src, (uint8_t)(dst >> 8), (uint8_t)dst};
+        std::string s = hex(h, 4);
+        if (tpdu && tpduLen > 0)
+        {
+            s += ' ';
+            s += hex(tpdu, tpduLen);
+        }
+        return s;
+    }
+
+    /**
      * @brief Decode a group L_Data.ind body `[ctrl1][ctrl2][src2][dst2][len][tpdu...]` to one monitor line.
      */
     void decodeGroup(const uint8_t* d, int n)
@@ -458,7 +661,7 @@ class Monitor
                     val = hex(tpdu + 2, dataBytes); // longer value -> hex
             }
             if (_verbose) rawApdu = hex(tpdu, tpduLen);
-            emitGroup(s, src, dst, val, rawApdu);
+            emitGroup(s, src, dst, val, rawApdu, tpdu, tpduLen);
             _frames++;
             return;
         }
@@ -470,7 +673,7 @@ class Monitor
             const uint16_t apci = (uint16_t)(((tpdu[0] & 0x03) << 8) | tpdu[1]);
             const bool isFtc = !interpretFtc(apci, tpdu, tpduLen).empty();
             if (!isFtc && apciName(apci) == nullptr) return; // unrecognised P2P -> skip (no flood)
-            emitP2P(src, dst, interpret(src, dst, false, tpdu, tpduLen));
+            emitP2P(src, dst, interpret(src, dst, false, tpdu, tpduLen), tpdu, tpduLen);
             _frames++;
         }
     }
@@ -479,8 +682,21 @@ class Monitor
      * @brief Render a point-to-point (FTC / management) line in the group monitor.
      * @details `dec` already carries the coloured "SRC → DEST  service"; we prepend the row index + timestamp.
      */
-    void emitP2P(uint16_t src, uint16_t dst, const std::string& dec)
+    void emitP2P(uint16_t src, uint16_t dst, const std::string& dec, const uint8_t* tpdu = nullptr, int tpduLen = 0)
     {
+        if (_sink || _capture)
+        {
+            MonFrame f;
+            f.ms = detail::nowMs();
+            f.time = timeStr();
+            f.src = src;
+            f.dst = dst;
+            f.body = stripAnsi(dec);
+            f.raw = keyHex(src, dst, tpdu, tpduLen);
+            f.key = f.raw;
+            if (pushFrame(f)) return;
+        }
+        if (_paused) return;
         if (_quiet)
         {
             std::printf("P2P\t%s\t%s\t%s\n", Tpl::pa(src).c_str(), Tpl::pa(dst).c_str(), stripAnsi(dec).c_str());
@@ -506,8 +722,23 @@ class Monitor
     /**
      * @brief Render one decoded group telegram (or a plain tab-separated line under -q).
      */
-    void emitGroup(char s, uint16_t src, uint16_t dst, const std::string& val, const std::string& rawApdu)
+    void emitGroup(char s, uint16_t src, uint16_t dst, const std::string& val, const std::string& rawApdu,
+                   const uint8_t* tpdu = nullptr, int tpduLen = 0)
     {
+        if (_sink || _capture)
+        {
+            MonFrame f;
+            f.group = true;
+            f.ms = detail::nowMs();
+            f.time = timeStr();
+            f.src = src;
+            f.dst = dst;
+            f.body = stripAnsi(interpret(src, dst, true, tpdu, tpduLen));
+            f.raw = keyHex(src, dst, tpdu, tpduLen);
+            f.key = f.raw;
+            if (pushFrame(f)) return;
+        }
+        if (_paused) return;
         const std::string ga = gaStr(dst);
         if (_quiet)
         {
@@ -537,19 +768,44 @@ class Monitor
      */
     void decodeBusmon(const uint8_t* lpdu, int n, const uint8_t* addinfo, int ail)
     {
-        (void)addinfo;
-        (void)ail; // status AI (0x03) carries error/lost/seq only — no ACK bit (verified vs. device)
         if (n <= 0) return;
         _frames++;
+        // cEMI busmon status add-info (type 0x03): bit7 frame-error · bit3 lost · bits2-0 sequence (mod 8).
+        // Plumbed to the sink for the compare-path reassembly gate; never affects the plain gm/bm print path.
+        _abStat = false;
+        _abLost = false;
+        _abFerr = false;
+        _abBerr = false;
+        _abPerr = false;
+        _abSeq = 0;
+        for (int i = 0; addinfo && i + 2 <= ail;)
+        {
+            const uint8_t type = addinfo[i];
+            const uint8_t len = addinfo[i + 1];
+            if (i + 2 + len > ail) break;
+            if (type == 0x03 && len >= 1) // status octet: F B P x L s s s (bit7..0)
+            {
+                const uint8_t st = addinfo[i + 2];
+                _abStat = true;
+                _abFerr = (st & 0x80) != 0; // frame error
+                _abBerr = (st & 0x40) != 0; // bit error
+                _abPerr = (st & 0x20) != 0; // parity error
+                _abLost = (st & 0x08) != 0; // lost
+                _abSeq = (uint8_t)(st & 0x07);
+            }
+            i += 2 + len;
+        }
 
         // Single-octet L2 control acknowledge: 0xCC ACK · 0xC0 BUSY · 0x0C NAK. It follows a telegram, so it
         // resolves the pending telegram's ACK colour rather than printing as its own line.
         if (n == 1)
         {
             const uint8_t o = lpdu[0];
-            const bool ack = (o == 0xCC);
-            if (_pend.active) flushPending(ack);
-            else if (_verbose) // a stray ack with no telegram in hand — only surface it in verbose
+            const uint8_t kind = o == 0xCC ? 1 : o == 0x0C ? 2
+                                         : o == 0xC0       ? 3
+                                                           : 0; // ACK / NAK / BUSY / (other -> none)
+            if (_pend.active) flushPending(kind);
+            else if (_verbose && !_sink && !_paused) // a stray ack with no telegram in hand — only surface it in verbose
             {
                 const char* k = o == 0xCC ? "ACK" : o == 0xC0 ? "BUSY"
                                                 : o == 0x0C   ? "NAK"
@@ -562,7 +818,7 @@ class Monitor
         }
 
         // A new telegram arrived while one was pending -> the pending one had no ACK following -> flush green.
-        if (_pend.active) flushPending(false);
+        if (_pend.active) flushPending(0); // ackKind 0 = none observed
 
         // Parse control + addresses. Standard: ctrl bit7=1. Extended: ctrl bit7=0, extra CTRLE octet.
         const bool ext = (lpdu[0] & 0x80) == 0;
@@ -592,7 +848,24 @@ class Monitor
         }
 
         std::string dec = interpret(src, dst, group, tpdu, tpduLen);
-        _pend = {true, detail::nowMs(), ext ? _p.chip("EXT", 'o') : _p.chip("STD", 'c'), dec, hex(lpdu, n), timeStr()};
+        _pend.active = true;
+        _pend.ms = detail::nowMs();
+        _pend.tag = ext ? _p.chip("EXT", 'o') : _p.chip("STD", 'c');
+        _pend.dec = dec;
+        _pend.raw = hex(lpdu, n);
+        _pend.time = timeStr();
+        _pend.src = src;
+        _pend.dst = dst;
+        _pend.ext = ext;
+        _pend.group = group;
+        _pend.bodyPlain = stripAnsi(dec);
+        _pend.key = _pend.raw; // busmon diff key = the raw LPDU (the following ACK octet is a separate frame)
+        _pend.stat = _abStat;
+        _pend.lost = _abLost;
+        _pend.ferr = _abFerr;
+        _pend.berr = _abBerr;
+        _pend.perr = _abPerr;
+        _pend.seq = _abSeq;
     }
 
     /**********************************************************************
@@ -904,10 +1177,36 @@ class Monitor
     /**
      * @brief Emit the pending busmon telegram, coloured by the ETS ACK rule (green = NOT acknowledged).
      */
-    void flushPending(bool acked = false)
+    void flushPending(uint8_t ackKind = 0)
     {
         if (!_pend.active) return;
         _pend.active = false;
+        const bool acked = (ackKind == 1); // ETS colour rule: only a real ACK (0xCC) is "acknowledged"
+        if (_sink || _capture)
+        {
+            MonFrame f;
+            f.bus = true;
+            f.ext = _pend.ext;
+            f.group = _pend.group;
+            f.ms = _pend.ms;
+            f.time = _pend.time;
+            f.src = _pend.src;
+            f.dst = _pend.dst;
+            f.body = _pend.bodyPlain;
+            f.raw = _pend.raw;
+            f.key = _pend.key;
+            f.hasAck = true;
+            f.acked = acked;
+            f.ackKind = ackKind;
+            f.stat = _pend.stat;
+            f.lost = _pend.lost;
+            f.ferr = _pend.ferr;
+            f.berr = _pend.berr;
+            f.perr = _pend.perr;
+            f.seq = _pend.seq;
+            if (pushFrame(f)) return;
+        }
+        if (_paused) return;
         if (_quiet)
         {
             std::printf("%s\t%s\t%s\n", _pend.raw.c_str(), stripAnsi(_pend.dec).c_str(), acked ? "ACK" : "NAK");
@@ -1078,6 +1377,209 @@ class Monitor
         _port = port;
     }
 
+    /*********************************************************************
+     ******************* DRIVE-IT-YOURSELF (compare) *********************
+     ********************************************************************/
+    /** @brief Route decoded frames to @p s instead of printing them (compare renders centrally). */
+    void sink(std::function<void(const MonFrame&)> s) { _sink = std::move(s); }
+    /** @brief Buffer decoded frames for a whole-run XML export ('l'); off by default (zero overhead). */
+    void setCapture(bool on) { _capture = on; }
+    /** @brief Freeze the scrolling display; capture + protocol keep running. */
+    void setPaused(bool p) { _paused = p; }
+    bool paused() const { return _paused; }
+    void setQuietVerbose(bool q, bool v) { _quiet = q; _verbose = v; }
+    const std::vector<MonFrame>& captured() const { return _cap; }
+    void clearCapture() { _cap.clear(); _capWarned = false; }
+    uint16_t assignedPA() const { return _assignedPA; }
+    const std::string& ip() const { return _ip; }
+    uint8_t channel() const { return _channelId; }
+
+    /** @brief Open the tunnel (mode's KNX layer). Public wrapper over the setup path. */
+    bool openTunnel(Mode mode, std::string& err) { return open(mode, err); }
+    /** @brief Graceful DISCONNECT + socket close. Idempotent. */
+    void closeTunnel() { close(); }
+    /** @brief One bounded non-blocking pass (drain + decode + keep-alive). false = tunnel died. */
+    bool tick(Mode mode) { return pump(mode); }
+    /** @brief Emit any still-pending (un-acked) busmon telegram (call at teardown). */
+    void flushBus() { flushPending(); }
+    /** @brief Force a reconnect (compare 'r'): drop + re-open. */
+    bool reopen(Mode mode, std::string& err) { close(); return open(mode, err); }
+
+    /** @brief Cooperative reconnect: drop + send CONNECT_REQUEST, then RETURN. Poll pollReopen() to finish. */
+    bool beginReopen(Mode mode, std::string& err)
+    {
+        close();
+        return sendConnect(mode, err);
+    }
+    /** @brief One non-blocking step of a cooperative reconnect. 1 = up · 0 = still connecting · -1 = failed. */
+    int pollReopen(std::string& err) { return pollConnect(err, 0); }
+    /** @brief Whether a cooperative connect is currently in flight. */
+    bool connecting() const { return _connecting; }
+
+    /*********************************************************************
+     ************************** XML EXPORT HELPERS ***********************
+     ********************************************************************/
+    /** @brief XML-escape the five predefined entities. */
+    static std::string xmlEsc(const std::string& s)
+    {
+        std::string o;
+        o.reserve(s.size());
+        for (char ch : s)
+        {
+            switch (ch)
+            {
+                case '&': o += "&amp;"; break;
+                case '<': o += "&lt;"; break;
+                case '>': o += "&gt;"; break;
+                case '"': o += "&quot;"; break;
+                case '\'': o += "&apos;"; break;
+                default: o += ch;
+            }
+        }
+        return o;
+    }
+
+    /**
+     * @brief One `<telegram .../>` element (ETS-aligned attributes) for @p f; @p extra is appended verbatim
+     *        (compare annotations: seenBy / diff / countA / countB).
+     */
+    static std::string telegramXml(const MonFrame& f, const std::string& extra = "")
+    {
+        const std::string dstStr = f.group ? gaStr(f.dst) : Tpl::pa(f.dst);
+        std::string s = "  <telegram";
+        s += " time=\"" + xmlEsc(f.time) + "\"";
+        s += " frameFormat=\"" + std::string(f.ext ? "EXT" : "STD") + "\"";
+        s += " source=\"" + Tpl::pa(f.src) + "\"";
+        s += " destination=\"" + dstStr + "\"";
+        s += " service=\"" + xmlEsc(f.body) + "\"";
+        s += " raw=\"" + xmlEsc(f.raw) + "\"";
+        if (f.hasAck) s += " ack=\"" + std::string(f.acked ? "ACK" : "NAK") + "\"";
+        s += extra;
+        s += "/>";
+        return s;
+    }
+
+    /**
+     * @brief User export directory for saved captures. Predictable + created on demand, so a save never lands
+     *        next to the installed binary or in an arbitrary CWD. Linux/mac: $XDG_DATA_HOME/ftc or
+     *        ~/.local/share/ftc; Windows: %LOCALAPPDATA%\ftc. Falls back to "." only if the home var is unset.
+     */
+    static std::string exportDir()
+    {
+        namespace fs = std::filesystem;
+        fs::path base;
+#ifdef _WIN32
+        if (const char* la = std::getenv("LOCALAPPDATA")) base = la;
+        else if (const char* up = std::getenv("USERPROFILE")) base = up;
+#else
+        if (const char* xdg = std::getenv("XDG_DATA_HOME")) base = xdg;
+        else if (const char* home = std::getenv("HOME")) base = fs::path(home) / ".local" / "share";
+#endif
+        if (base.empty()) return ".";
+        fs::path dir = base / "ftc";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        return ec ? std::string(".") : dir.string();
+    }
+
+    /**
+     * @brief Save the captured run to an ETS-telegram-shaped XML. Returns the full path, or "" on error.
+     */
+    std::string saveXml(Mode mode)
+    {
+        const std::string mstr = mode == Mode::Bus ? "bm" : "gm";
+        const std::string fname = "ftc-" + mstr + "-" + safeIp(_ip) + "_" + stamp() + ".xml";
+        const std::string path = (std::filesystem::path(exportDir()) / fname).string();
+        std::FILE* fp = std::fopen(path.c_str(), "wb");
+        if (!fp) return "";
+        std::fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        std::fprintf(fp, "<monitor mode=\"%s\" interface=\"%s\" pa=\"%s\" frames=\"%zu\">\n",
+                     mstr.c_str(), xmlEsc(_ip).c_str(), Tpl::pa(_assignedPA).c_str(), _cap.size());
+        for (const auto& f : _cap)
+            std::fprintf(fp, "%s\n", telegramXml(f).c_str());
+        std::fprintf(fp, "</monitor>\n");
+        std::fclose(fp);
+        return path;
+    }
+
+    /** @brief A filesystem-safe form of an IP (dots -> underscores) for a filename. */
+    static std::string safeIp(const std::string& ip)
+    {
+        std::string o = ip;
+        for (char& ch : o)
+            if (ch == '.' || ch == ':') ch = '_';
+        return o;
+    }
+
+    /** @brief The local wall-clock HH:MM:SS.mmm (public wrapper for consumers building their own frames). */
+    static std::string wallClock() { return timeStr(); }
+
+    /**
+     * @brief Decode a WHOLE raw TP1 LPDU (hex-free byte buffer, incl. FCS) into a MonFrame — no tunnel state.
+     * @details The stateless half of decodeBusmon(): parses addresses + TPDU and runs the same interpreter, so a
+     *          reassembled (or natively whole) telegram decodes cleanly. ACK fields are left to the caller. Returns
+     *          false if the buffer is too short to be a telegram.
+     */
+    bool decodeWhole(const uint8_t* lpdu, int n, MonFrame& out)
+    {
+        if (n < 8) return false;
+        const bool ext = (lpdu[0] & 0x80) == 0;
+        uint16_t src = 0, dst = 0;
+        bool group = false;
+        const uint8_t* tpdu = nullptr;
+        int tpduLen = 0;
+        if (!ext)
+        {
+            src = (uint16_t)((lpdu[1] << 8) | lpdu[2]);
+            dst = (uint16_t)((lpdu[3] << 8) | lpdu[4]);
+            group = (lpdu[5] & 0x80) != 0;
+            const int L = lpdu[5] & 0x0F;
+            tpdu = lpdu + 6;
+            tpduLen = L + 1;
+            if (6 + tpduLen > n - 1) tpduLen = 0;
+        }
+        else
+        {
+            if (n < 9) return false;
+            group = (lpdu[1] & 0x80) != 0;
+            src = (uint16_t)((lpdu[2] << 8) | lpdu[3]);
+            dst = (uint16_t)((lpdu[4] << 8) | lpdu[5]);
+            const int L = lpdu[6];
+            tpdu = lpdu + 7;
+            tpduLen = L + 1;
+            if (7 + tpduLen > n - 1) tpduLen = 0;
+        }
+        out.bus = true;
+        out.ext = ext;
+        out.group = group;
+        out.src = src;
+        out.dst = dst;
+        out.ms = detail::nowMs();
+        out.time = timeStr();
+        out.body = stripAnsi(interpret(src, dst, group, tpdu, tpduLen));
+        out.raw = hex(lpdu, n);
+        out.key = out.raw;
+        out.hasAck = false;
+        out.acked = false;
+        return true;
+    }
+
+    /** @brief A `YYYYMMDD-HHMMSS` timestamp for export filenames. */
+    static std::string stamp()
+    {
+        std::time_t tt = std::time(nullptr);
+        std::tm tmv{};
+#ifdef _WIN32
+        localtime_s(&tmv, &tt);
+#else
+        localtime_r(&tt, &tmv);
+#endif
+        char b[24];
+        std::snprintf(b, sizeof(b), "%04d%02d%02d-%02d%02d%02d", tmv.tm_year + 1900, tmv.tm_mon + 1,
+                      tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        return b;
+    }
+
     /**
      * @brief Offline decode of a raw TP1 LPDU (hex string, incl. FCS) — no tunnel.
      * @details Runs the exact busmon interpreter (addresses · TPCI/APCI · OpenKNX FTC/console) and prints one
@@ -1119,7 +1621,7 @@ class Monitor
             return 1;
         }
         decodeBusmon(lpdu, n, nullptr, 0);
-        flushPending(false); // offline: no following L2 ACK -> render as not-acknowledged (green)
+        flushPending(0); // offline: no following L2 ACK -> render as not-acknowledged (green)
         return 0;
     }
 
