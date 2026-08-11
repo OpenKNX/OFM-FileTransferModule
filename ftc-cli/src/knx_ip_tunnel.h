@@ -59,6 +59,14 @@ class KnxIpTunnel
      */
     int lastConnectStatus() const { return _lastConnectStatus; }
 
+    /**
+     * @brief KNX priority stamped into the CTRL octet of every FTC data frame we send (2-bit form).
+     * @details system=0 · normal=1 · urgent=2 · low=3 (default). `--prio` sets it; transport control frames
+     *          (T_Ack/T_Connect) keep their own fixed priority.
+     */
+    void setTxPriority(uint8_t p2) { _txPriority = (uint8_t)(p2 & 0x03); }
+    uint8_t txPriority() const { return _txPriority; }
+
     // --- non-blocking pump -----------------------------------------------------------------------
     /**
      * @brief One bounded pass: read all available UDP, ACK TUNNELING_REQUESTs, dispatch each L_Data.ind,
@@ -115,6 +123,7 @@ class KnxIpTunnel
     uint32_t _lastReconnectMs = 0;   // backoff clock for maybeReconnect()
     uint8_t _reconnectAttempts = 0;  // consecutive failed re-dials -> give up past RECONNECT_MAX (transfer then fails cleanly)
     uint16_t _assignedPA = 0;
+    uint8_t _txPriority = 0x03;   // FTC data-frame KNX priority (2-bit): 3 = LowPriority (polite default)
     int _lastConnectStatus = -1; // see lastConnectStatus(); -1 until a CONNECT_RESPONSE arrives
     FtcResponseCb _responseCb = nullptr;
     FtcDdCb _ddCb = nullptr;

@@ -50,6 +50,8 @@ class ConsoleUi
 
     ConsoleUi(Term& term, Theme& theme, I18n& i18n) : _t(term), _c(theme), _i(i18n) {}
 
+    /** @brief Set the elevated-priority header indicator (pre-coloured `PRIO: <LEVEL> ⚠…`; empty = low/default). */
+    void setPrio(const std::string& tag) { _prioTag = tag; }
     /**********************************************************************
      ************************** CONFIGURATION *****************************
      **********************************************************************/
@@ -591,6 +593,7 @@ class ConsoleUi
                                           " " + c.dim(_t.glyph("→", "->")) + " " + c.chip(_target, 'c'); // PAs as UI-template chips
         std::string l1 = std::string(c.dim(_t.glyph("┌", "+"))) + " " + c.bold(c.green("ftc console").c_str()) +
                          (_verbose ? "  " + c.chip("verbose", 'a') : std::string()) + mid +
+                         (_prioTag.empty() ? std::string() : "   " + _prioTag) + // elevated FTC priority — never hidden
                          "   " + c.mut("·") + "   " + c.cyan(_t.glyph("◷", "t")) + " " + c.txt(dur) +
                          "   " + sparkStr(_verbose ? 24 : 14); // live RX-rate sparkline (soft dots; wider in verbose)
         // Line 2: RX · TX · (verbose: peak/avg + Σ total) · DROP/TRUNC · hints · log. Connector ├ in verbose.
@@ -838,6 +841,7 @@ class ConsoleUi
     int _slotsFree = -1, _slotsTotal = 0; // free/total tunnel slots (-1 = unknown/not probed)
     int _jobCount = 0;                    // active /every auto-commands -> ⟳ badge in the status bar
     bool _wsMode = false;                 // WebSocket console (ftc -i <ip> con): no tunnel/APDU/drain
+    std::string _prioTag;                 // pre-coloured "PRIO: <LEVEL> ⚠…" header indicator (empty = low default)
     std::string _wsUrl;                   // ws://<ip>/console (shown in the verbose line / stats)
     uint32_t _prevRx = 0;
     uint64_t _prevRateMs = 0;

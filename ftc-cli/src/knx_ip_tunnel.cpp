@@ -183,9 +183,9 @@ static constexpr uint8_t TPCI_DISCONNECT = 0x81;
 static constexpr uint8_t TPCI_ACK = 0xC2;       // | (seq<<2)
 static constexpr uint8_t TPCI_DATA_CONN = 0x40; // | (seq<<2)
 
-// cEMI Ctrl priority (bits3-2)
+// cEMI Ctrl priority (bits3-2). Transport control frames use SYSTEM; FTC data frames use the tunnel's
+// settable _txPriority (LowPriority = 3 by default, raised by the host --prio switch).
 static constexpr uint8_t PRIO_SYSTEM = 0x00;
-static constexpr uint8_t PRIO_LOW = 0x03;
 
 static constexpr uint32_t HEARTBEAT_MS = 60000; // CONNECTIONSTATE_REQUEST cadence
 static constexpr uint32_t HEARTBEAT_TIMEOUT_MS = 15000; // no CONNECTIONSTATE_RESPONSE within this after a heartbeat -> the idle tunnel is dead
@@ -239,7 +239,7 @@ struct TunnelState
     // next. This is not just advisory -- real interfaces ENFORCE it (HW-verified: a second request sent before
     // the first is ACKed is silently dropped and never ACKed, which wedges the transfer). So there is at most
     // ONE unacked frame at any moment; a std::deque would only ever hold 0 or 1 entries, so we keep a single
-    // slot instead. `txInflightBusy` marks it occupied; `txInflight.body` keeps the whole frame (connection
+    // slot instead. `txInflightBusy` marks it busy; `txInflight.body` keeps the whole frame (connection
     // header + cEMI) so a lost/late ACK can be resent verbatim -- same seq, so the server dedups the frame it
     // already processed -- until the ACK arrives or the retry budget is spent, either of which frees the slot.
     struct TxInflight
@@ -399,7 +399,7 @@ void vfifoDrain()
  */
 void drainTxQueue()
 {
-    if (s.txInflightBusy) return; // slot occupied -> wait for its ACK (strict 1-outstanding)
+    if (s.txInflightBusy) return; // slot busy -> wait for its ACK (strict 1-outstanding)
 
     // Drop any oversize frame that cannot fit the send buffer (a guard; FTC APDUs never reach this size).
     while (!s.txQueue.empty() && (uint16_t)(4 + s.txQueue.front().size()) > RX_BUF)
@@ -942,7 +942,7 @@ static bool txApdu(KnxIpTunnel* self, uint16_t da, uint8_t* apdu, uint8_t apduLe
         s.coAwaitingAck = true;
         return true;
     }
-    uint16_t cl = buildCemi(cemi, self->assignedPA(), da, apdu, apduLen, PRIO_LOW, ackReq);
+    uint16_t cl = buildCemi(cemi, self->assignedPA(), da, apdu, apduLen, self->txPriority(), ackReq);
     return sendTunnel(cemi, cl);
 }
 

@@ -1300,6 +1300,9 @@ static void usage()
     U.cmdRow("--verbose | -V", L.tr("full interface + target steckbrief first", "voller Interface-+Ziel-Steckbrief vorweg"));
     U.cmdRow("--quiet | -q", L.tr("no chrome, TSV — scriptable (auto on non-TTY)", "kein Chrome, TSV — skriptbar (auto bei Nicht-TTY)"));
     U.cmdRow("--log [=path]", L.tr("log console session to a file (auto: ~/con_<pa>_<ts>.log)", "Konsolen-Sitzung mitschreiben (auto: ~/con_<pa>_<ts>.log)"));
+    U.cmdRow("--prio low|normal|urgent|system", L.tr("KNX priority of the FTC frames (default low; elevated warns + gates)",
+                                                     "KNX-Priorität der FTC-Frames (Default low; erhöht warnt + fragt)"));
+    U.cmdRow("--prio-force", L.tr("confirm an elevated --prio in a non-TTY/scripted run", "erhöhtes --prio in Nicht-TTY/Skript bestätigen"));
     U.cmdRow("--lang de|en", L.tr("force language (else FTC_LANG / locale)", "Sprache erzwingen (sonst FTC_LANG/Locale)"));
     U.cmdRow("--theme green|amber|cyan", L.tr("accent theme (persist: ftc config theme <name>)", "Akzent-Theme (dauerhaft: ftc config theme <name>)"));
     U.cmdRow("--ascii", L.tr("ASCII fallback for box/marks", "ASCII-Fallback für Rahmen/Marken"));
@@ -1507,14 +1510,87 @@ static bool lineHasAuthKeyword(const std::string& line)
 }
 
 static volatile std::sig_atomic_t g_abort = 0;
+static volatile std::sig_atomic_t g_abortSig = 0; // the terminating signal (SIGINT = real Ctrl+C · SIGTERM = kill)
 
 /**
- * @brief Ctrl+C / SIGTERM handler: request a graceful abort and re-arm the default so a 2nd Ctrl+C hard-kills.
+ * @brief Ctrl+C / SIGTERM handler: request a graceful abort and re-arm the default so a 2nd signal hard-kills.
+ * @details Records WHICH signal so the cause is reported honestly — only a real SIGINT is "user abort (Ctrl+C)".
  */
-static void onAbortSignal(int)
+static void onAbortSignal(int s)
 {
     g_abort = 1;
-    std::signal(SIGINT, SIG_DFL);
+    g_abortSig = s;
+    std::signal(s, SIG_DFL);
+}
+
+/**
+ * @brief The honest reason a run is ending: a real Ctrl+C vs a terminate/kill (e.g. a supervisor or a dropped
+ *        connection killing the process). Never call a SIGTERM "Ctrl+C".
+ */
+static std::string abortReason()
+{
+    return g_abortSig == SIGTERM
+               ? g_i18n.tr("terminated (signal) — connection ended", "beendet (Signal) — Verbindung getrennt")
+               : g_i18n.tr("user abort (Ctrl+C)", "Abbruch durch Nutzer (Strg+C)");
+}
+
+/**
+ * @brief The escalating danger wording for a raised FTC priority (>= normal).
+ */
+static const char* prioDangerText(const std::string& name)
+{
+    if (name == "normal")
+        return g_i18n.tr("Prio NORMAL — preempts normal building communication. Only in a controlled maintenance window.",
+                         "Prio NORMAL — verdrängt normale Gebäudekommunikation. Nur im kontrollierten Wartungsfenster.");
+    if (name == "urgent")
+        return g_i18n.tr("Prio URGENT — preempts ALARMS. Dangerous and NOT spec-conformant for file transfer.",
+                         "Prio URGENT — verdrängt ALARME. Gefährlich und NICHT spec-konform für Dateitransfer.");
+    return g_i18n.tr("Prio SYSTEM — network-management layer (ETS-reserved). Abusive.",
+                     "Prio SYSTEM — Netzwerk-Management-Ebene (ETS-reserviert). Missbräuchlich.");
+}
+
+/**
+ * @brief The `PRIO: <LEVEL> ⚠…` header indicator (amber for normal, red for urgent/system); empty for low.
+ */
+static std::string prioHeaderTag(const std::string& name)
+{
+    if (name == "low") return std::string();
+    const char* warn = name == "normal" ? "\xE2\x9A\xA0" : name == "urgent" ? "\xE2\x9A\xA0\xE2\x9A\xA0"
+                                                                            : "\xE2\x9A\xA0\xE2\x9A\xA0\xE2\x9A\xA0";
+    std::string up = name;
+    for (char& ch : up)
+        ch = (char)std::toupper((unsigned char)ch);
+    const std::string tag = std::string("PRIO: ") + up + " " + warn;
+    return name == "normal" ? g_theme.amber(tag) : g_theme.red(tag);
+}
+
+/**
+ * @brief Gate an elevated FTC priority: warn, and require an explicit confirmation before it is applied.
+ * @details Interactive TTY -> a red DANGER block + `Proceed? [y/N]`, proceed only on y/j. Non-interactive
+ *          (piped / -q) never hangs on a prompt: it requires --prio-force, else refuses. --prio-force always
+ *          proceeds (after surfacing the warning). Returns true = proceed.
+ */
+static bool confirmElevatedPriority(const std::string& name, bool force, bool interactive)
+{
+    const int bars = name == "urgent" ? 2 : name == "system" ? 3 : 1;
+    std::string mark;
+    for (int i = 0; i < bars; ++i)
+        mark += "\xE2\x9A\xA0";
+    std::fprintf(stderr, "\n  %s %s\n", g_theme.red(mark).c_str(), g_theme.red(prioDangerText(name)).c_str());
+    if (force) return true;
+    if (!interactive)
+    {
+        std::fprintf(stderr, "  %s\n",
+                     g_i18n.tr("refusing an elevated priority without --prio-force (non-interactive).",
+                               "erhöhte Priorität ohne --prio-force verweigert (nicht-interaktiv)."));
+        return false;
+    }
+    std::fprintf(stderr, "  %s ", g_i18n.tr("Proceed? [y/N]", "Fortfahren? [j/N]"));
+    std::fflush(stderr);
+    char buf[16];
+    if (!std::fgets(buf, sizeof(buf), stdin)) return false;
+    const char ch = (char)std::tolower((unsigned char)buf[0]);
+    return ch == 'y' || ch == 'j';
 }
 
 /**
@@ -1522,9 +1598,9 @@ static void onAbortSignal(int)
  * @details Returns 130 (128 + SIGINT), the conventional code, so the interface frees the channel at once
  *          instead of blocking until its connection timeout.
  */
-static int abortCleanly(const char* what)
+static int abortCleanly()
 {
-    std::fprintf(stderr, "\n[abort] %s -- cancelling + closing cleanly (Ctrl+C again to force)...\n", what);
+    std::fprintf(stderr, "\n[abort] %s -- cancelling + closing cleanly (signal again to force)...\n", abortReason().c_str());
     openknxFileTransferClient.requestCancel();
     const uint64_t until = nowMs() + 1500;
     while (nowMs() < until)
@@ -2132,7 +2208,7 @@ static int runTransferPresenter()
         if (g_abort)
         {
             endLive();
-            return abortCleanly("user abort (Ctrl+C)");
+            return abortCleanly();
         }
         g_knxTunnel.pump();
         openknxFileTransferClient.loop(true);
@@ -2273,7 +2349,7 @@ static int runOneShotToQuiescence()
     uint32_t lastDone = openknxFileTransferClient.status().done;
     for (;;)
     {
-        if (g_abort) return abortCleanly("user abort (Ctrl+C)");
+        if (g_abort) return abortCleanly();
         g_knxTunnel.pump();
         openknxFileTransferClient.loop(true);
         const FtcStatus& st = openknxFileTransferClient.status();
@@ -2598,7 +2674,7 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
     {
         if (g_abort)
         {
-            abortCleanly("user abort (Ctrl+C)");
+            abortCleanly();
             break;
         }
         g_knxTunnel.pump();
@@ -3491,6 +3567,9 @@ int main(int argc, char** argv)
     bool cmpCollapse = false;     // --collapse: compare view starts collapsing consecutive identical frames
     bool cmpMarkers = true;       // --no-markers: start with per-frame markers off (default on)
     bool cmpSkew = false;         // --skew: compare view starts showing the A/B time-skew
+    std::string prioName = "low"; // --prio low|normal|urgent|system: KNX priority of the FTC frames we send
+    uint8_t prio2 = 0x03;         // the 2-bit CTRL value (low=3 · normal=1 · urgent=2 · system=0)
+    bool prioForce = false;       // --prio-force: confirm an elevated priority in a non-TTY/scripted run
     bool installSystem = false;   // --system: install/uninstall to the system dir (/usr/local/bin) instead of ~/.local/bin
     bool installForce = false;    // --force: install even when it would downgrade a newer installed copy (no prompt)
     std::string installDirArg;    // --dir <path>: explicit install/uninstall directory (overrides the default)
@@ -3573,8 +3652,10 @@ int main(int argc, char** argv)
             secondsSet = true;
         }
         else if (a == "--grace")
+        {
             // only consume the next token if it's a number, so `--grace --multi` keeps the default (no flag-eating)
             if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) cmpGrace = std::atoi(argv[++i]);
+        }
         else if (a == "--multi")
             cmpMulti = true; // start the compare in diff-off "multi" mode
         else if (a == "--raw")
@@ -3587,6 +3668,27 @@ int main(int argc, char** argv)
             cmpMarkers = false; // compare: start with per-frame markers off
         else if (a == "--skew")
             cmpSkew = true; // compare: start showing the A/B time-skew
+        else if (a == "--prio" && i + 1 < argc)
+        {
+            prioName = argv[++i];
+            if (prioName == "low") prio2 = 3;
+            else if (prioName == "normal")
+                prio2 = 1;
+            else if (prioName == "urgent")
+                prio2 = 2;
+            else if (prioName == "system")
+                prio2 = 0;
+            else
+            {
+                std::fprintf(stderr, "%s: %s\n", g_i18n.tr("unknown --prio (use low|normal|urgent|system)",
+                                                           "unbekanntes --prio (low|normal|urgent|system)"),
+                             prioName.c_str());
+                socketCleanup();
+                return 2;
+            }
+        }
+        else if (a == "--prio-force")
+            prioForce = true; // confirm an elevated priority in a non-TTY / scripted run (no prompt)
         else if (a == "--system")
             installSystem = true; // install/uninstall to the system dir instead of the per-user default
         else if (a == "--force")
@@ -4351,6 +4453,18 @@ int main(int argc, char** argv)
         socketCleanup();
         return 1;
     }
+
+    // --- FTC send priority: gate an elevated one, then stamp it onto every FTC data frame. This path uses
+    // g_knxTunnel (send/get/console/perf/info/ll/scan/fwupdate); gm/bm/compare/progscan use their own tunnels.
+    if (prio2 != 3 && !confirmElevatedPriority(prioName, prioForce, g_term.isTty() && !quiet))
+    {
+        g_knxTunnel.disconnect();
+        socketCleanup();
+        return 3;
+    }
+    g_knxTunnel.setTxPriority(prio2);
+    const std::string prioTag = prioHeaderTag(prioName);
+
     if (!quiet)
     {
         ftc::Theme& c = g_theme;
@@ -4358,10 +4472,11 @@ int main(int argc, char** argv)
         char pa[16];
         std::snprintf(pa, sizeof(pa), "%u.%u.%u", (g_knxTunnel.assignedPA() >> 12) & 0x0F,
                       (g_knxTunnel.assignedPA() >> 8) & 0x0F, g_knxTunnel.assignedPA() & 0xFF);
-        std::printf("  %s %s  %s  %s\n", c.green(g_term.glyph("●", "*")).c_str(),
+        std::printf("  %s %s  %s  %s%s\n", c.green(g_term.glyph("●", "*")).c_str(),
                     c.green(L.tr("tunnel up", "Tunnel steht")).c_str(),
                     c.dim(ip + ":" + std::to_string((unsigned)port)).c_str(),
-                    c.dim(std::string(L.tr("as ", "als ")) + pa).c_str());
+                    c.dim(std::string(L.tr("as ", "als ")) + pa).c_str(),
+                    prioTag.empty() ? "" : ("   " + prioTag).c_str());
     }
 
     // Interface steckbrief (DESCRIPTION_REQUEST on a side socket; independent of the tunnel). Default = a
@@ -4527,7 +4642,7 @@ int main(int argc, char** argv)
     {
         g_knxTunnel.disconnect();
         if (exitCode == 130)
-            std::fprintf(stderr, "Aborted by user (Ctrl+C) -- transfer cancelled, tunnel closed cleanly (no interface lockout).\n");
+            std::fprintf(stderr, "%s -- transfer cancelled, tunnel closed cleanly (no interface lockout).\n", abortReason().c_str());
         socketCleanup();
         return exitCode;
     }
@@ -4633,6 +4748,7 @@ int main(int argc, char** argv)
             ui.setLimits((uint16_t)drainCap, ifaceApdu);                           // verbose l3 figures: drain cap (B/answer) + detected interface APDU
             ui.setIface(std::string(), ifName, ifMask);                            // verbose l4: the interface we tunnel THROUGH
             if (tgtValid) ui.setTarget(tgtOrder, tgtMask, tgtCls, tgtFw, tgtFeat); // fetched BEFORE the console open
+            ui.setPrio(prioTag); // show an elevated FTC priority in the console header (empty for low)
             ui.begin(ip, cpa, pos[0], g_logPath, consoleHistoryPath());
             g_consoleUi = &ui;
             g_watch.load(watchPath(pos[0]));   // per-PA auto-commands (/every), cached across sessions
@@ -4851,7 +4967,7 @@ int main(int argc, char** argv)
     // --- clean shutdown ---------------------------------------------------------------------------
     g_knxTunnel.disconnect();
     if (exitCode == 130)
-        std::fprintf(stderr, "Aborted by user (Ctrl+C) -- transfer cancelled, tunnel closed cleanly (no interface lockout).\n");
+        std::fprintf(stderr, "%s -- transfer cancelled, tunnel closed cleanly (no interface lockout).\n", abortReason().c_str());
     socketCleanup();
     return exitCode;
 }
