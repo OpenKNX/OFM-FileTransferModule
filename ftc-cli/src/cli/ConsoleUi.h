@@ -48,10 +48,22 @@ class ConsoleUi
         PollHelp
     };
 
+    /** @brief The console link state — connected ⟺ the TARGET has actually answered, not just the tunnel. */
+    enum class Link
+    {
+        Connecting, ///< tunnel up, target not yet answered — amber, blinking dot
+        Connected,  ///< target answered / session really open — green
+        NoAnswer    ///< the open failed / target stopped answering — red
+    };
+
     ConsoleUi(Term& term, Theme& theme, I18n& i18n) : _t(term), _c(theme), _i(i18n) {}
+
+    /** @brief Set the link state (host recomputes it live each frame from the client — never a stale flag). */
+    void setLink(Link l) { _link = l; }
 
     /** @brief Set the elevated-priority header indicator (pre-coloured `PRIO: <LEVEL> ⚠…`; empty = low/default). */
     void setPrio(const std::string& tag) { _prioTag = tag; }
+
     /**********************************************************************
      ************************** CONFIGURATION *****************************
      **********************************************************************/
@@ -585,9 +597,27 @@ class ConsoleUi
         const int rRule = bottom - (boxLines - 1); // rule (top of the box)
         const int rL1 = rRule + 1, rL2 = rL1 + 1, rL3 = rL2 + 1, rL4 = rL3 + 1;
         // Line 1: identity (+ verbose stamp) · via · PAs · uptime · RX sparkline (wider in verbose).
+        // Link state: connected ⟺ the TARGET answered. Until then show a blinking amber "connecting…" (never a
+        // stale green); a failed/no-answer open shows red. The webconsole (WS) has its own real connection state.
+        std::string linkDot, linkLbl;
+        if (_link == Link::Connected)
+        {
+            linkDot = c.green(_t.glyph("●", "*"));
+            linkLbl = c.green(_i.tr("connected", "verbunden"));
+        }
+        else if (_link == Link::NoAnswer)
+        {
+            linkDot = c.red(_t.glyph("●", "x"));
+            linkLbl = c.red(_i.tr("no answer", "keine Antwort"));
+        }
+        else
+        {
+            linkDot = _blinkOn ? c.amber(_t.glyph("●", "*")) : c.mut(_t.glyph("○", "o")); // pulsing amber dot
+            linkLbl = c.amber(_i.tr("connecting…", "verbinde…"));
+        }
         const std::string mid = _wsMode
                                     ? "  " + c.green(std::string(_t.glyph("●", "*")) + " " + _i.tr("webconsole", "Webkonsole")) + "  " + c.txt(_ip)
-                                    : "  " + c.green(std::string(_t.glyph("●", "*")) + " " + _i.tr("connected", "verbunden")) +
+                                    : "  " + linkDot + " " + linkLbl +
                                           "  " + c.dim(_i.tr("via", "über")) + " " + c.txt(_ip) +
                                           " " + c.dim("(as") + " " + c.chip(_tpa, 'c') + c.dim(")") +
                                           " " + c.dim(_t.glyph("→", "->")) + " " + c.chip(_target, 'c'); // PAs as UI-template chips
@@ -841,6 +871,7 @@ class ConsoleUi
     int _slotsFree = -1, _slotsTotal = 0; // free/total tunnel slots (-1 = unknown/not probed)
     int _jobCount = 0;                    // active /every auto-commands -> ⟳ badge in the status bar
     bool _wsMode = false;                 // WebSocket console (ftc -i <ip> con): no tunnel/APDU/drain
+    Link _link = Link::Connecting;        // tunnel-console link state (connected only once the target answers)
     std::string _prioTag;                 // pre-coloured "PRIO: <LEVEL> ⚠…" header indicator (empty = low default)
     std::string _wsUrl;                   // ws://<ip>/console (shown in the verbose line / stats)
     uint32_t _prevRx = 0;

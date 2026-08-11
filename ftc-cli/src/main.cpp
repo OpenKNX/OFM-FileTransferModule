@@ -4849,6 +4849,13 @@ int main(int argc, char** argv)
                 if (now - lastBar > 250)
                 {
                     lastBar = now;
+                    // Connected ⟺ the TARGET answered (consoleConnected). Tunnel down or not-yet-answered =
+                    // connecting; a Failed open = no-answer. Recomputed LIVE so a drop/reconnect never stays green.
+                    ui.setLink(!g_knxTunnel.connected()          ? ftc::ConsoleUi::Link::Connecting
+                               : openknxFileTransferClient.consoleConnected() ? ftc::ConsoleUi::Link::Connected
+                               : openknxFileTransferClient.status().phase == FtcPhase::Failed
+                                   ? ftc::ConsoleUi::Link::NoAnswer
+                                   : ftc::ConsoleUi::Link::Connecting);
                     ui.tick(knxTunnelRx(), knxTunnelActivity(), knxTunnelDrops(), g_conTrunc, (now - conStart) / 1000,
                             g_knxTunnel.channelId(), g_knxTunnel.txSeq(), g_knxTunnel.rxSeq());
                 }
@@ -4900,9 +4907,7 @@ int main(int argc, char** argv)
         {
             // Plain path (piped / -q / non-TTY): line reader, no bar, no raw mode — scriptable.
             StdinLines stdinLines;
-            if (!quiet)
-                std::printf("[console] connected — type commands; 'quit' or 'exit' to leave.%s%s\n",
-                            g_logPath.empty() ? "" : "  log: ", g_logPath.c_str());
+            bool bannerShown = false; // print "connected" ONLY once the target actually answers (not just the tunnel)
             std::fflush(stdout);
             bool running = true;
             while (running)
@@ -4916,6 +4921,15 @@ int main(int argc, char** argv)
                 }
                 g_knxTunnel.pump();
                 openknxFileTransferClient.loop(true);
+                if (!bannerShown && !quiet && openknxFileTransferClient.consoleConnected())
+                {
+                    std::printf("[console] %s%s%s\n",
+                                g_i18n.tr("connected — type commands; 'quit' or 'exit' to leave.",
+                                          "verbunden — Befehle eingeben; 'quit' oder 'exit' zum Beenden."),
+                                g_logPath.empty() ? "" : "  log: ", g_logPath.c_str());
+                    std::fflush(stdout);
+                    bannerShown = true;
+                }
 
                 std::string line;
                 if (stdinLines.poll(line))
