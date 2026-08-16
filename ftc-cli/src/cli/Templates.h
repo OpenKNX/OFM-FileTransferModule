@@ -41,6 +41,9 @@ class Tpl
   public:
     Tpl(Term& term, Theme& theme, I18n* i18n = nullptr) : _t(term), _c(theme), _i(i18n) {}
 
+    /** @brief Translate a template's own words. Falls back to English when no I18n was handed in. */
+    const char* tr(const char* en, const char* de) const { return _i ? _i->tr(en, de) : en; }
+
     /**
      * @brief A status kind — picks the leading dot glyph + its colour. Meaning is fixed (never theme-swaps).
      */
@@ -132,9 +135,49 @@ class Tpl
      */
     void kv(const std::string& label, const std::string& value) const
     {
-        char lbl[24];
-        std::snprintf(lbl, sizeof(lbl), "%-14s", label.c_str());
+        // Pad on DISPLAY width, not bytes: a German label with an umlaut ("Blöcke", "Identität") is one
+        // byte longer than it is wide, and %-14s would short-pad it by exactly that much.
+        std::string lbl = label;
+        for (int n = dispw(label); n < 14; ++n)
+            lbl += ' ';
         std::printf("    %s%s\n", _c.dim(lbl).c_str(), value.c_str());
+    }
+
+    /**
+     * @brief `? <label>   <value>` — an input line the caller has already filled or masked.
+     * @details The prompt shape knxOTA needs for a password or a typed address: amber marker, dim label in
+     *          the same 14-column gutter kv() uses, then the value. Drawing it here keeps the prompt inside
+     *          the template vocabulary instead of being a bare printf next to it.
+     */
+    void promptLine(const std::string& label, const std::string& value, const std::string& hint = "") const
+    {
+        std::string lbl = label;
+        for (int n = dispw(label); n < 14; ++n)
+            lbl += ' ';
+        std::printf("  %s %s%s", _c.amber("?").c_str(), _c.dim(lbl).c_str(), value.c_str());
+        if (!hint.empty()) std::printf("   %s", _c.mut(hint).c_str());
+        std::printf("\n");
+    }
+
+    /**
+     * @brief `◉ <label>   0:42   <detail>` — a live wait, redrawn in place while something outside happens.
+     * @details For the waits knxOTA cannot shorten: a human walking to the cabinet to press the programming
+     *          button, or a device rebooting into new firmware. The marker blinks off the caller's elapsed
+     *          time rather than a spinner, so a frozen screen is visibly distinct from a slow one. Prints
+     *          with a carriage return on a tty (one line, updated) and once per call otherwise.
+     */
+    void waitTick(const std::string& label, uint32_t elapsedS, const std::string& detail = "") const
+    {
+        const bool lit = (elapsedS % 2) == 0;
+        char clock[16];
+        std::snprintf(clock, sizeof(clock), "%u:%02u", (unsigned)(elapsedS / 60), (unsigned)(elapsedS % 60));
+        const std::string mark = lit ? _c.amber(_t.glyph("◉", "*")) : _c.mut(_t.glyph("○", "o"));
+        std::string line = "  " + mark + " " + _c.txt(label) + "   " + _c.bold(clock);
+        if (!detail.empty()) line += "   " + _c.dim(detail);
+        if (_t.isTty()) std::printf("\r%s\x1b[K", line.c_str());
+        else
+            std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
     }
 
     /**
@@ -477,9 +520,9 @@ class Tpl
      */
     std::string progMode(bool on, bool phaseOn = true) const
     {
-        if (!on) return _c.mut(std::string(_t.glyph("○", "o")) + " off");
+        if (!on) return _c.mut(std::string(_t.glyph("○", "o")) + " " + tr("off", "aus"));
         const std::string dot = phaseOn ? _c.amber(_t.glyph("●", "*")) : _c.mut(_t.glyph("●", "*"));
-        return dot + " " + _c.amber("ON");
+        return dot + " " + _c.amber(tr("ON", "AN"));
     }
 
     /**
@@ -798,7 +841,7 @@ class Tpl
         std::printf("\n  %s   %s\n", _c.bold(_c.green("ftc")).c_str(),
                     _c.dim("OpenKNX FileTransferClient · KNXnet/IP").c_str());
         std::printf("  %s\n", _c.dim("© 2026 OpenKNX · Erkan Çolak · GPL-3.0-or-later").c_str());
-        std::printf("  %s\n", _c.dim("wiki.openknx.de · forum.openknx.de · github.com/OpenKNX").c_str());
+        std::printf("  %s\n", _c.dim("https://openknx.de · https://wiki.openknx.de · https://forum.openknx.de").c_str());
     }
 
     /*********************************************************************

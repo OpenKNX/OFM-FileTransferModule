@@ -26,6 +26,7 @@ struct Palette
 {
     const char* name;
     uint8_t g[3], gh[3], gd[3], cyan[3]; // accent (swapped per theme)
+    uint8_t oper[3];                    // grammar role "operand" -- identical in every theme
     // fixed across themes:
     uint8_t amber[3], gold[3], red[3], blue[3], violet[3], txt[3], dim[3], mut[3];
 };
@@ -60,6 +61,8 @@ class Theme
     std::string cyan(const std::string& s) const { return wrap(_p->cyan, s); }
     std::string blue(const std::string& s) const { return wrap(_p->blue, s); }
     std::string violet(const std::string& s) const { return wrap(_p->violet, s); }
+    /** @brief The fixed teal the grammar uses for operands. Never swapped: a role must not change meaning with the theme. */
+    std::string oper(const std::string& s) const { return wrap(_p->oper, s); }
     std::string txt(const std::string& s) const { return wrap(_p->txt, s); }
     std::string dim(const std::string& s) const { return std::string(_t.dim()) + _t.foldAscii(s) + _t.reset(); }
     std::string mut(const std::string& s) const { return wrap(_p->mut, s); }
@@ -118,6 +121,7 @@ class Theme
         // name        g                 gh                  gd                cyan
         // "green" (default) accent = OpenKNX brand green #449841 (logo/favicon/web), + a brighter + a dark tint.
         {"green", {68, 152, 65}, {99, 191, 92}, {40, 92, 38}, {79, 224, 208},
+         /*oper*/ {79, 224, 208},
          /*amber*/ {255, 180, 84},
          /*gold*/ {255, 209, 102},
          /*red*/ {255, 93, 93},
@@ -126,8 +130,8 @@ class Theme
          /*txt*/ {211, 228, 217},
          /*dim*/ {127, 147, 135},
          /*mut*/ {80, 96, 86}},
-        {"amber", {255, 180, 84}, {255, 212, 136}, {122, 83, 32}, {255, 209, 102}, {255, 180, 84}, {255, 209, 102}, {255, 93, 93}, {111, 176, 255}, {199, 139, 255}, {211, 228, 217}, {127, 147, 135}, {80, 96, 86}},
-        {"cyan", {79, 214, 255}, {154, 232, 255}, {28, 77, 107}, {111, 224, 255}, {255, 180, 84}, {255, 209, 102}, {255, 93, 93}, {111, 176, 255}, {199, 139, 255}, {211, 228, 217}, {127, 147, 135}, {80, 96, 86}},
+        {"amber", {255, 180, 84}, {255, 212, 136}, {122, 83, 32}, {255, 209, 102}, {79, 224, 208}, {255, 180, 84}, {255, 209, 102}, {255, 93, 93}, {111, 176, 255}, {199, 139, 255}, {211, 228, 217}, {127, 147, 135}, {80, 96, 86}},
+        {"cyan", {79, 214, 255}, {154, 232, 255}, {28, 77, 107}, {111, 224, 255}, {79, 224, 208}, {255, 180, 84}, {255, 209, 102}, {255, 93, 93}, {111, 176, 255}, {199, 139, 255}, {211, 228, 217}, {127, 147, 135}, {80, 96, 86}},
     };
 
     Term& _t;

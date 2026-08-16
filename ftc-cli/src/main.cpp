@@ -60,6 +60,12 @@ typedef int sock_t;
 #include "cli/Compare.h"
 #include "cli/ConsoleUi.h"
 #include "cli/I18n.h"
+#include "cli/KnxOta.h"
+#include "cli/Prompt.h"
+#include "core/Access.h"
+#include "core/FastScan.h"
+#include "core/Reach.h"
+#include "core/ScanDetails.h"
 #include "cli/Monitor.h"
 #include "cli/ProgScan.h"
 #include "cli/Templates.h"
@@ -97,6 +103,12 @@ static int graphWidth(int reserve) // graph columns = GRAPH_WIDTH_PCT of (cols -
 }
 // Parallel scan (--tunnels N): the parent self-execs N child scans over range chunks, each on its own tunnel.
 static std::string g_selfPath;   // argv[0] -> re-invoked for the child scans
+static std::string g_ip;         // interface address, as given -> the detail children reach the same one
+static uint16_t g_port = 3671;
+static uint16_t g_ifaceApdu = 0;  // the interface's own max APDU -- shown beside the target's
+// Enough tunnels to hide the per-device read behind the sweep, few enough that an interface still grants
+// them all; `--tunnels N` overrides. A worker whose tunnel is refused just drops out.
+static constexpr int FTC_DETAIL_WORKERS = 5;
 static int g_tunnels = 1;        // 1 = serial (default); N = N parallel tunnels; 0 = auto (as many as the interface allows)
 static bool g_pchild = false;    // internal: this process is a parallel-scan child (emit the P/D line protocol)
 static bool g_probeSlot = false; // internal: this process is a tunnel-slot probe child (connect, emit SLOT, hold, exit)
@@ -253,7 +265,7 @@ static void renderUiDemo()
     t.kv("Prog mode", c.mut(std::string(g_term.glyph("○", "o")) + " off"));
     t.kv("Service fam.", c.txt("Core v1 · DevMgmt v1 · Tunnelling v1"));
     t.kv("Routing", c.green("— not advertised (spec-conform interface)"));
-    t.kv("APDU reported", c.bold("55 B") + c.dim("  · via device-mgmt · no bus traffic"));
+    t.kv("APDU reported", c.bold("55 B") + c.dim("  · via device-mgmt"));
     t.panelEnd();
 
     // T3 — a standalone section rule.
@@ -1064,8 +1076,9 @@ static bool ftcLineHook(const std::string& in, uint8_t color)
             --start;
         const std::string w = line.substr(start, end - start);
         std::string col;
-        if (w == "loaded" || w == "ok") col = c.green(w);
-        else if (w == "off" || w == "n/a" || w == "none" || w == "unloaded")
+        ftc::I18n& L = g_i18n;
+        if (w == L.tr("loaded", "geladen") || w == "ok") col = c.green(w);
+        else if (w == "off" || w == "n/a" || w == "none" || w == L.tr("unloaded", "nicht geladen"))
             col = c.mut(w);
         else if (w == "on")
             col = c.amber(w);
@@ -1113,14 +1126,17 @@ static const char* svcFamilyName(uint8_t id)
 /**
  * @brief Current IP-assignment method name from the method byte (DHCP/BootP/AutoIP/manual).
  */
-static const char* ipMethodName(uint8_t m)
+static const char* ipMethodName(uint8_t m, bool reported)
 {
-    // Current IP assignment method (03_08_03): bitset, but a device reports the one in use.
+    // 03_08_03 2.5.5 is a bitset, but a device names the one method actually in use.
     if (m & 0x04) return "DHCP";
     if (m & 0x02) return "BootP";
     if (m & 0x08) return "AutoIP";
-    if (m & 0x01) return "manual";
-    return "?";
+    if (m & 0x01) return g_i18n.tr("manual / static", "manuell / statisch");
+    // Telling these two apart matters: a device that never answered is a different problem from one that
+    // answered with a method nobody has filled in.
+    if (!reported) return g_i18n.tr("not reported", "nicht gemeldet");
+    return g_i18n.tr("unset on the device", "auf dem Gerät nicht gesetzt");
 }
 
 // IfaceDesc + parseDibs() + queryInterface() live in core/Describe.h now (ftc::) — the ONE DESCRIPTION
@@ -1235,11 +1251,11 @@ static void printIfacePanel(const std::string& ip, const ftc::IfaceDesc& o)
     std::snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", o.mac[0], o.mac[1], o.mac[2], o.mac[3], o.mac[4], o.mac[5]);
     p.kv("MAC", c.txt(buf));
     p.kv(L.tr("Prog mode", "Prog-Modus"),
-         (o.status & 0x01) ? t.chip("PROG", 'o') : c.mut(std::string(T.glyph("○", "o")) + " off"));
+         (o.status & 0x01) ? t.chip("PROG", 'o') : c.mut(std::string(T.glyph("○", "o")) + " " + L.tr("off", "aus")));
     if (o.hasIp)
     {
         p.sep();
-        std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u / %s", (o.ip >> 24) & 0xFF, (o.ip >> 16) & 0xFF, (o.ip >> 8) & 0xFF, o.ip & 0xFF, ipMethodName(o.ipMethod));
+        std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u / %s", (o.ip >> 24) & 0xFF, (o.ip >> 16) & 0xFF, (o.ip >> 8) & 0xFF, o.ip & 0xFF, ipMethodName(o.ipMethod, o.haveIpMethod));
         p.kv(L.tr("IP / method", "IP / Methode"), c.txt(buf));
     }
     p.sep();
@@ -1256,7 +1272,7 @@ static void printIfacePanel(const std::string& ip, const ftc::IfaceDesc& o)
     if (o.apduReported)
     {
         std::snprintf(buf, sizeof(buf), "%u B", o.apduReported);
-        p.kv(L.tr("APDU reported", "APDU gemeldet"), c.bold(buf) + c.dim(L.tr("  · via device-mgmt · no bus traffic", "  · via Device-Mgmt · kein Bus-Traffic")));
+        p.kv(L.tr("APDU reported", "APDU gemeldet"), c.bold(buf) + c.dim(L.tr("  · via device-mgmt", "  · via Device-Mgmt")));
     }
     else if (o.apduReason[0] || !o.hasExt)
     {
@@ -1282,15 +1298,53 @@ static void usage()
     ftc::Ui& U = g_ui;
     banner();
 
+    // Each role keeps one fixed colour (violet=who, bold=what, teal=thing, blue=how) so the line doubles
+    // as the legend; role colours don't follow the theme accent (which can be the danger colour).
     U.section(L.tr("USAGE", "AUFRUF"));
-    std::printf("  ftc [%s] [%s A.B.C.D] [%s N] [%s de|en] %s %s [args...]\n", c.cyan("--verbose").c_str(),
-                c.cyan("--ip").c_str(), c.cyan("--port").c_str(), c.cyan("--lang").c_str(),
-                c.cyan("<pa>").c_str(), c.cyan("<cmd>").c_str());
-    std::printf("  %s = %s  %s\n", c.cyan("<pa>").c_str(),
-                c.dim(L.tr("target device on the bus (NOT the interface)", "Ziel-Gerät am Bus (NICHT das Interface)")).c_str(),
-                c.dim("e.g. 5.0.3").c_str());
-    std::printf("  ftc %s   %s\n", c.cyan("config [key val]").c_str(), c.dim(L.tr("show / set persisted defaults", "persistente Defaults zeigen/setzen")).c_str());
-    std::printf("  ftc %s | %s\n\n", c.cyan("--version").c_str(), c.cyan("--help").c_str());
+    std::printf("  %s %s %s %s %s %s\n\n", c.dim("ftc").c_str(),
+                c.blue(L.tr("[global options]", "[globale optionen]")).c_str(),
+                c.violet(L.tr("<subject>", "<subjekt>")).c_str(),
+                c.bold(L.tr("<verb>", "<verb>")).c_str(),
+                c.oper(L.tr("[operands]", "[operanden]")).c_str(),
+                c.blue(L.tr("[options]", "[optionen]")).c_str());
+    // One column for the shapes, one for what they are for -- the same grid the rest of the help uses.
+    {
+        // The coloured form carries escape codes, so its byte length is not its width. The plain shape is
+        // spelled out once for measuring -- shorter than teaching this one spot to strip ANSI.
+        struct { std::string form; const char* plain; const char* en; const char* de; } shapes[] = {
+            {std::string(c.dim("ftc ")) + c.blue("-i") + " " + c.txt("A.B.C.D") + " " +
+                 c.violet("<pa>") + " " + c.bold("<cmd>") + " " +
+                 c.blue("[" + std::string(L.tr("options", "optionen")) + "]"),
+             L.tr("ftc -i A.B.C.D <pa> <cmd> [options]", "ftc -i A.B.C.D <pa> <cmd> [optionen]"),
+             "a device on the bus", "ein Gerät am Bus"},
+            {std::string(c.dim("ftc ")) + c.blue("-i") + " " + c.txt("A.B.C.D") + " " + c.bold("<cmd>"),
+             "ftc -i A.B.C.D <cmd>",
+             "the interface/router itself: info · scan · bm · gm · ps",
+             "das Interface/der Router selbst: info · scan · bm · gm · ps"},
+            {std::string(c.dim("ftc ")) + c.bold("<cmd>"),
+             "ftc <cmd>",
+             "no bus at all: knxota · gzip · decode · config · install",
+             "ganz ohne Bus: knxota · gzip · decode · config · install"},
+        };
+        const bool wide = ftc::Tpl::cols() >= 46 + 56; // the longest note still has to fit beside it
+        for (const auto& sh : shapes)
+        {
+            const char* note = L.tr(sh.en, sh.de);
+            if (!wide)
+            {
+                std::printf("  %s\n      %s\n", sh.form.c_str(), c.dim(note).c_str());
+                continue;
+            }
+            const int pad = 46 - (int)std::strlen(sh.plain);
+            std::printf("  %s%*s %s\n", sh.form.c_str(), pad > 1 ? pad : 1, "", c.dim(note).c_str());
+        }
+    }
+    std::printf("\n  %s = %s  %s\n", c.violet("<pa>").c_str(),
+                c.dim(L.tr("the device you mean — not the interface/router you tunnel through",
+                           "das gemeinte Gerät — nicht das Interface/der Router, durch das getunnelt wird")).c_str(),
+                c.dim(L.tr("e.g. 5.0.3", "z.B. 5.0.3")).c_str());
+    std::printf("  %s\n\n", c.dim(L.tr("--version · --help · a persisted default: ftc config <key> <value>",
+                                        "--version · --help · dauerhafte Vorgabe: ftc config <key> <wert>")).c_str());
 
     U.section(L.tr("OPTIONS", "OPTIONEN"));
     U.cmdRow("--ip A.B.C.D | -i", L.tr("interface / router to tunnel through", "Interface/Router, durch das getunnelt wird"));
@@ -1306,7 +1360,10 @@ static void usage()
     U.cmdRow("--lang de|en", L.tr("force language (else FTC_LANG / locale)", "Sprache erzwingen (sonst FTC_LANG/Locale)"));
     U.cmdRow("--theme green|amber|cyan", L.tr("accent theme (persist: ftc config theme <name>)", "Akzent-Theme (dauerhaft: ftc config theme <name>)"));
     U.cmdRow("--ascii", L.tr("ASCII fallback for box/marks", "ASCII-Fallback für Rahmen/Marken"));
-    U.cmdRow("-VqD (bundled)", L.tr("short valueless flags bundle: -VD = -V -D", "wertlose Kurzflags bündelbar: -VD = -V -D"));
+    U.cmdRow("-VqD (bundled)", L.tr("these bundle: -VD = -V -D. They belong BEFORE the command; the transfer flags "
+                                    "(-faknqv) come after it",
+                                    "diese bündeln: -VD = -V -D. Sie stehen VOR dem Kommando; die Transfer-Flags "
+                                    "(-faknqv) danach"));
     std::printf("\n");
 
     U.section(L.tr("INTERFACE", "INTERFACE"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
@@ -1328,35 +1385,112 @@ static void usage()
 
     U.section(L.tr("INFO", "INFO"), L.tr("(read-only)", "(nur lesen)"));
     U.cmdRow("<pa> ping", L.tr("is the target there? round-trip + ms", "ist das Ziel da? Round-Trip + ms"));
+    U.cmdRow("", L.tr("send/get/perf/fwupdate/con ask this first, in one frame; a silent target is reported "
+                      "in ~2.5 s instead of after minutes of retries. --force skips the question",
+                      "send/get/perf/fwupdate/con fragen das vorab, mit einem Telegramm; ein stummes Ziel "
+                      "wird nach ~2,5 s gemeldet statt nach Minuten voller Wiederholungen. --force überspringt"));
+    U.cmdRow("<pa> feat | f", L.tr("what the target supports, and why a write is refused",
+                                   "was das Ziel kann — und warum ein Schreibzugriff abgelehnt wird"));
+    U.cmdRow("<pa> exists | e <path>", L.tr("is that file or folder there?", "gibt es diese Datei / diesen Ordner?"));
     U.cmdRow("<pa> info [ga|<file>]", L.tr("device fingerprint / group comm / file info", "Steckbrief / Gruppenkomm. / Datei-Info"));
     U.cmdRow("<pa> df [sd|efc]", L.tr("target filesystem usage (drive optional)", "Dateisystem-Belegung des Ziels (Drive optional)"));
     U.cmdRow("<pa> ll|ls [sd/|efc/][dir]", L.tr("list a directory (+ CRC, storage bar)", "Verzeichnis listen (+ CRC, Speicher-Balken)"));
     U.cmdRow("scan <a.l | a b> [ets] [deep N]", L.tr("discover devices on a line / range (ets = CO probe; + --tunnels)", "Geräte auf Linie/Bereich finden (ets = CO-Probe; + --tunnels)"));
+    U.cmdRow("scan … pace <ms> | drain <ms> | tmo <ms>",
+             L.tr("sweep tuning: gap between probes · wait for slow answers at the end · how long one probe "
+                  "may stay unconfirmed. Defaults find everything; raise pace on a slow interface",
+                  "Feineinstellung: Abstand zwischen Abfragen · Wartezeit am Ende für langsame Antworten · "
+                  "wie lange eine Abfrage unbestätigt bleiben darf. Die Vorgaben finden alles; pace erhöhen "
+                  "bei einem trägen Interface"));
+    U.cmdRow("scan … openknx | details", L.tr("read identity while scanning: openknx = OpenKNX candidates, details = every device",
+                                              "Identität schon beim Suchen lesen: openknx = OpenKNX-Kandidaten, details = jedes Gerät"));
     std::printf("\n");
 
-    U.section(L.tr("TRANSFER & FILES", "TRANSFER & DATEIEN"));
-    U.cmdRow("<pa> send <src> [sd/|efc/]<dst> [mode]", L.tr("upload a host file (alias: upload) — mode: safe·fast · fast w<N> pins the window",
-                                                            "Host-Datei hochladen (Alias: upload) — mode: safe·fast · fast w<N> pint das Fenster"));
+    U.section(L.tr("FILES", "DATEIEN"));
+    U.cmdRow("<pa> send <src> [sd/|efc/]<dst>", L.tr("upload a host file (alias: upload)", "Host-Datei hochladen (Alias: upload)"));
     U.cmdRow("<pa> get [sd/|efc/]<remote> [local]", L.tr("download a file (alias: download/receive)", "Datei herunterladen (Alias: download/receive)"));
-    U.cmdRow("<pa> fwupdate <remote>", L.tr("flash an uploaded firmware -> reboots target", "hochgeladene Firmware flashen -> Ziel-Reboot"));
-    U.cmdRow("<pa> perf [kb] [pkg|auto] [mode] [sd|efc]", L.tr("throughput test — mode: safe·fast · +nr/keep/verbose · fast w<N> pins the window · sd|efc = target drive",
-                                                             "Durchsatz-Test — mode: safe·fast · +nr/keep/verbose · fast w<N> pint das Fenster · sd|efc = Ziel-Drive"));
     U.cmdRow("<pa> rm | mkdir | rmdir | mv", L.tr("delete / create / remove / rename", "löschen / anlegen / entfernen / umbenennen"));
     U.cmdRow("<pa> format yes", L.tr("erase the WHOLE filesystem (gated)", "GANZES Dateisystem löschen (gesichert)"));
-    U.cmdRow("gzip <in> <out>", L.tr("gzip a local file (RP firmware prep; in-process, no tunnel)", "lokale Datei gzip'en (RP-Firmware; in-process, kein Tunnel)"));
-    U.cmdRow("decode <hex LPDU>", L.tr("offline-decode a raw TP1 frame (APCI + FTC/console; no tunnel)", "Roh-TP1-Frame offline dekodieren (APCI + FTC/Console; kein Tunnel)"));
-    U.cmdRow("install | uninstall [--system] [--dir <path>] [--force]", L.tr("install/remove this ftc onto PATH (version-aware: up-to-date/upgrade, asks before downgrade; ~/.local/bin, --system=/usr/local/bin; no dependency)", "ftc in den PATH installieren/entfernen (versionsbewusst: aktuell/Upgrade, fragt vor Downgrade; ~/.local/bin, --system=/usr/local/bin; ohne Abhängigkeit)"));
-    U.cmdRow("[sd/|efc/] on a remote path", L.tr("prefix a REMOTE path (else LittleFS): df ll ls rm mkdir rmdir mv info get perf",
-                                                 "REMOTE-Pfad voranstellen (sonst LittleFS): df ll ls rm mkdir rmdir mv info get perf"));
+    U.cmdRow("<pa> perf [kb] [pkg] [mode]", L.tr("throughput test, no file needed — sd|efc picks the target drive",
+                                                 "Durchsatz-Test, ohne Datei — sd|efc wählt das Ziel-Laufwerk"));
+    U.cmdRow("sd/ | efc/", L.tr("prefix a REMOTE path (else LittleFS): df ll ls rm mkdir rmdir mv info get perf",
+                                "REMOTE-Pfad voranstellen (sonst LittleFS): df ll ls rm mkdir rmdir mv info get perf"));
     std::printf("\n");
 
-    U.section(L.tr("TRANSFER OPTIONS", "TRANSFER-OPTIONEN"), L.tr("(send; order-independent)", "(send; reihenfolgeunabhängig)"));
-    U.cmdRow("pkg = <n> | auto", L.tr("APDU payload; auto = detected interface max", "APDU-Nutzlast; auto = erkannter Interface-Max"));
-    U.cmdRow("mode = safe | fast", L.tr("CRC/chunk · windowed (AIMD) · fast w<N> = fixed window",
-                                        "CRC/Chunk · Fenster (AIMD) · fast w<N> = festes Fenster"));
-    U.cmdRow("apply | on | yes", L.tr("also flash + reboot after upload", "nach Upload auch flashen + Reboot"));
-    U.cmdRow("no-resume | nr | fresh", L.tr("ignore a partial; upload from zero", "Fragment ignorieren; von vorn hochladen"));
-    U.cmdRow("verbose | v", L.tr("1 Hz progress line during the transfer", "1-Hz-Fortschrittszeile beim Transfer"));
+    U.section(L.tr("TRANSFER OPTIONS", "TRANSFER-OPTIONEN"), L.tr("(order-independent, three equal spellings)",
+                                                                  "(reihenfolgeunabhängig, drei gleichwertige Schreibweisen)"));
+    U.cmdRow("--mode safe | fast", L.tr("safe = confirm every chunk · fast = windowed. --mode=fast works too",
+                                        "safe = jeder Chunk wird bestätigt · fast = Fenster. --mode=fast geht auch"));
+    U.cmdRow("--pkg <16..254> | auto", L.tr("APDU payload; auto = the interface maximum we detected",
+                                            "APDU-Nutzlast; auto = das erkannte Interface-Maximum"));
+    U.cmdRow("--window <4..64>", L.tr("pin the fast window instead of letting it adapt — needs --mode fast",
+                                      "das fast-Fenster festnageln statt es regeln zu lassen — verlangt --mode fast"));
+    U.cmdRow("--apply | --no-apply", L.tr("flash + reboot after a verified upload, or explicitly not",
+                                          "nach geprüftem Upload flashen + Reboot, oder ausdrücklich nicht"));
+    U.cmdRow("--no-resume", L.tr("ignore a partial on the target; upload from zero",
+                                 "Fragment auf dem Ziel ignorieren; von vorn hochladen"));
+    U.cmdRow("--keep", L.tr("perf: leave the test file behind instead of deleting it",
+                            "perf: die Testdatei stehen lassen statt sie zu löschen"));
+    U.cmdRow("--progress | --quiet", L.tr("output level for this one command: live 1 Hz · result line only",
+                                          "Ausgabestufe für diesen einen Aufruf: live 1 Hz · nur die Ergebniszeile"));
+    U.cmdRow("", L.tr("same things, shorter: -f -a -k -n -q -v[0-2], bundled as -fa. And the bare words the "
+                      "device console always took: fast · safe · auto · w16 · apply · nr · keep · verbose",
+                      "dieselben Dinge, kürzer: -f -a -k -n -q -v[0-2], gebündelt als -fa. Und die bloßen "
+                      "Wörter, die die Gerätekonsole immer nahm: fast · safe · auto · w16 · apply · nr · "
+                      "keep · verbose"));
+    U.cmdRow("", L.tr("a value out of range, a window without fast, or an unknown word is refused — never "
+                      "silently ignored",
+                      "ein Wert außerhalb des Bereichs, ein Fenster ohne fast oder ein unbekanntes Wort wird "
+                      "abgelehnt — nie stillschweigend übergangen"));
+    std::printf("\n");
+
+    U.section("knxOTA", L.tr("firmware update over the KNX bus", "Firmware-Update über den KNX-Bus"));
+    U.cmdRow("knxota <file.uf2|.bin>", L.tr("update a device from a firmware file on THIS computer; without --ip and "
+                                            "address it asks for interface and device",
+                                            "ein Gerät aus einer Firmware-Datei auf DIESEM Rechner aktualisieren; ohne "
+                                            "--ip und Adresse fragt es Interface und Gerät ab"));
+    U.cmdRow("--check", L.tr("only compare and report — writes nothing (try this first)",
+                             "nur prüfen und berichten — schreibt nichts (damit zuerst testen)"));
+    U.cmdRow("--force", L.tr("allow a downgrade, or a file that states no identity",
+                             "Downgrade zulassen, oder eine Datei ohne Kennung"));
+    U.cmdRow("--no-compress", L.tr("send it uncompressed (takes about twice as long)",
+                                   "unkomprimiert senden (dauert etwa doppelt so lang)"));
+    U.cmdRow("--keep-temp", L.tr("keep the prepared firmware on disk", "die vorbereitete Firmware behalten"));
+    U.cmdRow("<pa> fwupdate <remote>", L.tr("flash a firmware the device already has -> reboots it",
+                                            "eine Firmware flashen, die das Gerät schon hat -> Reboot"));
+    U.cmdRow("", L.tr("exit: 0 ok · 1 nothing to do · 2 usage · 3 device refuses writes · 6 no answer",
+                      "Ende: 0 ok · 1 nichts zu tun · 2 Aufruf · 3 Gerät sperrt · 6 keine Antwort"));
+    std::printf("\n");
+
+    U.cmdRow("retry [max|transfer|backoff [n]]",
+             L.tr("show or set how often a transfer retries and how long it waits between attempts",
+                  "anzeigen oder setzen, wie oft ein Transfer wiederholt wird und wie lange er dazwischen wartet"));
+    std::printf("\n");
+
+    U.section(L.tr("SHORT FORMS & FLAGS", "KURZFORMEN & FLAGS"), L.tr("(everywhere)", "(überall)"));
+    U.cmdRow("p i d l u g a m", L.tr("ping · info · df · ll · send · get · apply · mv", "ping · info · df · ll · send · get · apply · mv"));
+    U.cmdRow("md rd li lo fw pf f e", L.tr("mkdir · rmdir · login · logout · fwupdate · perf · feat · exists",
+                                           "mkdir · rmdir · login · logout · fwupdate · perf · feat · exists"));
+    U.cmdRow("s c", L.tr("status · cancel — rm/rmdir/format have no short form on purpose",
+                         "status · cancel — rm/rmdir/format bewusst ohne Kurzform"));
+    U.cmdRow("-faknqv (bundled)", L.tr("AFTER the command: f fast · a apply · k keep · n no-resume · q quiet · "
+                                       "v[0-2] level. An unknown letter is reported, never half-applied",
+                                       "NACH dem Kommando: f fast · a apply · k keep · n no-resume · q leise · "
+                                       "v[0-2] Stufe. Ein unbekannter Buchstabe wird gemeldet, nie halb angewendet"));
+    U.cmdRow("-v0 | -v1 | -v2", L.tr("output level: quiet · compact (default) · live 1 Hz",
+                                     "Ausgabestufe: leise · kompakt (Standard) · live 1 Hz"));
+    U.cmdRow("verbose [0|1|2]", L.tr("set that level permanently (no value = show it)",
+                                     "diese Stufe dauerhaft setzen (ohne Wert = anzeigen)"));
+    std::printf("\n");
+
+    U.section(L.tr("LOCAL TOOLS", "LOKALE WERKZEUGE"), L.tr("(no bus, no interface)", "(ohne Bus, ohne Interface)"));
+    U.cmdRow("gzip <in> <out>", L.tr("gzip a local file (RP firmware prep)", "lokale Datei gzip'en (RP-Firmware vorbereiten)"));
+    U.cmdRow("decode <hex LPDU>", L.tr("decode a raw TP1 frame offline (APCI + FTC/console)",
+                                       "Roh-TP1-Frame offline dekodieren (APCI + FTC/Console)"));
+    U.cmdRow("install | uninstall", L.tr("put this ftc on the PATH, or take it off again — version-aware, asks before a "
+                                         "downgrade. --system = /usr/local/bin, else ~/.local/bin, --dir <path> overrides",
+                                         "dieses ftc in den PATH legen oder entfernen — versionsbewusst, fragt vor einem "
+                                         "Downgrade. --system = /usr/local/bin, sonst ~/.local/bin, --dir <pfad> überschreibt"));
     std::printf("\n");
 
     U.section(L.tr("DEVICE", "GERÄT"));
@@ -1379,18 +1513,49 @@ static void usage()
     std::printf("\n");
 #endif
 
-    U.section(L.tr("EXAMPLES", "BEISPIELE"));
-    static const char* const ex[] = {
-        "ftc --discover",
-        "ftc --ip 11.11.0.126 5.0.3 info",
-        "ftc --ip 11.11.0.126 5.0.3 send fw.bin.gz fast",
-        "ftc --ip 11.11.0.126 5.0.3 send ../build/firmware.bin.gz apply",
-        "ftc --ip 11.11.0.126 5.0.3 get /firmware.bin.gz ./fw.bin.gz",
-        "ftc --ip 11.11.0.126 5.0.3 led blink",
-        "ftc --lang de --ip 11.11.0.126 5.0.3 info",
+    U.section(L.tr("EXAMPLES", "BEISPIELE"), L.tr("(a working day, top to bottom)", "(ein Arbeitstag, von oben nach unten)"));
+    // Grouped the way the work actually happens: find the interface, look at the device, then act on it.
+    // Each line is runnable as printed -- only the addresses need changing.
+    struct Ex { const char* cmd; const char* en; const char* de; };
+    static const Ex ex[] = {
+        {"ftc --discover", "which interfaces are on the network?", "welche Interfaces gibt es im Netz?"},
+        {"ftc -i 11.11.0.126 info", "what can this interface do?", "was kann dieses Interface?"},
+        {"ftc -i 11.11.0.126 scan 5.0 openknx",
+         "find the OpenKNX devices on line 5.0, with their identity",
+         "OpenKNX-Geräte auf Linie 5.0 finden, samt Identität"},
+        {"", "", ""},
+        {"ftc -i 11.11.0.126 5.0.3 p", "is it there, and how fast does it answer?", "ist es da, und wie schnell antwortet es?"},
+        {"ftc -i 11.11.0.126 5.0.3 i", "device fingerprint: version, features, tables", "Steckbrief: Version, Funktionen, Tabellen"},
+        {"ftc -i 11.11.0.126 5.0.3 f", "why does it refuse a write?", "warum lehnt es einen Schreibzugriff ab?"},
+        {"ftc -i 11.11.0.126 5.0.3 l sd/", "list the SD card, with CRCs", "SD-Karte auflisten, mit Prüfsummen"},
+        {"", "", ""},
+        {"ftc -i 11.11.0.126 5.0.3 u cfg.json /cfg.json", "upload a file", "eine Datei hochladen"},
+        {"ftc -i 11.11.0.126 5.0.3 u fw.bin.gz -fa", "upload fast, then flash and reboot", "schnell hochladen, dann flashen und neu starten"},
+        {"ftc -i 11.11.0.126 5.0.3 g /log.txt ./log.txt", "fetch a file from the device", "eine Datei vom Gerät holen"},
+        {"ftc knxota firmware.uf2 --check", "compare a firmware file against the device, write nothing",
+         "Firmware-Datei mit dem Gerät vergleichen, nichts schreiben"},
+        {"", "", ""},
+        {"ftc -i 11.11.0.126 5.0.3 con", "open the device's console over the bus", "die Konsole des Geräts über den Bus öffnen"},
+        {"ftc -i 11.11.0.126 bm", "watch the raw bus", "den Bus roh mitlesen"},
+        {"ftc -i 11.11.0.126 5.0.3 led blink", "make it blink so you find it in the cabinet",
+         "blinken lassen, um es im Schrank zu finden"},
+        {"ftc -i 11.11.0.126 5.0.3 pf 64 fast", "how fast is this link, without touching a file",
+         "wie schnell ist diese Strecke, ohne eine Datei anzufassen"},
     };
-    for (const char* e : ex)
-        std::printf("  %s\n", c.dim(e).c_str());
+    // The note sits in its own column while there is room for it; in a narrow window it moves below the
+    // command instead of wrapping into it -- a command line must stay copy-pasteable.
+    constexpr int EXCOL = 46;
+    const bool wide = ftc::Tpl::cols() >= EXCOL + 56; // the longest note still has to fit beside it
+    for (const Ex& e : ex)
+    {
+        if (!e.cmd[0]) { std::printf("\n"); continue; }
+        const char* note = L.tr(e.en, e.de);
+        const int pad = EXCOL - (int)std::strlen(e.cmd);
+        if (wide)
+            std::printf("  %s%*s %s\n", c.txt(e.cmd).c_str(), pad > 1 ? pad : 1, "", c.dim(note).c_str());
+        else
+            std::printf("  %s\n      %s\n", c.txt(e.cmd).c_str(), c.dim(note).c_str());
+    }
     std::printf("\n");
 }
 
@@ -2177,9 +2342,13 @@ static void renderXferRecapBare(const std::vector<double>& hist, const std::vect
  * @brief One-shot transfer with CLI-owned presentation (setup Panel, in-place ~1 Hz+ progress line, result Panel).
  * @details processCommand() must already be armed and g_ftcSuppress set true by the caller.
  */
+// Absolute cap for a running transfer. The default suits the interactive commands; knxOTA raises it from
+// the size it is about to send, because a fixed 30 minutes is shorter than a 2 MB image needs on this bus.
+static uint64_t g_xferCapMs = 1800000;
+
 static int runTransferPresenter()
 {
-    const uint64_t QUIET_MS = 1500, ABS_CAP_MS = 1800000;
+    const uint64_t QUIET_MS = 1500, ABS_CAP_MS = g_xferCapMs; // knxOTA raises this from the image size
     const uint64_t t0 = nowMs();
     uint64_t lastActivity = t0, lastDraw = 0, lastSample = 0;
     uint32_t lastTx = knxTunnelActivity();
@@ -2341,7 +2510,7 @@ static int runTransferPresenter()
 static int runOneShotToQuiescence()
 {
     const uint64_t QUIET_MS = 1500;
-    const uint64_t ABS_CAP_MS = 1800000; // 30 min
+    const uint64_t ABS_CAP_MS = 1800000; // read chains are short; the transfer cap does not belong here
     const uint64_t t0 = nowMs();
     uint64_t lastActivity = t0;
     uint32_t lastTx = knxTunnelActivity();
@@ -2448,7 +2617,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
             std::printf("ipaddr\t%s\n", ip4(d.ip).c_str());
             std::printf("subnet\t%s\n", ip4(d.subnet).c_str());
             std::printf("gateway\t%s\n", ip4(d.gw).c_str());
-            std::printf("ipmethod\t%s\n", ipMethodName(d.ipMethod));
+            std::printf("ipmethod\t%s\n", ipMethodName(d.ipMethod, d.haveIpMethod));
         }
         std::printf("services\t%s\n", famList(d).c_str());
         std::printf("routing\t%d\n", d.famVer[0x05] ? 1 : 0);
@@ -2489,7 +2658,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
     p.kv("MAC", c.txt(buf));
     p.kv(L.tr("Prog mode", "Prog-Modus"), (d.status & 0x01)
                                               ? t.chip("PROG", 'o')
-                                              : c.mut(std::string(g_term.glyph("○", "o")) + " off"));
+                                              : c.mut(std::string(g_term.glyph("○", "o")) + " " + L.tr("off", "aus")));
     if (d.hasExt)
     {
         std::snprintf(buf, sizeof(buf), "0x%04X", d.mask);
@@ -2502,7 +2671,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
         p.kv(L.tr("IP address", "IP-Adresse"), c.txt(ip4(d.ip)));
         p.kv(L.tr("Subnet mask", "Subnetzmaske"), c.txt(ip4(d.subnet)));
         p.kv("Gateway", c.txt(ip4(d.gw)));
-        p.kv(L.tr("IP assignment", "IP-Zuweisung"), c.txt(ipMethodName(d.ipMethod)));
+        p.kv(L.tr("IP assignment", "IP-Zuweisung"), c.txt(ipMethodName(d.ipMethod, d.haveIpMethod)));
     }
     p.kv(L.tr("Control port", "Steuer-Port"), c.txt(std::to_string((unsigned)port)));
     // --- Services (all advertised families + versions) ---
@@ -2528,7 +2697,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
     {
         std::snprintf(buf, sizeof(buf), "%u B", d.apduReported);
         p.kv(L.tr("Max APDU (dev-mgmt)", "Max APDU (Dev-Mgmt)"),
-             c.bold(buf) + c.dim(L.tr("  · via device management · no bus traffic", "  · via Device-Mgmt · kein Bus-Traffic")));
+             c.bold(buf) + c.dim(L.tr("  · via device management", "  · via Device-Mgmt")));
     }
     else if (d.apduReason[0])
         p.kv(L.tr("Max APDU (dev-mgmt)", "Max APDU (Dev-Mgmt)"), c.dim(std::string("n/a · ") + d.apduReason));
@@ -2627,14 +2796,15 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
  */
 static const char* ftcLoadNameH(uint8_t s)
 {
+    ftc::I18n& L = g_i18n;
     switch (s)
     {
-        case 0: return "unloaded";
-        case 1: return "loaded";
-        case 2: return "loading";
-        case 3: return "error";
-        case 4: return "unloading";
-        case 5: return "load completing";
+        case 0: return L.tr("unloaded", "nicht geladen");
+        case 1: return L.tr("loaded", "geladen");
+        case 2: return L.tr("loading", "wird geladen");
+        case 3: return L.tr("error", "Fehler");
+        case 4: return L.tr("unloading", "wird entladen");
+        case 5: return L.tr("load completing", "Laden wird abgeschlossen");
         default: return "";
     }
 }
@@ -2643,7 +2813,28 @@ static const char* ftcLoadNameH(uint8_t s)
  * @brief Drive the cooperative loop to quiescence, snapshotting listing() (released on finish) for ll/ls/scan.
  * @details mergeMode = scan (entries stream in, then isOpenKnx is set in place -> merge by name); else replace-on-grow.
  */
-static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool progress = false)
+/** @brief One frame of the live spinner, advancing on the wall clock so it turns at a steady rate. */
+static const char* liveSpinner(uint64_t nowMsV)
+{
+    static const char* SPU[8] = {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"};
+    static const char* SPA[8] = {"|", "/", "-", "\\", "|", "/", "-", "\\"};
+    const int si = (int)((nowMsV / 80) % 8);
+    return g_term.glyph(SPU[si], SPA[si]);
+}
+
+/**
+ * @brief Draw a one-line live status in place.
+ * @details On stderr, so it never mixes into piped output, and clipped to the CURRENT terminal width on
+ *          every call — a wrapped line leaves fragments a carriage return cannot clear.
+ */
+static void liveLine(const std::string& body)
+{
+    std::fprintf(stderr, "\r%s\x1b[K", g_tpl.clip(body, ftc::Tpl::cols() - 1).c_str());
+    std::fflush(stderr);
+}
+
+static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool progress = false,
+                              const std::function<void(const FtcEntry&)>* onNew = nullptr)
 {
     auto absorb = [&]() {
         const std::vector<FtcEntry>& lst = openknxFileTransferClient.listing();
@@ -2658,7 +2849,11 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
                         d = &s;
                         break;
                     }
-                if (!d) snap.push_back(e);
+                if (!d)
+                {
+                    snap.push_back(e);
+                    if (onNew) (*onNew)(e); // a freshly found address -- hand it on while the sweep runs
+                }
                 else if (e.isOpenKnx)
                     d->isOpenKnx = true;
             }
@@ -2692,22 +2887,20 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
         if (progress && now - lastRender > 60) // live scan line: spinner + the PA being probed + found/probed counters
         {
             lastRender = now;
-            static const char* SPU[8] = {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"};
-            static const char* SPA[8] = {"|", "/", "-", "\\", "|", "/", "-", "\\"};
-            const int si = (int)((now / 80) % 8);
             const FtcStatus& st = openknxFileTransferClient.status();
             const uint16_t pa = openknxFileTransferClient.scanCurrentPa();
             char paS[16];
             std::snprintf(paS, sizeof(paS), "%u.%u.%u", (pa >> 12) & 0x0F, (pa >> 8) & 0x0F, pa & 0xFF);
             auto& c = g_tpl.theme();
-            const std::string live = std::string("  ") + c.green(g_term.glyph(SPU[si], SPA[si])) + " " +
-                                     c.cyan(std::string("scanning ") + paS) + "   " +
-                                     c.bold(std::to_string(openknxFileTransferClient.scanFound()) + " found") + "   " +
-                                     c.dim(std::to_string(st.done) + "/" + std::to_string(st.total) + " probed");
+            const std::string live = std::string("  ") + c.green(liveSpinner(now)) + " " +
+                                     c.cyan(std::string(g_i18n.tr("scanning ", "suche ")) + paS) + "   " +
+                                     c.bold(std::to_string(openknxFileTransferClient.scanFound()) +
+                                            g_i18n.tr(" found", " gefunden")) + "   " +
+                                     c.dim(std::to_string(st.done) + "/" + std::to_string(st.total) +
+                                           g_i18n.tr(" probed", " gefragt"));
             // resize-safe: clip to the CURRENT terminal width (re-queried every render) so the line never wraps --
             // a wrapped line leaves fragments \r cannot clear (esp. when the window is shrunk mid-scan).
-            std::fprintf(stderr, "\r%s\x1b[K", g_tpl.clip(live, ftc::Tpl::cols() - 1).c_str());
-            std::fflush(stderr);
+            liveLine(live);
         }
         if (g_pchild) // parallel-scan child: emit the P progress protocol on stdout (the parent aggregates it)
         {
@@ -3046,6 +3239,57 @@ static std::set<uint16_t> probeTunnelSlots(const std::string& ip, uint16_t port,
 /**
  * @brief Per-class summary footer for a scan result (total + how many of each device class).
  */
+/**
+ * @brief Report a target that stayed silent, and offer the line difference only when there is one.
+ * @details Whether a coupler forwards to another line is not knowable from here, so the difference is
+ *          never a warning on its own -- a device that answers is never questioned, however far away it
+ *          lives. It is named here, after the silence has been measured, because it is by far the most
+ *          common reason for it.
+ * @param detail an extra first line (e.g. how many attempts were made), or nullptr
+ */
+static void reportUnreachable(const std::string& paText, uint16_t targetPa, const char* detail)
+{
+    ftc::I18n& L = g_i18n;
+    const uint16_t own = g_knxTunnel.assignedPA();
+    const bool otherLine = ((own ^ targetPa) & 0xFF00) != 0;
+    char ownLine[16];
+    std::snprintf(ownLine, sizeof(ownLine), "%u.%u", (unsigned)((own >> 12) & 0x0F), (unsigned)((own >> 8) & 0x0F));
+
+    std::vector<std::string> why;
+    if (detail && *detail) why.push_back(detail);
+    if (otherLine)
+        why.push_back(std::string(L.tr("this interface/router sits on line ", "dieses Interface/dieser Router sitzt auf Linie ")) +
+                      ownLine + L.tr(", the device on another one — a coupler would have to pass it through",
+                                     ", das Gerät auf einer anderen — ein Koppler müsste das durchreichen"));
+    std::fflush(stdout);
+    g_ui.errorBlock(false, paText + L.tr(" did not answer", " hat nicht geantwortet"),
+                    {why.empty() ? std::string() : why[0], why.size() > 1 ? why[1] : std::string()},
+                    otherLine ? L.tr("try an interface on the device's own line, or check the coupler's filter table",
+                                     "ein Interface auf der Linie des Geräts nehmen, oder die Filtertabelle des "
+                                     "Kopplers prüfen")
+                              : L.tr("check the address, and that the device is powered and on the bus",
+                                     "Adresse prüfen, und ob das Gerät Spannung hat und am Bus hängt"));
+}
+
+/**
+ * @brief Arm the acknowledgement feed for a sweep that stays inside one line.
+ * @details The sweep already sends the frame a presence test needs; this only routes its acknowledgement
+ *          into the scan machine. Returns false when the interface confirms everything it accepts — its
+ *          acknowledgement would then report every address as present, so it must not be trusted.
+ */
+static bool armScanAckFeed(uint16_t lineBase)
+{
+    if (!g_knxTunnel.connected()) return false;
+    ftc::FastScanDeps fd;
+    fd.pump = []() { g_knxTunnel.pump(); };
+    fd.nowMs = []() { return nowMs(); };
+    fd.aborted = []() { return g_abort != 0; };
+    if (!ftc::interfaceReportsAcks(g_knxTunnel, lineBase, fd)) return false;
+    g_knxTunnel.setConfirmCallback(
+        [](uint16_t pa, bool ok) { openknxFileTransferClient.ftcScanAck(pa, ok); });
+    return true;
+}
+
 static void renderScanSummary(const std::vector<FtcEntry>& devices)
 {
     ftc::Theme& c = g_theme;
@@ -3053,7 +3297,8 @@ static void renderScanSummary(const std::vector<FtcEntry>& devices)
     std::vector<std::pair<std::string, int>> byClass;
     for (const auto& e : devices)
     {
-        const char* cls = ftc::knxMaskName((uint16_t)e.crc);
+        // Mask 0 means the address acknowledged but never answered — present on the bus, silent above.
+        const char* cls = e.crc == 0 ? L.tr("acknowledged only", "nur quittiert") : ftc::knxMaskName((uint16_t)e.crc);
         std::string k = (cls && cls[0]) ? cls : "unknown";
         bool found = false;
         for (auto& p : byClass)
@@ -3070,6 +3315,101 @@ static void renderScanSummary(const std::vector<FtcEntry>& devices)
     for (const auto& p : byClass)
         s += c.dim("   \xC2\xB7   ") + c.txt(std::to_string(p.second) + "\xC3\x97 " + p.first);
     std::printf("  %s\n", s.c_str());
+}
+
+
+/**
+ * @brief Bring a target into a state that accepts writes — ask for the password, or wait for the button.
+ * @details Every command that writes runs into the same four ETS access stages, and the useless answer is
+ *          always the same one: print "this device is locked" and quit, leaving the user to start over once
+ *          their hand has reached the enclosure. So this resolves it in place, and both the firmware update
+ *          and the remote console go through it.
+ * @param pa      the device to open up
+ * @param waitS   how long to wait for the programming button (0 = do not offer the wait)
+ * @param quiet   drop the explanatory chrome; a refusal still says one line, because silence is not an answer
+ * @return the reading the target ended up at — stage Open means writes are allowed now
+ */
+static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, bool quiet, bool askOnly = false)
+{
+    ftc::I18n& L = g_i18n;
+    ftc::Theme& c = g_theme;
+
+    ftc::AccessDeps ad;
+    ad.pump = []() {
+        g_knxTunnel.pump();
+        openknxFileTransferClient.loop(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2)); // waits here last minutes, not ms
+    };
+    ad.nowMs = []() { return nowMs(); };
+    ad.aborted = []() { return g_abort != 0; };
+    ad.clientBusy = []() { return openknxFileTransferClient.isBusy(); };
+    ad.login = [pa](const char* pw) {
+        // The shared client narrates the login on the device logger, in English — it is the same code that
+        // runs on an RP2040 and has no translations. We report the outcome ourselves, in one voice.
+        g_ftcSuppress = true;
+        openknxFileTransferClient.requestLogin(pa, pw);
+        runOneShotToQuiescence();
+        g_ftcSuppress = false;
+    };
+
+    ftc::AccessState acc = ftc::readAccess(g_knxTunnel, pa, ad);
+    for (int attempt = 0; !askOnly && attempt < 3 && acc.stage != ftc::Access::Open; ++attempt)
+    {
+        if (acc.stage == ftc::Access::NeedPassword)
+        {
+            if (!g_term.isTty()) break; // nobody there to type it — the caller reports the refusal
+            g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("this device is password protected",
+                                                    "dieses Gerät ist passwortgeschützt"), {});
+            if (!quiet)
+                g_tpl.note(L.tr("that is the password from this device's ETS \"access protection\" parameter — "
+                                "not your ETS password and not a KNX Secure key",
+                                "das ist das Passwort aus dem ETS-Parameter \"Zugriffsschutz\" dieses Geräts — "
+                                "nicht dein ETS-Passwort und kein KNX-Secure-Schlüssel"));
+            std::string pw;
+            if (!ftc::readSecret(g_term, c, L.tr("password", "Passwort"), pw)) break;
+            ad.login(pw.c_str());
+            pw.assign(pw.size(), '\0'); // do not leave it lying around once it is on its way
+            acc = ftc::readAccess(g_knxTunnel, pa, ad);
+            if (acc.stage == ftc::Access::Open)
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
+                             {L.tr("writes stay allowed until the device goes idle",
+                                   "Schreibzugriff gilt, bis das Gerät in Ruhe fällt")});
+            else if (acc.stage == ftc::Access::NeedPassword)
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("that password was not accepted",
+                                                        "dieses Passwort wurde nicht angenommen"),
+                             {L.tr("the device slows down repeated attempts on purpose",
+                                   "das Gerät bremst wiederholte Versuche absichtlich aus")});
+            continue;
+        }
+        if (acc.stage == ftc::Access::Blocked || acc.stage == ftc::Access::LockedOff)
+        {
+            if (waitS == 0) break;
+            g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("this device is not accepting writes right now",
+                                                    "dieses Gerät nimmt gerade keine Schreibzugriffe an"), {});
+            g_tpl.note(L.tr("press the programming button on the device now — I check every second",
+                            "drücke jetzt die Programmiertaste am Gerät — ich prüfe jede Sekunde nach"));
+            const bool freed = ftc::waitForWrites(g_knxTunnel, pa, ad, waitS, [&](uint32_t el) {
+                g_tpl.waitTick(L.tr("waiting for the device", "warte auf das Gerät"), el,
+                               L.tr("ctrl-C stops", "Strg-C bricht ab"));
+            });
+            if (g_term.isTty()) std::printf("\r\x1b[K");
+            if (freed)
+            {
+                acc = ftc::readAccess(g_knxTunnel, pa, ad);
+                continue;
+            }
+            g_ui.errorBlock(false, L.tr("the button did not free it", "die Taste hat die Sperre nicht gelöst"),
+                            {L.tr("then it is the access protection set in ETS",
+                                  "dann ist es der Zugriffsschutz aus der ETS"),
+                             L.tr("the parameter is called \"access protection\" in the OpenKNX application",
+                                  "der Parameter heißt \"Zugriffsschutz\" in der OpenKNX-Applikation")},
+                            L.tr("set it to Always or Programming mode and download the application once",
+                                 "auf Immer oder Programmiermodus stellen und die Applikation einmal laden"));
+            break;
+        }
+        break; // Unknown: nothing to resolve
+    }
+    return acc;
 }
 
 /**
@@ -3123,11 +3463,37 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
     ftc::Tpl& t = g_tpl;
     const std::string target = pos[0];
 
+    // `details` asks every found device who it is; without it only the System B candidates are asked,
+    // because only those can be OpenKNX. The reads run in child processes over their own tunnels, started
+    // while the sweep is still going, so they cost almost no extra wall clock.
+    bool wantDetails = false, wantOpenKnx = false;
+    for (const auto& a : pos)
+    {
+        if (a == "details") wantDetails = true;
+        if (a == "openknx") wantOpenKnx = true;
+    }
+    std::unique_ptr<ftc::DetailPool> pool;
+    if (k == K_Scan && (wantDetails || wantOpenKnx) && !g_pchild && !g_ip.empty())
+        pool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
+                                       g_tunnels > 0 ? g_tunnels : FTC_DETAIL_WORKERS));
+
     std::string cmd = "ftc";
     for (const auto& p : pos)
     {
+        if (p == "details") continue; // handled here, the shared parser does not know it
+        // With the pool running, the sweep's post-probe would re-ask the same devices over the shared
+        // tunnel (double traffic, mutual starvation); the pool's answer already carries the manufacturer.
+        if (p == "openknx" && pool) continue;
         cmd += ' ';
         cmd += p;
+    }
+
+    bool ackFeed = false;
+    if (k == K_Scan)
+    {
+        uint16_t aStart = 0, aEnd = 0;
+        if (parseScanRange(pos, aStart, aEnd) && (aStart >> 8) == (aEnd >> 8))
+            ackFeed = armScanAckFeed((uint16_t)(aStart & 0xFF00));
     }
 
     g_ftcSuppress = true;
@@ -3140,9 +3506,18 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
         });
     else
     {
+        std::function<void(const FtcEntry&)> onNew;
+        if (pool)
+            onNew = [&](const FtcEntry& e) {
+                // The class comes from the sweep; only a System B device can be OpenKNX. An address that
+                // merely acknowledged (mask 0) says nothing about itself, so `details` includes it too.
+                const bool candidate = wantDetails || (e.crc & 0xFFF0) == 0x07B0;
+                if (candidate) pool->submit(e.name, e.crc != 0); // mask 0 = only acknowledged, never answers up
+            };
         openknxFileTransferClient.processCommand(cmd, false);
-        ftcPumpStructured(snap, k == K_Scan, k == K_Scan && !quiet); // live progress line for the scan (unless -q)
+        ftcPumpStructured(snap, k == K_Scan, k == K_Scan && !quiet, pool ? &onNew : nullptr); // live progress line for the scan (unless -q)
     }
+    if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
     g_ftcSuppress = false;
 
     switch (k)
@@ -3229,8 +3604,64 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             }
             if (d.ftmVersion) p.kv(L.tr("FTM version", "FTM-Version"), c.bold(vbuf));
             p.kv(L.tr("Features", "Funktionen"), c.txt(feat));
+            if (d.maxApdu)
+            {
+                // Both numbers matter: a transfer uses the smaller of target and interface, so seeing them
+                // side by side is what explains the frame size the tool ends up choosing.
+                char ab[80];
+                std::snprintf(ab, sizeof(ab), "%u B", (unsigned)d.maxApdu);
+                std::string row = c.bold(ab);
+                if (g_ifaceApdu)
+                {
+                    // Whichever is smaller decides the frame size, and it is not always the device -- an
+                    // old interface in the path is the usual surprise. Name the one that limits.
+                    const char* who = (d.maxApdu < g_ifaceApdu)   ? L.tr(" -> the target limits", " -> das Ziel begrenzt")
+                                      : (g_ifaceApdu < d.maxApdu) ? L.tr(" -> the interface limits", " -> das Interface begrenzt")
+                                                                  : "";
+                    row += "  " + c.dim(std::string(L.tr("· interface ", "· Interface ")) +
+                                        std::to_string((unsigned)g_ifaceApdu) + " B" + who);
+                }
+                p.kv(L.tr("Max APDU", "Max APDU"), row);
+            }
             p.kv(L.tr("Prog mode", "Prog-Modus"),
-                 d.progMode ? t.chip("PROG", 'o') : c.mut(std::string(g_term.glyph("○", "o")) + " off"));
+                 d.progMode ? t.chip("PROG", 'o') : c.mut(std::string(g_term.glyph("○", "o")) + " " + L.tr("off", "aus")));
+            // Each of these appears only when the device answered it -- an empty row would claim knowledge
+            // we do not have, and most devices implement none of the three.
+            if (d.haveErrorCode)
+                p.kv(L.tr("Last error", "Letzter Fehler"),
+                     d.errorCode == 0 ? c.green(L.tr("none", "keiner"))
+                                      : c.amber(std::string("0x") + [&]{ char b[8]; std::snprintf(b, sizeof(b), "%02X", d.errorCode); return std::string(b); }()));
+            if (d.haveDownloads)
+            {
+                char db[24];
+                std::snprintf(db, sizeof(db), "%u", (unsigned)d.downloads);
+                p.kv(L.tr("ETS downloads", "ETS-Downloads"),
+                     d.downloads == 0 ? c.amber(std::string(db) + L.tr("  — never programmed", "  — nie programmiert"))
+                                      : c.txt(db));
+            }
+            if (d.haveDevControl)
+            {
+                std::string st;
+                if (d.devControl & 0x01) st += L.tr("safe state", "Sicherheitszustand");
+                if (d.devControl & 0x04) { if (!st.empty()) st += " · "; st += L.tr("verify mode", "Verify-Modus"); }
+                if (st.empty()) st = L.tr("normal", "normal");
+                p.kv(L.tr("Device state", "Gerätezustand"),
+                     (d.devControl & 0x01) ? c.amber(st) : c.txt(st));
+            }
+            if (d.isRouter)
+            {
+                p.sep();
+                p.kv(L.tr("Coupler", "Koppler"), c.cyan(L.tr("has a router object", "hat ein Router-Objekt")));
+                if (d.haveLineStatus)
+                    p.kv(L.tr("Sub line", "Nebenlinie"),
+                         (d.lineStatus & 0x01) ? c.green(L.tr("ok", "ok")) : c.amber(L.tr("no power / fault", "keine Spannung / Störung")));
+                if (d.haveRouterApdu)
+                {
+                    char rb[24];
+                    std::snprintf(rb, sizeof(rb), "%u B", (unsigned)d.routerApdu);
+                    p.kv(L.tr("Routed APDU", "Weitergeleitete APDU"), c.txt(rb));
+                }
+            }
             if (d.haveBcu1)
             {
                 // BCU1/BCU2 memory-map extras (ETS "Gerätehersteller / Ausführungszustand / Ausführungsfehler / PEI Typ / Applikationsprogramm").
@@ -3447,7 +3878,8 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                         std::snprintf(s, sizeof(s), "%u B", (unsigned)b);
                     return s;
                 };
-                t.tableRow({c.dim("MODE"), c.dim("SIZE"), c.dim("CRC"), c.dim("NAME")}, {5, -10, 10, 0});
+                t.tableRow({c.dim(L.tr("MODE", "ART")), c.dim(L.tr("SIZE", "GRÖSSE")), c.dim("CRC"),
+                            c.dim(L.tr("NAME", "NAME"))}, {5, -10, 10, 0});
                 for (const auto& e : snap)
                 {
                     char crc[12];
@@ -3456,8 +3888,8 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     if (e.isOpenKnx) name += "  " + t.chip("OpenKNX");
                     std::string sizeCol = e.isDir ? c.dim("—") : c.txt(fmtSize(e.size));
                     std::string crcCol = e.isDir ? c.dim("—") : (e.hasCrc ? c.mut(crc) : c.dim("n/a"));
-                    t.tableRow({e.isDir ? c.cyan("dir") : c.txt("file"), sizeCol, crcCol, name},
-                               {5, -10, 10, 0});
+                    t.tableRow({e.isDir ? c.cyan(L.tr("dir", "Ordner")) : c.txt(L.tr("file", "Datei")),
+                                sizeCol, crcCol, name}, {5, -10, 10, 0});
                 }
             }
             else
@@ -3483,12 +3915,76 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             t.status(ftc::Tpl::Stat::Ok, L.tr("scan complete", "Scan fertig"),
                      {std::to_string(snap.size()) + L.tr(" device(s)", " Gerät(e)")});
             if (snap.empty()) break;
-            t.tableRow({c.dim("ST"), c.dim("PA"), c.dim("CLASS"), c.dim("INFO")}, {2, 10, 26, 0});
-            for (const auto& e : snap)
+
+            // The devices were asked who they are while the sweep ran; wait out whatever is still in flight.
+            std::unordered_map<std::string, ftc::DetailRow> det;
+            if (pool)
             {
-                const char* cls = ftc::knxMaskName((uint16_t)e.crc);
-                std::string info = e.isOpenKnx ? (std::string() + t.chip("OpenKNX")) : c.dim("");
-                t.tableRow({t.statusDot('g'), c.txt(e.name), c.txt(cls[0] ? cls : "—"), info}, {2, 10, 26, 0});
+                const uint64_t t0 = nowMs();
+                uint64_t drawn = 0;
+                while (pool->outstanding() > 0 && !g_abort)
+                {
+                    const uint64_t now = nowMs();
+                    if (g_term.isTty() && now - drawn > 60) // turn at the same rate as the sweep line
+                    {
+                        drawn = now;
+                        const size_t done = pool->answered(), left = pool->outstanding();
+                        const unsigned el = (unsigned)((now - t0) / 1000);
+                        char cnt[32], clk[16];
+                        std::snprintf(cnt, sizeof(cnt), "%u/%u", (unsigned)done, (unsigned)(done + left));
+                        std::snprintf(clk, sizeof(clk), "%u:%02u", el / 60, el % 60);
+                        liveLine(std::string("  ") + c.green(liveSpinner(now)) + " " +
+                                 c.cyan(L.tr("reading devices", "lese Geräte")) + "   " + c.bold(cnt) + "   " +
+                                 c.dim(clk));
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+                if (g_abort) pool->abort();
+                pool->wait();
+                det = pool->rows();
+                if (g_term.isTty()) std::fprintf(stderr, "\r\x1b[K");
+                // What a device says about itself beats what the sweep guessed.
+                for (auto& e : snap)
+                {
+                    const auto it = det.find(e.name);
+                    if (it != det.end() && it->second.mfr == ftc::MFR_OPENKNX) e.isOpenKnx = true;
+                }
+            }
+
+            const bool cols = !det.empty();
+            auto fmtSerial = [](const std::string& hex) {
+                // The device answers 12 hex digits: manufacturer, then the serial itself.
+                if (hex.size() != 12) return hex;
+                return hex.substr(0, 4) + ":" + hex.substr(4);
+            };
+            if (cols)
+            {
+                const std::vector<int> w = {2, 9, 20, 18, 9, 8, 0};
+                t.tableRow({c.dim("ST"), c.dim("PA"), c.dim(L.tr("CLASS", "KLASSE")),
+                            c.dim(L.tr("ORDER NO.", "BESTELLNR.")), c.dim(L.tr("VERSION", "VERSION")),
+                            c.dim("FTM"), c.dim(L.tr("SERIAL NO.", "SERIENNR."))}, w);
+                for (const auto& e : snap)
+                {
+                    const char* cls = ftc::knxMaskName((uint16_t)e.crc);
+                    const auto it = det.find(e.name);
+                    const ftc::DetailRow r = it != det.end() ? it->second : ftc::DetailRow{};
+                    std::string pa = c.txt(e.name);
+                    if (e.isOpenKnx) pa = c.cyan(e.name);
+                    auto cell = [&](const std::string& v) { return v.empty() ? c.dim("—") : c.txt(v); };
+                    t.tableRow({t.statusDot('g'), pa,
+                                c.txt(e.crc == 0 ? L.tr("acknowledged only", "nur quittiert") : (cls[0] ? cls : "—")),
+                                cell(ftc::orderText(r.order)), cell(r.version), cell(r.ftm), cell(fmtSerial(r.serial))}, w);
+                }
+            }
+            else
+            {
+                t.tableRow({c.dim("ST"), c.dim("PA"), c.dim("CLASS"), c.dim("INFO")}, {2, 10, 26, 0});
+                for (const auto& e : snap)
+                {
+                    const char* cls = ftc::knxMaskName((uint16_t)e.crc);
+                    std::string info = e.isOpenKnx ? (std::string() + t.chip("OpenKNX")) : c.dim("");
+                    t.tableRow({t.statusDot('g'), c.txt(e.name), c.txt(cls[0] ? cls : "—"), info}, {2, 10, 26, 0});
+                }
             }
             renderScanSummary(snap); // total + per-class breakdown footer (parity with the parallel scan)
             break;
@@ -3571,7 +4067,14 @@ int main(int argc, char** argv)
     uint8_t prio2 = 0x03;         // the 2-bit CTRL value (low=3 · normal=1 · urgent=2 · system=0)
     bool prioForce = false;       // --prio-force: confirm an elevated priority in a non-TTY/scripted run
     bool installSystem = false;   // --system: install/uninstall to the system dir (/usr/local/bin) instead of ~/.local/bin
-    bool installForce = false;    // --force: install even when it would downgrade a newer installed copy (no prompt)
+    bool installForce = false;    // --force-install: install even when it would downgrade a newer installed copy
+    bool knxotaForce = false;     // --force: knxOTA may downgrade, or accept a file that states no identity
+    bool knxotaCheck = false;     // --check / --dry-run: compare and report, never write
+    bool knxotaNoCompress = false; // --no-compress: transfer the image as it is
+    bool knxotaKeepTemp = false;   // --keep-temp: do not delete the prepared payload
+    bool knxotaScan = false;       // the assistant will search the bus for a target once connected
+    bool knxotaScanAsk = false;    // ...and lets the user name the line first (c instead of s)
+    std::string knxotaLine;        // the line last searched: searching again must not fall back to another one
     std::string installDirArg;    // --dir <path>: explicit install/uninstall directory (overrides the default)
     std::vector<std::string> pos; // positional tokens -> the `ftc ...` command tail
 
@@ -3691,8 +4194,16 @@ int main(int argc, char** argv)
             prioForce = true; // confirm an elevated priority in a non-TTY / scripted run (no prompt)
         else if (a == "--system")
             installSystem = true; // install/uninstall to the system dir instead of the per-user default
-        else if (a == "--force")
+        else if (a == "--force-install")
             installForce = true; // allow a downgrade install without prompting (scripts)
+        else if (a == "--force")
+            knxotaForce = true; // knxOTA: allow a downgrade / an unidentifiable file
+        else if (a == "--check" || a == "--dry-run")
+            knxotaCheck = true; // knxOTA: read-only — compare and report, write nothing
+        else if (a == "--no-compress")
+            knxotaNoCompress = true; // send the firmware as it is, even to a device that could unpack one
+        else if (a == "--keep-temp")
+            knxotaKeepTemp = true; // leave the prepared payload on disk for inspection
         else if (a == "--dir" && i + 1 < argc)
             installDirArg = argv[++i]; // explicit install/uninstall directory
         else if (a == "--lang" && i + 1 < argc)
@@ -3702,6 +4213,15 @@ int main(int argc, char** argv)
         else if (a == "--ascii")
         { /* consumed here; already applied in the pre-scan above */
         }
+        // A `-x` token AFTER the command belongs to the command (the shared parser reads -faknqv/-v0..2);
+        // only letters that parser knows pass through, so a mistyped host option is still reported here.
+        else if (!pos.empty() && a.size() > 1 && a[0] == '-' &&
+                 a.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-=", 1) == std::string::npos)
+            pos.push_back(a); // the shared parser owns this vocabulary, so let it name the problem
+        // Same for a long option after the command (--mode/--pkg/--window …): the shared parser owns it and
+        // reports an unknown one. Before any command (`ftc --bogus`) there is no owner -> reported here.
+        else if (!pos.empty() && a.size() > 2 && a[0] == '-' && a[1] == '-')
+            pos.push_back(a);
         else if (!a.empty() && a[0] == '-' && !(a.size() > 1 && (isdigit((unsigned char)a[1]))))
         {
             std::fprintf(stderr, "unknown option: %s\n", a.c_str());
@@ -3872,6 +4392,191 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "%s\n", L.tr("gzip failed", "gzip fehlgeschlagen"));
         socketCleanup();
         return ok ? 0 : 1;
+    }
+
+    // --- knxOTA: `ftc [--ip <ip>] [<pa>] knxota <local firmware file>` ------------------------------
+    // `knxota` takes a firmware file from THIS machine and walks the whole update; `<pa> fwupdate <remote>`
+    // only flashes something already uploaded. The file is read/checked/prepared BEFORE a tunnel slot is taken.
+    auto lower = [](std::string v) {
+        for (char& ch : v) ch = (char)std::tolower((unsigned char)ch);
+        return v;
+    };
+    size_t knxotaVerb = pos.size();
+    size_t fwupdateVerb = pos.size();
+    for (size_t i = 0; i < pos.size(); ++i)
+    {
+        const std::string v = lower(pos[i]);
+        // We call it knxOTA everywhere, but the two halves are easy to swap from memory — accept both
+        // spellings rather than answer a near miss with "unknown command".
+        if ((v == "knxota" || v == "otaknx") && knxotaVerb == pos.size()) knxotaVerb = i;
+        if (v == "fwupdate" && fwupdateVerb == pos.size()) fwupdateVerb = i;
+    }
+    ftc::FwFile knxotaFw;
+    const bool knxotaActive = knxotaVerb + 1 < pos.size();
+
+    // `fwupdate` pointed at a file that lives here cannot mean the remote trigger — say which word does it.
+    if (!knxotaActive && fwupdateVerb + 1 < pos.size())
+    {
+        const std::string& src = pos[fwupdateVerb + 1];
+        const std::string ext = ftc::fileExt(src);
+        std::error_code fec;
+        if (ext == ".uf2" || ((ext == ".bin" || ext == ".gz") && std::filesystem::is_regular_file(src, fec)))
+        {
+            ftc::I18n& L = g_i18n;
+            if (!quiet) g_ui.banner();
+            std::fflush(stdout); // the block goes to stderr: flush first so a piped run keeps the order
+            g_ui.errorBlock(false,
+                            L.tr("fwupdate flashes a file the device already has",
+                                 "fwupdate flasht eine Datei, die das Gerät bereits hat"),
+                            {L.tr("this file is on this computer, not on the device",
+                                  "diese Datei liegt auf diesem Rechner, nicht auf dem Gerät")},
+                            std::string("ftc knxota ") + src);
+            socketCleanup();
+            return 2;
+        }
+    }
+    if (knxotaActive)
+    {
+        ftc::I18n& L = g_i18n;
+        ftc::Theme& c = g_theme;
+        if (!quiet) g_ui.banner();
+        g_tpl.section(L.tr("knxOTA · firmware update over the KNX bus",
+                           "knxOTA · Firmware-Update über den KNX-Bus"));
+        if (!ftc::readFirmware(pos[knxotaVerb + 1], knxotaFw, L))
+        {
+            g_ui.errorBlock(false, L.tr("this file cannot be used", "diese Datei ist nicht verwendbar"),
+                            {knxotaFw.error},
+                            L.tr("OpenKNX releases ship the .uf2 for RP2040/RP2350 devices and the .bin for ESP32",
+                                 "OpenKNX-Releases liefern die .uf2 für RP2040/RP2350-Geräte und die .bin für ESP32"));
+            socketCleanup();
+            return 2;
+        }
+        ftc::renderFirmwarePanel(g_tpl, c, L, knxotaFw, verbose);
+        if (!knxotaFw.id.valid && !knxotaForce)
+            g_tpl.status(ftc::Tpl::Stat::Warn,
+                         L.tr("this file does not say which device it is for",
+                              "diese Datei sagt nicht, für welches Gerät sie ist"),
+                         {L.tr("the version cannot be compared", "die Version kann nicht verglichen werden")});
+        // Read-only and no device given: on a terminal the assistant still asks — "do not write" is not
+        // "do not ask". Only a scripted run stops at the file, because there is nobody to answer.
+        if (knxotaCheck && ip.empty() && !g_term.isTty())
+        {
+            g_tpl.note(L.tr("nothing was transferred · add --ip <interface> <address> to compare with a device",
+                            "es wurde nichts übertragen · mit --ip <Interface> <Adresse> gegen ein Gerät vergleichen"));
+            std::printf("\n");
+            socketCleanup();
+            return 0;
+        }
+        // --- the assistant: find the interface, then the device. Nothing here sends the user away. ---
+        if (ip.empty())
+        {
+            g_tpl.section(L.tr("Interface", "Interface"));
+            for (;;)
+            {
+                std::vector<ftc::DiscoveredIface> found;
+                // discoverInterfaces blocks for three seconds; without this the line just sits there and
+                // the tool looks hung. runWithBusAnim is what every other blocking read here uses.
+                if (g_term.isTty() && !quiet)
+                    runWithBusAnim(L.tr("looking for KNXnet/IP interfaces …", "suche KNXnet/IP-Interfaces …"),
+                                   [&]() { found = ftc::discoverInterfaces(port, 3000); });
+                else
+                {
+                    std::printf("  %s %s\n", c.cyan(g_term.glyph("⠿", "*")).c_str(),
+                                c.dim(L.tr("looking for KNXnet/IP interfaces …", "suche KNXnet/IP-Interfaces …")).c_str());
+                    found = ftc::discoverInterfaces(port, 3000);
+                }
+                // OpenKNX interfaces first: an unsorted list invites the top row, and the top row is
+                // whatever answered fastest — which is how a foreign router on another line gets picked.
+                std::stable_sort(found.begin(), found.end(), [](const ftc::DiscoveredIface& a, const ftc::DiscoveredIface& b) {
+                    const bool ao = a.name.find("OpenKNX") != std::string::npos || a.name.find("OpenKnx") != std::string::npos;
+                    const bool bo = b.name.find("OpenKNX") != std::string::npos || b.name.find("OpenKnx") != std::string::npos;
+                    return ao && !bo;
+                });
+                if (found.size() == 1)
+                {
+                    ip = found[0].ip;
+                    g_tpl.status(ftc::Tpl::Stat::Ok, found[0].name, {ip, L.tr("the only one that answered", "das einzige, das geantwortet hat")});
+                    break;
+                }
+                if (!found.empty())
+                {
+                    const std::vector<int> w = {3, 16, 7, 0};
+                    g_tpl.tableRow({c.dim("#"), c.dim("IP"), c.dim(L.tr("LINE", "LINIE")), c.dim(L.tr("NAME", "NAME"))}, w);
+                    for (size_t i = 0; i < found.size(); ++i)
+                    {
+                        const bool ok = found[i].name.find("OpenKNX") != std::string::npos ||
+                                        found[i].name.find("OpenKnx") != std::string::npos;
+                        char ln[12];
+                        std::snprintf(ln, sizeof(ln), "%u.%u", (unsigned)((found[i].ia >> 12) & 0x0F),
+                                      (unsigned)((found[i].ia >> 8) & 0x0F));
+                        std::string nm = c.bright(found[i].name);
+                        if (ok) nm += "  " + g_tpl.chip("OpenKNX");
+                        g_tpl.tableRow({c.bold(std::to_string(i + 1)), c.txt(found[i].ip), c.txt(ln), nm}, w);
+                    }
+                    g_tpl.note(L.tr("the interface has to sit on the same LINE as your device: a device 5.0.3 "
+                                    "needs an interface on line 5.0",
+                                    "das Interface muss auf derselben LINIE sitzen wie dein Gerät: ein Gerät 5.0.3 "
+                                    "brauchst du über ein Interface der Linie 5.0"));
+                }
+                else
+                    g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("nothing answered", "nichts geantwortet"),
+                                 {L.tr("the interface may be on another network, or a firewall is blocking it",
+                                       "das Interface hängt evtl. in einem anderen Netz, oder eine Firewall blockt")});
+                g_tpl.keybar({{"1-9", L.tr("take it", "nehmen")}, {"r", L.tr("search again", "erneut suchen")},
+                              {"i", L.tr("type an IP", "IP eingeben")}, {"q", L.tr("quit", "Ende")}});
+                std::printf("  %s ", c.amber("?").c_str());
+                std::fflush(stdout);
+                char in[64] = {0};
+                if (!g_term.isTty() || std::fgets(in, sizeof(in), stdin) == nullptr) { socketCleanup(); return 2; }
+                const char k = (char)std::tolower((unsigned char)in[0]);
+                if (k == 'q') { socketCleanup(); return 130; }
+                if (k == 'r') continue;
+                if (k == 'i')
+                {
+                    std::printf("  %s %s ", c.amber("?").c_str(), c.dim(L.tr("IP address", "IP-Adresse")).c_str());
+                    std::fflush(stdout);
+                    char v[64] = {0};
+                    if (std::fgets(v, sizeof(v), stdin) != nullptr)
+                    {
+                        std::string t(v);
+                        while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
+                        if (!t.empty()) { ip = t; break; }
+                    }
+                    continue;
+                }
+                const int pick = k - '0';
+                if (pick >= 1 && pick <= (int)found.size()) { ip = found[pick - 1].ip; break; }
+            }
+        }
+
+        // The device address. Typing it is the shortcut; searching is the offer — and the search itself
+        // needs the tunnel, so it happens in the online phase once we are connected.
+        if (knxotaVerb == 0) // no address in front of the verb
+        {
+            g_tpl.section(L.tr("Device", "Gerät"));
+            g_tpl.keybar({{L.tr("address", "Adresse"), L.tr("e.g. 5.0.3", "z. B. 5.0.3")},
+                          {"L", L.tr("search this interface's line", "die Linie dieses Interfaces absuchen")},
+                          {"c", L.tr("search another line", "eine andere Linie absuchen")},
+                          {"q", L.tr("quit", "Ende")}});
+            std::printf("  %s ", c.amber("?").c_str());
+            std::fflush(stdout);
+            char in[64] = {0};
+            if (!g_term.isTty() || std::fgets(in, sizeof(in), stdin) == nullptr) { socketCleanup(); return 2; }
+            std::string t(in);
+            while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
+            if (t == "q" || t == "Q") { socketCleanup(); return 130; }
+            unsigned a = 0, l = 0, d = 0;
+            if (std::sscanf(t.c_str(), "%u.%u.%u", &a, &l, &d) == 3 && a <= 15 && l <= 15 && d <= 255)
+            {
+                pos.insert(pos.begin(), t); // the rest of the flow reads the target from pos[0]
+                knxotaVerb++;
+            }
+            else
+            {
+                knxotaScan = true;                       // resolved after the tunnel is up
+                knxotaScanAsk = (t == "c" || t == "C");  // c: let the user name the line first
+            }
+        }
     }
 
     // `ftc install|uninstall [--system] [--dir <path>]` — the running binary copies/removes itself onto PATH.
@@ -4378,6 +5083,9 @@ int main(int argc, char** argv)
         }
     }
 
+    g_ip = ip; // the detail children reach the same interface
+    g_port = port;
+
     // --- open the tunnel --------------------------------------------------------------------------
     if (!g_knxTunnel.connect(ip, port))
     {
@@ -4513,6 +5221,7 @@ int main(int argc, char** argv)
 
     // Feed the detected interface max APDU to the client -> auto-framing for every sized operation (upload
     // pkg start, download chunk) begins at the right frame instead of degrading down from the max.
+    g_ifaceApdu = ifaceApdu;
     openknxFileTransferClient.setApduHint(ifaceApdu);
 
     // --verbose: read + print the full TARGET steckbrief before the actual command, reusing the device-info
@@ -4522,11 +5231,597 @@ int main(int argc, char** argv)
     // `scan` has NO target PA (pos[0] == "scan"), so an "ftc <pos[0]> info" here would run "ftc scan info" —
     // an accidental own-line scan that shadows the real command. Skip the target steckbrief for it.
     const bool isConsoleCmd = pos.size() >= 2 && (pos[1] == "console" || pos[1] == "con");
-    if (verbose && !pos.empty() && pos[0] != "scan" && !isConsoleCmd) // con-open shows NO device info (clean session); one-shot keeps the panel
+    if (verbose && !pos.empty() && pos[0] != "scan" && !isConsoleCmd && !knxotaActive) // con-open shows NO device info (clean session); one-shot keeps the panel
     {
         std::printf("\n  %s\n", g_theme.green(std::string(g_term.glyph("── ", "-- ")) + g_i18n.tr("KNX Device · ", "KNX-Gerät · ") + pos[0] + g_i18n.tr(" via ", " über ") + ip + " ──────────────────────────").c_str());
         int idrc = 0;
         ftcRenderStructured({pos[0], "info"}, quiet, idrc); // NEW structured device panel (same as `ftc <pa> info`), not the raw text
+    }
+
+    // --- hidden diagnostic: is the link-layer confirmation usable as a presence test? --------------
+    // Sends one frame per address and reports only the L_Data.con. On TP1 every present device
+    // acknowledges at data-link level, so this should find device classes an application read misses.
+    if (!pos.empty() && pos[0] == "_conprobe")
+    {
+        // Optional inter-probe pacing "_conprobe pace <ms> <pa>...": wait <ms> (still pumping) after each con.
+        // Host-side test of the every-3rd-con-loss = fast-fire pileup; no "pace" token -> fire immediately.
+        unsigned paceMs = 0;
+        size_t first = 1;
+        if (pos.size() >= 3 && pos[1] == "pace")
+        {
+            std::sscanf(pos[2].c_str(), "%u", &paceMs);
+            first = 3;
+        }
+        static volatile bool s_seen = false;
+        static bool s_ok = false;
+        static uint16_t s_pa = 0;
+        g_knxTunnel.setConfirmCallback([](uint16_t pa, bool ok) {
+            if (pa != s_pa) return;
+            s_ok = ok;
+            s_seen = true;
+        });
+        std::printf("  %-10s %-9s %s\n", "ADDRESS", "CONFIRM", "ms");
+        for (size_t i = first; i < pos.size(); ++i)
+        {
+            unsigned a = 0, l = 0, d = 0;
+            if (std::sscanf(pos[i].c_str(), "%u.%u.%u", &a, &l, &d) != 3) continue;
+            s_pa = (uint16_t)((a << 12) | (l << 8) | d);
+            s_seen = false;
+            const uint64_t t0 = nowMs();
+            g_knxTunnel.sendDeviceDescriptorRead(s_pa);
+            while (!s_seen && nowMs() - t0 < 3000)
+            {
+                g_knxTunnel.pump();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            std::printf("  %-10s %-9s %llu\n", pos[i].c_str(),
+                        s_seen ? (s_ok ? "yes" : "no") : "(none)",
+                        (unsigned long long)(nowMs() - t0));
+            // Pace before the next probe: keep pumping so late cons / device retries are ACKed and the bus
+            // settles. paceMs == 0 -> the loop body never runs (immediate next probe, unchanged behaviour).
+            for (uint64_t tp = nowMs(); paceMs && nowMs() - tp < paceMs;)
+            {
+                g_knxTunnel.pump();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        g_knxTunnel.setConfirmCallback(nullptr);
+        socketCleanup();
+        return 0;
+    }
+
+    // --- knxOTA online phase: read the target, compare, decide -------------------------------------
+    // The tunnel is up and the client is set up. Everything here is read-only until the confirmation.
+    if (knxotaActive)
+    {
+        ftc::I18n& L = g_i18n;
+        ftc::Theme& c = g_theme;
+        std::string paText = (knxotaVerb > 0) ? pos[0] : std::string();
+
+        // The assistant offered to search: do it now that the tunnel is up. The scan runs on the line the
+        // interface itself sits on and asks only OpenKNX devices, so the list stays short and relevant.
+        while (paText.empty() && knxotaScan)
+        {
+            // The interface's own line is the one it can reach without a coupler, so it is the default —
+            // but it is only a default: a line behind a coupler is a legitimate target and the user knows
+            // their topology better than we do.
+            const uint16_t own = g_knxTunnel.assignedPA();
+            char line[16];
+            if (!knxotaLine.empty())
+                std::snprintf(line, sizeof(line), "%s", knxotaLine.c_str());
+            else
+                std::snprintf(line, sizeof(line), "%u.%u", (unsigned)((own >> 12) & 0x0F), (unsigned)((own >> 8) & 0x0F));
+            if (knxotaScanAsk)
+            {
+                const std::string take = std::string(L.tr("search ", "durchsuche ")) + line;
+                g_tpl.section(L.tr("Which line", "Welche Linie"));
+                g_tpl.seg(L.tr("line", "Linie"), {line}, 0);
+                g_tpl.keybar({{"↵", take.c_str()},
+                              {L.tr("area.line", "Bereich.Linie"), L.tr("another one, e.g. 5.1",
+                                                                       "eine andere, z. B. 5.1")},
+                              {"q", L.tr("quit", "Ende")}});
+                std::printf("  %s ", c.amber("?").c_str());
+                std::fflush(stdout);
+                char lin[32] = {0};
+                if (!g_term.isTty() || std::fgets(lin, sizeof(lin), stdin) == nullptr) { socketCleanup(); return 2; }
+                std::string t3(lin);
+                while (!t3.empty() && (t3.back() == '\n' || t3.back() == '\r' || t3.back() == ' ')) t3.pop_back();
+                if (t3 == "q" || t3 == "Q") { socketCleanup(); return 130; }
+                unsigned la = 0, ll = 0;
+                if (!t3.empty())
+                {
+                    if (std::sscanf(t3.c_str(), "%u.%u", &la, &ll) == 2 && la <= 15 && ll <= 15)
+                        std::snprintf(line, sizeof(line), "%u.%u", la, ll);
+                    else
+                        g_tpl.note(std::string(L.tr("not a line — searching ", "keine Linie — durchsuche ")) + line);
+                }
+            }
+            knxotaLine = line; // searching again stays on this line instead of reverting to the default
+            g_tpl.section(std::string(L.tr("Searching line ", "Suche auf Linie ")) + line);
+            // No duration promise: it depends on the line, the bus load and how many devices answer.
+            // The counter below reports the truth as it happens, which is worth more than an estimate.
+            g_tpl.status(ftc::Tpl::Stat::Info, L.tr("asking every address on this line",
+                                                    "frage jede Adresse auf dieser Linie"),
+                         {L.tr("the counter below shows how far it is", "der Zähler unten zeigt den Fortschritt"),
+                          L.tr("ctrl-C stops", "Strg-C bricht ab")});
+            unsigned sa = 0, sl = 0;
+            std::sscanf(line, "%u.%u", &sa, &sl);
+            const uint16_t lineBase = (uint16_t)((sa << 12) | (sl << 8));
+            std::vector<std::pair<std::string, bool>> pick;
+            std::vector<FtcEntry> hits;
+            const bool ackFeed = armScanAckFeed(lineBase);
+            if (!ackFeed)
+                g_tpl.note(L.tr("this interface does not report acknowledgements — the search will miss "
+                                "devices that never answer",
+                                "dieses Interface meldet keine Quittungen — die Suche übersieht Geräte, "
+                                "die nie antworten"));
+            // Only an OpenKNX device can be updated from here, so only those are asked who they are —
+            // and they are asked while the sweep still runs, over their own tunnels.
+            std::unique_ptr<ftc::DetailPool> dpool;
+            if (!g_ip.empty())
+                dpool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
+                                                g_tunnels > 0 ? g_tunnels : FTC_DETAIL_WORKERS));
+            std::function<void(const FtcEntry&)> onNew = [&](const FtcEntry& e) {
+                if (dpool && (e.crc & 0xFFF0) == 0x07B0) dpool->submit(e.name); // System B: the only OpenKNX candidates
+            };
+            g_ftcSuppress = true;
+            // Without the pool the sweep would run its own identity probe over the one shared tunnel; with
+            // it that is the same question asked twice, and the two starve each other.
+            openknxFileTransferClient.processCommand(std::string("ftc scan ") + line + (dpool ? "" : " openknx"), false);
+            ftcPumpStructured(hits, true, g_term.isTty() && !quiet, dpool ? &onNew : nullptr);
+            g_ftcSuppress = false;
+            if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
+
+            std::unordered_map<std::string, ftc::DetailRow> det;
+            if (dpool)
+            {
+                const uint64_t t0 = nowMs();
+                uint64_t drawn = 0;
+                while (dpool->outstanding() > 0 && !g_abort)
+                {
+                    const uint64_t now = nowMs();
+                    if (g_term.isTty() && !quiet && now - drawn > 60)
+                    {
+                        drawn = now;
+                        const size_t done = dpool->answered(), left = dpool->outstanding();
+                        const unsigned el = (unsigned)((now - t0) / 1000);
+                        char cnt[32], clk[16];
+                        std::snprintf(cnt, sizeof(cnt), "%u/%u", (unsigned)done, (unsigned)(done + left));
+                        std::snprintf(clk, sizeof(clk), "%u:%02u", el / 60, el % 60);
+                        liveLine(std::string("  ") + c.green(liveSpinner(now)) + " " +
+                                 c.cyan(L.tr("reading OpenKNX devices", "lese OpenKNX-Geräte")) + "   " +
+                                 c.bold(cnt) + "   " + c.dim(clk));
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+                if (g_abort) dpool->abort();
+                dpool->wait();
+                det = dpool->rows();
+                if (g_term.isTty() && !quiet) std::fprintf(stderr, "\r\x1b[K");
+            }
+            for (const auto& e : hits)
+            {
+                unsigned a = 0, l = 0, d = 0;
+                if (std::sscanf(e.name, "%u.%u.%u", &a, &l, &d) != 3) continue;
+                const auto it = det.find(e.name);
+                const bool isOk = e.isOpenKnx || (it != det.end() && it->second.mfr == ftc::MFR_OPENKNX);
+                pick.emplace_back(e.name, isOk);
+            }
+            std::stable_sort(pick.begin(), pick.end(), [](const auto& x, const auto& y) { return x.second && !y.second; });
+
+            if (!pick.empty())
+            {
+                const std::vector<int> w = {3, 10, 0};
+                g_tpl.tableRow({c.dim("#"), c.dim(L.tr("ADDRESS", "ADRESSE")), c.dim(L.tr("DEVICE", "GERÄT"))}, w);
+                for (size_t i = 0; i < pick.size(); ++i)
+                {
+                    std::string what;
+                    if (pick[i].second)
+                    {
+                        what = g_tpl.chip("OpenKNX");
+                        const auto it = det.find(pick[i].first);
+                        // What the device says about itself, right where the user looks for it. A device
+                        // that answered nothing keeps the chip alone rather than an invented description.
+                        const std::string txt = it != det.end() ? ftc::describe(it->second) : std::string();
+                        if (!txt.empty()) what += "  " + c.txt(txt);
+                    }
+                    else
+                        what = c.dim(L.tr("other", "anderes"));
+                    g_tpl.tableRow({c.bold(std::to_string(i + 1)), c.txt(pick[i].first), what}, w);
+                }
+            }
+            else
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("nothing answered on this line", "auf dieser Linie hat nichts geantwortet"),
+                             {std::string(L.tr("line ", "Linie ")) + line});
+            g_tpl.keybar({{"1-9", L.tr("take it", "nehmen")},
+                          {L.tr("address", "Adresse"), L.tr("type one instead", "stattdessen eingeben")},
+                          {"L", L.tr("search again", "erneut suchen")},
+                          {"c", L.tr("another line", "andere Linie")},
+                          {"q", L.tr("quit", "Ende")}});
+            std::printf("  %s ", c.amber("?").c_str());
+            std::fflush(stdout);
+            char in[32] = {0};
+            if (!g_term.isTty() || std::fgets(in, sizeof(in), stdin) == nullptr) { socketCleanup(); return 2; }
+            std::string t2(in);
+            while (!t2.empty() && (t2.back() == '\n' || t2.back() == '\r' || t2.back() == ' ')) t2.pop_back();
+            unsigned qa = 0, ql = 0, qd = 0;
+            if (t2 == "q" || t2 == "Q") { socketCleanup(); return 130; }
+            if (std::sscanf(t2.c_str(), "%u.%u.%u", &qa, &ql, &qd) == 3) paText = t2; // a typed address always wins
+            else if (t2 == "L" || t2 == "l")
+            {
+                knxotaScanAsk = false; // same line, no question — a device may have been powered up meanwhile
+                continue;
+            }
+            else if (t2 == "c" || t2 == "C")
+            {
+                knxotaScanAsk = true; // ask for the line, then search again
+                continue;
+            }
+            else
+            {
+                const int n = t2.empty() ? 0 : (t2[0] - '0');
+                if (n >= 1 && n <= (int)pick.size()) paText = pick[n - 1].first;
+                else { socketCleanup(); return 130; }
+            }
+        }
+
+        if (paText.empty())
+        {
+            g_ui.errorBlock(false, L.tr("no device address given", "keine Geräteadresse angegeben"),
+                            {L.tr("knxOTA needs to know which device to update",
+                                  "knxOTA muss wissen, welches Gerät aktualisiert werden soll")},
+                            "ftc --ip " + ip + " <address> fwupdate <file>");
+            socketCleanup();
+            return 2;
+        }
+
+        unsigned pa_a = 0, pa_l = 0, pa_d = 0;
+        std::sscanf(paText.c_str(), "%u.%u.%u", &pa_a, &pa_l, &pa_d);
+        const uint16_t targetPaEarly = (uint16_t)((pa_a << 12) | (pa_l << 8) | pa_d);
+
+        // One device-info read: mask, identity (PID 78), version (PID 25), FTC features. Finish on quiescence
+        // (not the first field), else the feature probe is still in flight and firmware-capable reads as not.
+        g_ftcSuppress = true;
+        std::vector<FtcEntry> knxotaSnap;
+        openknxFileTransferClient.processCommand("ftc " + paText + " info", false);
+        ftcPumpStructured(knxotaSnap, false, false);
+        g_ftcSuppress = false;
+        const FtcDeviceInfo& di = openknxFileTransferClient.deviceInfo();
+        const ftc::DevVersion dv = ftc::devVersionFrom(di.hardware, di.haveHw, di.version, di.haveVersion);
+        const ftc::Verdict verdict = ftc::compareVersions(knxotaFw.id, dv);
+
+        g_tpl.section(L.tr("Device", "Gerät") + std::string(" · ") + paText);
+        if (!di.valid)
+        {
+            unsigned ta = 0, tl = 0, td = 0;
+            std::sscanf(paText.c_str(), "%u.%u.%u", &ta, &tl, &td);
+            reportUnreachable(paText, (uint16_t)((ta << 12) | (tl << 8) | td), nullptr);
+            socketCleanup();
+            return 6;
+        }
+        g_tpl.panelTop(L.tr("Version comparison", "Versionsvergleich"), paText);
+        g_tpl.kv(L.tr("Device", "Gerät"), c.txt(di.haveOrder ? di.order : "OpenKNX") +
+                 c.dim(std::string("   ") + ftc::devVersionText(dv)));
+        g_tpl.kv(L.tr("File", "Datei"), c.txt(knxotaFw.hardware) +
+                 c.dim(std::string("   ") + ftc::fwVersionText(knxotaFw.id)));
+        g_tpl.kv(L.tr("Result", "Ergebnis"), ftc::verdictChip(g_tpl, L, verdict));
+        g_tpl.panelEnd();
+
+        // The Update bit is the device's own statement that it can install a firmware. Absent, we do not
+        // guess why: a silent file-transfer server and an old one look identical from here, and saying
+        // "too old" when the device simply did not answer would send the user after the wrong problem.
+        const bool canSelfApply = (di.features & 0x02) != 0;
+        if (!canSelfApply)
+            g_tpl.status(ftc::Tpl::Stat::Warn,
+                         L.tr("this device did not offer to install a firmware itself",
+                              "dieses Gerät hat nicht angeboten, eine Firmware selbst einzuspielen"),
+                         {di.ftmVersion == 0
+                              ? L.tr("its file-transfer server did not answer",
+                                     "sein Dateitransfer-Server hat nicht geantwortet")
+                              : L.tr("its file-transfer server is too old for this",
+                                     "sein Dateitransfer-Server ist dafür zu alt"),
+                          L.tr("the firmware would be transferred but not installed",
+                               "die Firmware würde übertragen, aber nicht eingespielt")});
+
+        // --- access protection: ask the device directly, not through the info chain ---------------
+        // deviceInfo() zeroes the feature byte when the FT server stayed silent, and a stage-"Off" device
+        // answers only CheckFeatures -- so the single probe is the reliable read (and works on a locked device).
+        const ftc::AccessState acc = resolveAccessInteractively(targetPaEarly, 180, quiet, knxotaCheck);
+
+        switch (acc.stage)
+        {
+            case ftc::Access::Open:
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("access", "Zugriff"),
+                             {L.tr("this device accepts the update", "dieses Gerät nimmt das Update an")});
+                break;
+            case ftc::Access::NeedPassword:
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("access", "Zugriff"),
+                             {L.tr("this device is password protected", "dieses Gerät ist passwortgeschützt")});
+                break;
+            case ftc::Access::Blocked:
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("access", "Zugriff"),
+                             {L.tr("this device is not accepting writes right now",
+                                   "dieses Gerät nimmt gerade keine Schreibzugriffe an")});
+                g_tpl.note(L.tr("press the programming button — if that frees it, that was the reason;"
+                                " if not, file transfer is switched off in the ETS application",
+                                "Programmiertaste drücken — löst das die Sperre, war es die Taste;"
+                                " wenn nicht, ist der Dateitransfer in der ETS-Applikation abgeschaltet"));
+                break;
+            case ftc::Access::LockedOff:
+                g_tpl.status(ftc::Tpl::Stat::Err, L.tr("access", "Zugriff"),
+                             {L.tr("file transfer is switched off on this device",
+                                   "der Dateitransfer ist auf diesem Gerät abgeschaltet")});
+                break;
+            default:
+                g_tpl.status(ftc::Tpl::Stat::Idle, L.tr("access", "Zugriff"),
+                             {L.tr("this device did not answer the access question",
+                                   "dieses Gerät hat die Zugriffsfrage nicht beantwortet")});
+                break;
+        }
+
+        // An ESP image is read raw, because only the device knows whether it can unpack one. Now that it
+        // has answered, compress it if it said yes — this is where ~88 minutes on the bus become ~54.
+        if (!knxotaFw.compressed && !knxotaNoCompress && (acc.bits & ftc::FEAT_GZIP_UPDATE) != 0)
+        {
+            const size_t before = knxotaFw.payload.size();
+            if (ftc::compressForTarget(knxotaFw))
+            {
+                char b[96];
+                std::snprintf(b, sizeof(b), "%u -> %u B", (unsigned)before, (unsigned)knxotaFw.payload.size());
+                g_tpl.status(ftc::Tpl::Stat::Ok,
+                             L.tr("this device unpacks the firmware itself",
+                                  "dieses Gerät entpackt die Firmware selbst"),
+                             {b, L.tr("about half the time on the bus", "etwa die halbe Zeit auf dem Bus")});
+            }
+        }
+        else if (!knxotaFw.compressed && knxotaNoCompress)
+            g_tpl.status(ftc::Tpl::Stat::Idle,
+                         L.tr("sending the firmware as it is (--no-compress)",
+                              "die Firmware wird unverändert gesendet (--no-compress)"), {});
+        else if (!knxotaFw.compressed && acc.answered)
+            g_tpl.status(ftc::Tpl::Stat::Idle,
+                         L.tr("this device takes the firmware uncompressed",
+                              "dieses Gerät nimmt die Firmware unkomprimiert"),
+                         {L.tr("that is slower, and works with any device version",
+                               "das dauert länger und funktioniert mit jeder Geräteversion")});
+
+        if (knxotaCheck)
+        {
+            g_tpl.note(L.tr("nothing was transferred · drop --check to run the update",
+                            "es wurde nichts übertragen · --check weglassen, um das Update auszuführen"));
+            std::printf("\n");
+            socketCleanup();
+            // "ready" means both halves: the right firmware AND a device that would accept it. Reporting
+            // success for a device that refuses every write would make --check useless in a script.
+            if (acc.stage == ftc::Access::LockedOff || acc.stage == ftc::Access::Blocked) return 3;
+            return verdict == ftc::Verdict::Upgrade ? 0 : 1;
+        }
+
+        // Guards. A different application is refused outright: it would wipe the device's whole setup.
+        if (verdict == ftc::Verdict::DifferentDevice)
+        {
+            g_ui.errorBlock(false, L.tr("this firmware is for a different device",
+                                        "diese Firmware ist für ein anderes Gerät"),
+                            {L.tr("it would wipe this device's entire setup",
+                                  "damit ginge die komplette Einrichtung dieses Geräts verloren"),
+                             L.tr("it would come back unprogrammed on 15.15.255",
+                                  "es käme unprogrammiert auf 15.15.255 zurück")},
+                            L.tr("use the firmware that belongs to this device",
+                                 "die Firmware nehmen, die zu diesem Gerät gehört"));
+            socketCleanup();
+            return 1;
+        }
+        if (verdict == ftc::Verdict::AlreadyInstalled && !knxotaForce)
+        {
+            g_tpl.status(ftc::Tpl::Stat::Ok,
+                         L.tr("this version is already installed", "diese Version läuft bereits"),
+                         {ftc::devVersionText(dv)});
+            // Asking beats sending the user away to re-run with a flag: re-flashing a device that behaves
+            // oddly is a perfectly ordinary thing to want, and the answer is one keystroke away.
+            if (!g_term.isTty())
+            {
+                g_tpl.note(L.tr("nothing to do — pass --force to install it again",
+                                "nichts zu tun — mit --force erneut einspielen"));
+                std::printf("\n");
+                socketCleanup();
+                return 0;
+            }
+            if (!ftc::confirm(g_term, c, L, L.tr("Transfer it again anyway?",
+                                              "Trotzdem noch einmal übertragen?"), false))
+            {
+                std::fprintf(stderr, "  %s\n", c.dim(L.tr("nothing to do — the device already runs this version",
+                                                          "nichts zu tun — das Gerät läuft bereits mit dieser Version")).c_str());
+                socketCleanup();
+                return 0;
+            }
+        }
+        if ((verdict == ftc::Verdict::Downgrade || verdict == ftc::Verdict::Unknown) && !knxotaForce)
+        {
+            const std::string what = (verdict == ftc::Verdict::Downgrade)
+                ? L.tr("The device is newer than this file. After a downgrade you have to re-program it in ETS.",
+                       "Das Gerät ist neuer als diese Datei. Nach einem Downgrade musst du es in der ETS neu programmieren.")
+                : L.tr("The versions cannot be compared, so knxOTA cannot tell whether this file fits.",
+                       "Die Versionen sind nicht vergleichbar, knxOTA kann also nicht sagen, ob diese Datei passt.");
+            std::fprintf(stderr, "  %s %s\n", c.amber(g_term.glyph("⚠", "!")).c_str(), c.amber(what).c_str());
+            if (!ftc::confirm(g_term, c, L, L.tr("Continue anyway?", "Trotzdem fortfahren?"), false))
+            {
+                std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled — nothing was changed",
+                                                          "abgebrochen — es wurde nichts verändert")).c_str());
+                socketCleanup();
+                return 1;
+            }
+        }
+
+        // Never start a half-hour transfer into a device that has already said it refuses writes.
+        if (acc.stage != ftc::Access::Open && acc.stage != ftc::Access::Unknown)
+        {
+            g_ui.errorBlock(false, L.tr("the update cannot run like this", "so kann das Update nicht laufen"),
+                            {L.tr("this device is not accepting writes",
+                                  "dieses Gerät nimmt keine Schreibzugriffe an"),
+                             L.tr("nothing was transferred and nothing was changed",
+                                  "es wurde nichts übertragen und nichts verändert")},
+                            "");
+            socketCleanup();
+            return 3;
+        }
+
+        // A device that cannot install a firmware itself would receive the file and leave it lying there.
+        // That is half an hour for nothing, so it is a decision, not a remark.
+        if (!canSelfApply)
+        {
+            std::fprintf(stderr, "  %s %s\n", c.amber(g_term.glyph("⚠", "!")).c_str(),
+                         c.amber(L.tr("the file would be transferred and then sit unused on the device",
+                                      "die Datei würde übertragen und dann ungenutzt auf dem Gerät liegen")).c_str());
+            if (!ftc::confirm(g_term, c, L, L.tr("Transfer it anyway?", "Trotzdem übertragen?"), false))
+            {
+                std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled — this device needs one update over USB first",
+                                                          "abgebrochen — dieses Gerät braucht einmalig ein Update über USB")).c_str());
+                socketCleanup();
+                return 1;
+            }
+        }
+
+        // The one stop before anything is written. Everything that makes this safe is stated here, because
+        // this is the moment the user decides — not in the failure screen afterwards.
+        {
+            const unsigned mins = (unsigned)((knxotaFw.payload.size() / 350) / 60);
+            char dur[64];
+            std::snprintf(dur, sizeof(dur), "~%u %s", mins, L.tr("min", "Min."));
+            g_tpl.panelTop(L.tr("Ready", "Bereit"), paText);
+            g_tpl.kv(L.tr("Device", "Gerät"), c.txt(di.haveOrder ? di.order : "OpenKNX") +
+                     c.dim(std::string("  ·  ") + paText + L.tr("  ·  running ", "  ·  läuft mit ") + ftc::devVersionText(dv)));
+            g_tpl.kv(L.tr("New", "Neu"), c.bold(ftc::fwVersionText(knxotaFw.id)));
+            g_tpl.kv(L.tr("Duration", "Dauer"), c.txt(dur) +
+                     c.dim(L.tr("  ·  the device is away for about 30 s right at the end",
+                                "  ·  das Gerät ist ganz am Ende etwa 30 Sek. weg")));
+            g_tpl.panelEnd();
+            for (const char* line : {
+                     L.tr("The old firmware keeps running until the new one is fully transferred and its",
+                          "Die alte Firmware läuft weiter, bis die neue vollständig übertragen und die"),
+                     L.tr("checksum is good. If anything fails, the device starts again with the old one.",
+                          "Prüfsumme in Ordnung ist. Schlägt etwas fehl, startet das Gerät wieder mit der alten."),
+                     L.tr("Your ETS parameters, group addresses and the address are kept.",
+                          "Deine ETS-Parameter, Gruppenadressen und die Adresse bleiben erhalten."),
+                     L.tr("The rest of your installation keeps working normally.",
+                          "Der Rest deiner Anlage läuft normal weiter."),
+                     L.tr("You may cancel at any time — the next run continues where it stopped.",
+                          "Du kannst jederzeit abbrechen — der nächste Lauf setzt dort wieder an."),
+                     L.tr("Your computer must stay on during the transfer.",
+                          "Dein Rechner muss während der Übertragung eingeschaltet bleiben.")})
+
+                std::printf("    %s\n", c.dim(line).c_str());
+            std::printf("\n");
+            if (!knxotaForce && !ftc::confirm(g_term, c, L, L.tr("Start the update?", "Update starten?"), false))
+            {
+                std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled — nothing was changed",
+                                                          "abgebrochen — es wurde nichts verändert")).c_str());
+                socketCleanup();
+                return 1;
+            }
+        }
+
+        // Hand the prepared payload to the existing upload path: it does the space check, the resume, the
+        // per-packet checksum and — only on a verified checksum — the self-install.
+        ftc::TempFile staged("knxota", knxotaFw.compressed ? ".bin.gz" : ".bin");
+        {
+            std::FILE* o = std::fopen(staged.path().c_str(), "wb");
+            if (o == nullptr ||
+                std::fwrite(knxotaFw.payload.data(), 1, knxotaFw.payload.size(), o) != knxotaFw.payload.size())
+            {
+                if (o) std::fclose(o);
+                g_ui.errorBlock(false, L.tr("could not prepare the firmware", "Firmware konnte nicht vorbereitet werden"),
+                                {staged.path()}, "");
+                socketCleanup();
+                return 2;
+            }
+            std::fclose(o);
+        }
+        if (knxotaKeepTemp)
+        {
+            staged.keep();
+            g_tpl.note(L.tr("prepared firmware kept at: ", "vorbereitete Firmware liegt unter: ") + staged.path());
+        }
+        const std::string remoteName = knxotaFw.compressed ? "/fw.bin.gz" : "/fw.bin";
+        const uint16_t targetPa = targetPaEarly;
+        // 3x the estimate plus five minutes: enough for resends and a busy bus, still bounded.
+        g_xferCapMs = (uint64_t)(knxotaFw.payload.size() / 350) * 3000ull + 300000ull;
+        g_tpl.section(L.tr("Transfer", "Übertragung"));
+        openknxFileTransferClient.requestUpload(targetPa, staged.path().c_str(), 0, false, 1,
+                                                canSelfApply, remoteName.c_str(), 0);
+        g_ftcSuppress = true;
+        const int xrc = runTransferPresenter();
+        g_ftcSuppress = false;
+
+        // The transfer being verified is not the same as the update having happened. The device now
+        // reboots into the new firmware, and only reading its version back proves that it did.
+        if (xrc == 0 && canSelfApply)
+        {
+            g_tpl.section(L.tr("Restart", "Neustart"));
+            g_tpl.note(L.tr("do not disconnect the device now — it comes back on its own",
+                            "das Gerät jetzt nicht vom Strom trennen — es meldet sich von selbst zurück"));
+            // The device arms PicoOTA and restarts ~2 s later, so an immediate read hits the OLD firmware.
+            // Wait out the restart, then poll until the version MATCHES (merely answering proves nothing).
+            const uint64_t start = nowMs();
+            const std::string want = ftc::fwVersionText(knxotaFw.id);
+            bool back = false;
+            while (nowMs() - start < 5000 && !g_abort)
+            {
+                g_tpl.waitTick(L.tr("the device is restarting", "das Gerät startet neu"),
+                               (uint32_t)((nowMs() - start) / 1000), L.tr("normally 15-40 s", "normal 15-40 s"));
+                g_knxTunnel.pump();
+                openknxFileTransferClient.loop(true);
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            while (nowMs() - start < 90000 && !g_abort)
+            {
+                g_tpl.waitTick(L.tr("waiting for the device", "warte auf das Gerät"),
+                               (uint32_t)((nowMs() - start) / 1000),
+                               L.tr("normally 15-40 s", "normal 15-40 s"));
+                g_ftcSuppress = true;
+                std::vector<FtcEntry> vsnap;
+                openknxFileTransferClient.processCommand("ftc " + paText + " info", false);
+                ftcPumpStructured(vsnap, false, false);
+                g_ftcSuppress = false;
+                const FtcDeviceInfo& now = openknxFileTransferClient.deviceInfo();
+                if (now.valid)
+                {
+                    back = true;
+                    const ftc::DevVersion seen = ftc::devVersionFrom(now.hardware, now.haveHw, now.version, now.haveVersion);
+                    if (seen.valid && ftc::devVersionText(seen) == want) break; // the new firmware is up
+                }
+            }
+            std::printf("\r\x1b[K");
+            const FtcDeviceInfo& after = openknxFileTransferClient.deviceInfo();
+            const ftc::DevVersion nv = ftc::devVersionFrom(after.hardware, after.haveHw, after.version, after.haveVersion);
+            if (back && nv.valid && ftc::devVersionText(nv) == ftc::fwVersionText(knxotaFw.id))
+            {
+                g_tpl.status(ftc::Tpl::Stat::Ok,
+                             std::string(L.tr("done — ", "fertig — ")) + paText +
+                                 L.tr(" is now running ", " läuft jetzt mit ") + ftc::devVersionText(nv),
+                             {std::string(L.tr("was ", "vorher ")) + ftc::devVersionText(dv)});
+                g_tpl.note(L.tr("your ETS parameters and group addresses are unchanged",
+                                "deine ETS-Parameter und Gruppenadressen sind unverändert"));
+            }
+            else if (back)
+                g_tpl.status(ftc::Tpl::Stat::Warn,
+                             L.tr("the device answered, but reports a different version than expected",
+                                  "das Gerät antwortet, meldet aber eine andere Version als erwartet"),
+                             {ftc::devVersionText(nv)});
+            else
+            {
+                g_ui.errorBlock(false, L.tr("the device has not come back yet", "das Gerät hat sich noch nicht zurückgemeldet"),
+                                {L.tr("the image was checked before flashing, so this points at the connection",
+                                      "das Image wurde vor dem Flashen geprüft, das spricht eher für die Verbindung"),
+                                 L.tr("a device whose flash failed starts the old firmware again by itself",
+                                      "ein Gerät, dessen Flash fehlschlug, startet die alte Firmware von selbst wieder")},
+                                std::string("ftc --ip ") + ip + " " + paText + L.tr(" info  shows whether it is back",
+                                                                                   " info  zeigt, ob es wieder da ist"));
+                socketCleanup();
+                return 6;
+            }
+        }
+        socketCleanup();
+        return xrc;
     }
 
     // Host-side auto-gzip: `send <src> gzip` compresses the local file (in-process, miniz) BEFORE the upload
@@ -4589,7 +5884,8 @@ int main(int argc, char** argv)
             if (std::sscanf(pos[i + 1].c_str(), "%u", &v) == 1 && v >= 15 && v <= 254)
             {
                 ifaceApdu = (uint16_t)v;
-                openknxFileTransferClient.setApduHint(ifaceApdu); // re-apply: framing now uses the manual APDU
+                g_ifaceApdu = ifaceApdu;
+    openknxFileTransferClient.setApduHint(ifaceApdu); // re-apply: framing now uses the manual APDU
                 if (!quiet && !consoleBarOn) std::printf("[console] APDU override -> %u B (manual)\n", (unsigned)ifaceApdu);
             }
             pos.erase(pos.begin() + i, pos.begin() + i + 2); // drop both tokens so the drain parser stays clean
@@ -4636,6 +5932,43 @@ int main(int argc, char** argv)
 
     int exitCode = 0;
 
+    unsigned rp_a = 0, rp_l = 0, rp_d = 0;
+    const bool reachHasPa = !pos.empty() &&
+                            std::sscanf(pos[0].c_str(), "%u.%u.%u", &rp_a, &rp_l, &rp_d) == 3 &&
+                            rp_a <= 15 && rp_l <= 15 && rp_d <= 255;
+    // EVERY command that names a device probes reachability first: ~30 ms when present, ~2.5 s with a reason
+    // when not (instead of a bare timeout, or minutes of retries). Excluded: ping/cancel/status.
+    const bool paCmd = pos.size() >= 2 && pos[1] != "ping" && pos[1] != "p" && pos[1] != "cancel" &&
+                       pos[1] != "c" && pos[1] != "status" && pos[1] != "s";
+    if ((paCmd || consoleMode) && !knxotaActive && !g_pchild && reachHasPa && !knxotaForce)
+    {
+        const uint16_t tgt = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
+        ftc::ReachDeps rd;
+        rd.pump = []() { g_knxTunnel.pump(); };
+        rd.nowMs = []() { return nowMs(); };
+        rd.aborted = []() { return g_abort != 0; };
+        int tries = 0;
+        uint32_t spent = 0;
+        if (!ftc::deviceAnswers(g_knxTunnel, tgt, rd, tries, spent))
+        {
+            ftc::I18n& L = g_i18n;
+            char det[96];
+            std::snprintf(det, sizeof(det), L.tr("%d attempts, %.1f s", "%d Versuche, %.1f s"), tries,
+                          spent / 1000.0);
+            reportUnreachable(pos[0], tgt, det);
+            if (!g_term.isTty())
+            {
+                socketCleanup();
+                return 6;
+            }
+            if (!ftc::confirm(g_term, g_theme, L, L.tr("try anyway?", "trotzdem versuchen?")))
+            {
+                socketCleanup();
+                return 6;
+            }
+        }
+    }
+
     // Stage 2: render read/status <pa> commands from the client's structured getters (raw text suppressed).
     // Not a structured command (or console mode) -> fall through to the normal one-shot path below.
     if (!consoleMode && ftcRenderStructured(pos, quiet, exitCode))
@@ -4653,6 +5986,8 @@ int main(int argc, char** argv)
     const bool isXferCmd = !consoleMode && !quiet && pos.size() >= 2 &&
                            (pos[1] == "send" || pos[1] == "upload" || pos[1] == "get" ||
                             pos[1] == "download" || pos[1] == "receive" || pos[1] == "perf");
+    // Before anything expensive: is that address occupied at all? A transfer to a silent target spends
+    // over two minutes on retries before it says so, and then blames the bus. One frame settles it.
     if (isXferCmd) g_ftcSuppress = true;
 
     // Verbose console: fetch the TARGET steckbrief NOW, BEFORE the console session is opened below — once the
@@ -4705,6 +6040,33 @@ int main(int argc, char** argv)
         }
     }
 
+    // The console session is a WRITE on the device (it opens object 160), so it runs into the same access
+    // protection as a file transfer. Clear it BEFORE the open: a refused open leaves the client with nothing
+    // to report, and the bar would sit on "connecting" forever waiting for an answer that will never come.
+    unsigned cpa_a = 0, cpa_l = 0, cpa_d = 0;
+    const bool consoleHasPa = !pos.empty() &&
+                              std::sscanf(pos[0].c_str(), "%u.%u.%u", &cpa_a, &cpa_l, &cpa_d) == 3 &&
+                              cpa_a <= 15 && cpa_l <= 15 && cpa_d <= 255;
+    if (consoleMode && consoleHasPa)
+    {
+        const uint16_t cpa = (uint16_t)((cpa_a << 12) | (cpa_l << 8) | cpa_d);
+        const ftc::AccessState ca = resolveAccessInteractively(cpa, 60, quiet);
+        if (ca.stage != ftc::Access::Open && ca.stage != ftc::Access::Unknown)
+        {
+            ftc::I18n& L = g_i18n;
+            std::fflush(stdout);
+            g_ui.errorBlock(false, L.tr("the console stayed shut", "die Konsole blieb zu"),
+                            {ca.stage == ftc::Access::NeedPassword
+                                 ? L.tr("this device wants a password", "dieses Gerät verlangt ein Passwort")
+                                 : L.tr("this device is not accepting writes",
+                                        "dieses Gerät nimmt keine Schreibzugriffe an")},
+                            L.tr("the parameter is called \"access protection\" in the OpenKNX application",
+                                 "der Parameter heißt \"Zugriffsschutz\" in der OpenKNX-Applikation"));
+            socketCleanup();
+            return 3; // 3 = the device refuses, same as everywhere else
+        }
+    }
+
     // Submit the command through the same Module entry the console uses.
     openknxFileTransferClient.processCommand(cmd, false);
 
@@ -4723,6 +6085,11 @@ int main(int argc, char** argv)
                              logPathArg.empty() ? "" : " ", logPathArg.c_str());
         }
         const uint64_t conStart = nowMs();
+        // How long the target gets to answer the console open before we call it a failure. Generous: a busy
+        // bus plus a device mid-transfer can take a while, but not a minute.
+        constexpr uint64_t CON_OPEN_TMO_MS = 60000;
+        bool conOpened = false; // the session was open at least once -> a later drop is a drop, not a no-show
+        bool conQuit = false;   // the user ended it themselves -> not a failure, whatever the phase said
 
         // A cooperative pump burst: flush the tunnel + client a few passes (drains queued close banners).
         auto pump = [&](int passes, int ms) {
@@ -4841,7 +6208,7 @@ int main(int argc, char** argv)
                         emitLine(g_theme.green("> ") + g_theme.txt(line));
                         ui.noteCommand(line);  // start the round-trip timer for the verbose l3 line
                         feedConsoleLine(line); // client catches quit/exit locally and closes the session
-                        if (line == "quit" || line == "exit") running = false;
+                        if (line == "quit" || line == "exit") { conQuit = true; running = false; }
                     }
                 }
 
@@ -4851,11 +6218,20 @@ int main(int argc, char** argv)
                     lastBar = now;
                     // Connected ⟺ the TARGET answered (consoleConnected). Tunnel down or not-yet-answered =
                     // connecting; a Failed open = no-answer. Recomputed LIVE so a drop/reconnect never stays green.
-                    ui.setLink(!g_knxTunnel.connected()          ? ftc::ConsoleUi::Link::Connecting
-                               : openknxFileTransferClient.consoleConnected() ? ftc::ConsoleUi::Link::Connected
-                               : openknxFileTransferClient.status().phase == FtcPhase::Failed
-                                   ? ftc::ConsoleUi::Link::NoAnswer
-                                   : ftc::ConsoleUi::Link::Connecting);
+                    // "Connecting" is only honest while there is still a chance. Past the deadline the
+                    // target has had every opportunity to answer, and a bar that keeps promising a
+                    // connection nobody is still attempting is worse than a plain refusal.
+                    const bool everOpened = openknxFileTransferClient.consoleConnected();
+                    if (everOpened) conOpened = true;
+                    const bool overdue = !conOpened && (now - conStart) > CON_OPEN_TMO_MS;
+                    // Connected only once the TARGET answered. Anything that ends the attempt without an
+                    // answer — a refusal, the client giving up, or the deadline — is red, never "connecting".
+                    ui.setLink(conOpened ? ftc::ConsoleUi::Link::Connected
+                                         : (terminalPhase() || overdue) ? ftc::ConsoleUi::Link::NoAnswer
+                                                                        : ftc::ConsoleUi::Link::Connecting);
+                    // Overdue, or the client already gave up: either way the session never opened.
+                    if (overdue || (!conOpened && openknxFileTransferClient.status().phase == FtcPhase::Failed))
+                        running = false; // the exit code for "never opened" is set after the loop
                     ui.tick(knxTunnelRx(), knxTunnelActivity(), knxTunnelDrops(), g_conTrunc, (now - conStart) / 1000,
                             g_knxTunnel.channelId(), g_knxTunnel.txSeq(), g_knxTunnel.rxSeq());
                 }
@@ -4874,7 +6250,17 @@ int main(int argc, char** argv)
 
                 if (terminalPhase())
                 {
-                    exitCode = (openknxFileTransferClient.status().phase == FtcPhase::Failed) ? 1 : 0;
+                    const bool failed = openknxFileTransferClient.status().phase == FtcPhase::Failed;
+                    // The bar recomputes every 250 ms and the attempt can end between frames; repaint before
+                    // it closes so it doesn't stay on "connecting" (the phase isn't the success test).
+                    if (!conOpened)
+                    {
+                        ui.setLink(ftc::ConsoleUi::Link::NoAnswer);
+                        ui.tick(knxTunnelRx(), knxTunnelActivity(), knxTunnelDrops(), g_conTrunc,
+                                (nowMs() - conStart) / 1000, g_knxTunnel.channelId(), g_knxTunnel.txSeq(),
+                                g_knxTunnel.rxSeq());
+                    }
+                    exitCode = failed ? 1 : 0;
                     running = false;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -4940,16 +6326,18 @@ int main(int argc, char** argv)
                     else
                     {
                         feedConsoleLine(line);
-                        if (line == "quit" || line == "exit") running = false;
+                        if (line == "quit" || line == "exit") { conQuit = true; running = false; }
                     }
                 }
                 else if (stdinLines.eof())
                 {
                     feedConsoleLine("quit");
                     pump(64, 2);
+                    conQuit = conOpened; // no more input is a quit only if there was a session to quit
                     running = false;
                 }
 
+                if (openknxFileTransferClient.consoleConnected()) conOpened = true; // plain mode has no bar
                 if (terminalPhase())
                 {
                     exitCode = (openknxFileTransferClient.status().phase == FtcPhase::Failed) ? 1 : 0;
@@ -4964,6 +6352,23 @@ int main(int argc, char** argv)
                 g_logFp = nullptr;
             }
             if (!quiet && !g_logPath.empty()) std::printf("[console] session log saved: %s\n", g_logPath.c_str());
+        }
+        // The phase the client ends in is not a reliable verdict — it can finish "done" having never opened
+        // anything. What matters is the fact: the session was never up, and the user did not end it
+        // themselves. Both console modes land here, so the report is written once.
+        if (!conOpened && !conQuit)
+        {
+            ftc::I18n& L = g_i18n;
+            std::fflush(stdout);
+            if (quiet)
+                std::fprintf(stderr, "%s\n", L.tr("console: the target never answered",
+                                                  "Konsole: das Ziel hat nicht geantwortet"));
+            else
+                g_ui.errorBlock(false, L.tr("the console did not open", "die Konsole ist nicht zustande gekommen"),
+                                {L.tr("the target never answered", "das Ziel hat nicht geantwortet")},
+                                L.tr("check the address, or whether the device is on the bus",
+                                     "Adresse prüfen, oder ob das Gerät am Bus ist"));
+            exitCode = 6; // 6 = no answer, as everywhere else
         }
     }
     else if (isXferCmd)
