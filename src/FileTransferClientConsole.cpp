@@ -9,6 +9,7 @@
 
 #ifdef OPENKNX_FTC
     #include "FileTransferClient.h"
+    #include "FtcXferOptions.h"
     #include <ctype.h>
     #include <stdio.h>
     #include <stdlib.h>
@@ -24,6 +25,26 @@ static uint8_t ftcParseModeWord(const char *t)
     if (strcmp(t, "fast") == 0 || strcmp(t, "win") == 0 || strcmp(t, "windowed") == 0) return 1;
     return 0;
 }
+
+/**
+ * @brief Expand a verb to its canonical name, so the dispatch below only ever compares one spelling.
+ * @details Short forms are for the commands a user repeats all day. The deleting ones -- rm, rmdir,
+ *          format -- deliberately have none: on a console, one mistyped character should not erase.
+ */
+static const char *ftcCanonVerb(const char *v)
+{
+    struct { const char *shrt, *full; } static const MAP[] = {
+        {"p", "ping"},   {"i", "info"},   {"d", "df"},      {"l", "ll"},      {"u", "send"},
+        {"g", "get"},    {"a", "apply"},  {"m", "mv"},      {"md", "mkdir"},  {"rd", "rmdir"},
+        {"li", "login"}, {"lo", "logout"},{"fw", "fwupdate"},{"pf", "perf"},
+        {"f", "feat"},   {"e", "exists"},
+    };
+    for (const auto &m : MAP)
+        if (strcmp(v, m.shrt) == 0) return m.full;
+    return v;
+}
+
+/* Token walker + transfer-option table: FtcXferOptions.h (dependency-free, self-testable). */
 
 /** @brief The categorized `ftc ?` help, built via the client's cooperative ftcOut queue (drained in loop()). */
 void FileTransferClientConsole::showUsage()
@@ -84,22 +105,30 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Global:  ftc <cmd>");
 #if OPENKNX_FTC_SCAN
-    c.ftcOut(0, "  %-33s  %s", "scan [a.l | a b] [deep] [ets]", "Discover devices (ets = connection-oriented, finds more)");
+    c.ftcOut(0, "  %-42s  %s", "scan [a.l | a b] [deep] [ets] [pace ms]", "Discover devices (ets = connection-oriented, finds more)");
 #endif
     c.ftcOut(0, "  %-33s  %s", "     [openknx | info] [save <path>]", "openknx=flag OpenKNX (mfr 0x00FA)  info=full per-device info  save=write CSV to /|sd/|efc/");
+    c.ftcOut(0, "  %-33s  %s", "feat | f", "What the target supports + why a write is refused");
+    c.ftcOut(0, "  %-33s  %s", "exists | e <path>", "Is that file or folder there?");
     c.ftcOut(0, "  %-33s  %s", "retry [max|transfer|backoff [v]]", "Show / set retry tuning");
+    c.ftcOut(0, "  %-33s  %s", "verbose [0|1|2]", "Output level: 0 quiet, 1 compact, 2 live (shows current)");
     c.ftcOut(0, "  %-33s  %s", "s | status, c | cancel", "Status / cancel of the running job");
     c.ftcOut(0, "  %-33s  %s", "?", "This help");
     c.ftcOut(0, "");
 
     c.ftcOut(0, "  [mode]  = safe (default) | fast      perf only: fast w<N> pins the AIMD window (no end-burst overrun)   [pkg] = auto (default, 254 + degrades) or 16..254");
-    c.ftcOut(0, "  [flags] = apply . verbose . no-resume (send) . keep (default) . verbose (perf | receive)");
+    c.ftcOut(0, "  [flags] bundle, host-style: -f fast  -a apply  -k keep  -n no-resume  -q quiet  -v[0-2] output level");
+    c.ftcOut(0, "          e.g. -fva == fast + live output + apply.  w<N> stays a word of its own (it carries a value).");
+    c.ftcOut(0, "  short forms: p ping . i info . d df . l ll . u send . g get . a apply . m mv . md mkdir . rd rmdir");
+    c.ftcOut(0, "               li login . lo logout . fw fwupdate . pf perf . f feat . e exists . s status . c cancel");
+    c.ftcOut(0, "               rm / rmdir / format have NO short form on purpose");
     c.ftcOut(0, "  remote drive prefix (routed at the target): / (LittleFS) | sd/ (SD) | efc/ (ExtFlash) - df ll ls rm mkdir rmdir mv info get perf");
     c.ftcOut(0, "  send <src> / get <rem> [local]: the SOURCE / local-sink path takes the same prefix; send's remote name is always /<basename>");
     c.ftcOut(0, "");
     c.ftcOut(H, "Examples:");
     c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 send sd/app.bin.gz apply", "Upload from SD + auto-apply (RP target)");
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 upload /fw.bin auto fast verbose", "Upload from LittleFS, fast, log 1s progress");
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 u /fw.bin -fva", "Upload fast, live progress, then apply");
+    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 f", "Which features does it have, is it locked?");
     c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 receive /cfg.json sd/cfg.json", "Download a target file to SD");
     c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 perf 50 fast", "50 KB speed test, fast mode (no file needed)");
 #ifdef OPENKNX_FTC_CONSOLE
@@ -168,17 +197,26 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
     char savePath[80] = {0};
     const char *svp = strstr(cmd.c_str(), " save ");
     if (svp != nullptr) sscanf(svp, " save %79s", savePath);
-    // "deep"/"ets"/"openknx"/"info"/"save" as a 2nd token are keywords, not a range end.
+    // "pace <ms>" = fixed no-loss inter-probe gap (0/absent = the fastest-but-safe default that finds all);
+    // "drain <ms>" = end-of-sweep wait for slow answers; "tmo <ms>" = con-wait before an address is retried.
+    uint32_t paceMs = 0, drainMs = 0, tmoMs = 0;
+    { unsigned v = 0; const char *p = nullptr;
+      if ((p = strstr(cmd.c_str(), " pace "))  && sscanf(p, " pace %u", &v)  == 1 && v <= 2000)  paceMs  = v;
+      if ((p = strstr(cmd.c_str(), " drain ")) && sscanf(p, " drain %u", &v) == 1 && v <= 60000) drainMs = v;
+      if ((p = strstr(cmd.c_str(), " tmo "))   && sscanf(p, " tmo %u", &v)   == 1 && v <= 5000)  tmoMs   = v; }
+    // "deep"/"ets"/"openknx"/"info"/"save"/"pace"/"drain"/"tmo" as a 2nd token are keywords, not a range end.
     const bool a2IsEnd = (ntok >= 2 && strcmp(a2, "deep") != 0 && strcmp(a2, "ets") != 0 &&
-                          strcmp(a2, "openknx") != 0 && strcmp(a2, "info") != 0 && strcmp(a2, "save") != 0);
+                          strcmp(a2, "openknx") != 0 && strcmp(a2, "info") != 0 && strcmp(a2, "save") != 0 &&
+                          strcmp(a2, "pace") != 0 && strcmp(a2, "drain") != 0 && strcmp(a2, "tmo") != 0);
 
     // ftc scan [deep] [ets] [openknx|info] [save <path>]  -> own line
     if (ntok <= 0 || strcmp(a1, "deep") == 0 || strcmp(a1, "ets") == 0 ||
-        strcmp(a1, "openknx") == 0 || strcmp(a1, "info") == 0 || strcmp(a1, "save") == 0)
+        strcmp(a1, "openknx") == 0 || strcmp(a1, "info") == 0 || strcmp(a1, "save") == 0 ||
+        strcmp(a1, "pace") == 0 || strcmp(a1, "drain") == 0 || strcmp(a1, "tmo") == 0)
     {
         const uint16_t own = knx.individualAddress();
         const uint16_t base = own & 0xFF00;
-        _client.requestScan((uint16_t)(base | 0x01), (uint16_t)(base | 0xFF), "own line", sw, co, okFlag, infoFlag, savePath);
+        _client.requestScan((uint16_t)(base | 0x01), (uint16_t)(base | 0xFF), "own line", sw, co, okFlag, infoFlag, savePath, paceMs, drainMs, tmoMs);
         return;
     }
 
@@ -191,7 +229,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
             openknx.logger.logWithPrefix("FTC", "confirm with:  ftc scan full yes");
             return;
         }
-        _client.requestScan(0x0001, 0xFFFF, "full bus", sw, co, okFlag, infoFlag, savePath);
+        _client.requestScan(0x0001, 0xFFFF, "full bus", sw, co, okFlag, infoFlag, savePath, paceMs, drainMs, tmoMs);
         return;
     }
 
@@ -219,7 +257,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         char lbl[24];
         snprintf(lbl, sizeof(lbl), "area %u", ar);
         const uint16_t base = (uint16_t)(ar << 12);
-        _client.requestScan((uint16_t)(base | 0x0001), (uint16_t)(base | 0x0FFF), lbl, sw, co, okFlag, infoFlag, savePath);
+        _client.requestScan((uint16_t)(base | 0x0001), (uint16_t)(base | 0x0FFF), lbl, sw, co, okFlag, infoFlag, savePath, paceMs, drainMs, tmoMs);
         return;
     }
 
@@ -230,7 +268,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         char lbl[24];
         snprintf(lbl, sizeof(lbl), "line %u.%u", a, l);
         const uint16_t base = (uint16_t)((a << 12) | (l << 8));
-        _client.requestScan((uint16_t)(base | 0x01), (uint16_t)(base | 0xFF), lbl, sw, co, okFlag, infoFlag, savePath);
+        _client.requestScan((uint16_t)(base | 0x01), (uint16_t)(base | 0xFF), lbl, sw, co, okFlag, infoFlag, savePath, paceMs, drainMs, tmoMs);
         return;
     }
     if (f == 3 && a <= 15 && l <= 15 && d <= 255)
@@ -247,11 +285,11 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
             }
             end = (uint16_t)((a2a << 12) | (l2 << 8) | d2);
         }
-        _client.requestScan(start, end, a2IsEnd ? "range" : "single", sw, co, okFlag, infoFlag, savePath);
+        _client.requestScan(start, end, a2IsEnd ? "range" : "single", sw, co, okFlag, infoFlag, savePath, paceMs, drainMs, tmoMs);
         return;
     }
 
-    openknx.logger.logWithPrefix("FTC", "usage: ftc scan [a.l | from to] [deep] [ets] [openknx|info] [save <path>] | ftc scan full yes");
+    openknx.logger.logWithPrefix("FTC", "usage: ftc scan [a.l | from to] [deep] [ets] [openknx|info] [save <path>] [pace <ms>] [drain <ms>] [tmo <ms>] | ftc scan full yes");
 }
 #endif
 
@@ -299,6 +337,16 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
 #endif
     // "ftc retry [max|transfer|backoff] [value]" -- no PA; global retry tuning (get/set/help).
+    if (argc >= 1 && (strcmp(paStr, "verbose") == 0 || strcmp(paStr, "v") == 0))
+    {
+        unsigned lv = 0;
+        if (argc >= 2 && sscanf(sub, "%u", &lv) == 1 && lv <= 2)
+            _client.setVerbosity((uint8_t)lv);
+        openknx.logger.logWithPrefixAndValues("FTC", "output level %u (0 quiet · 1 compact · 2 live)",
+                                              (unsigned)_client.verbosity());
+        return true;
+    }
+
     if (argc >= 1 && strcmp(paStr, "retry") == 0)
     {
         _client.ftcRetryCmd(argc >= 2 ? sub : nullptr, argc >= 3 ? arg : nullptr);
@@ -318,6 +366,8 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         openknx.logger.logWithPrefix("FTC", "missing command -- try 'ftc ?'");
         return true;
     }
+    strncpy(sub, ftcCanonVerb(sub), sizeof(sub) - 1);
+    sub[sizeof(sub) - 1] = 0;
 
     // "ftc <pa> cancel|c" / "ftc <pa> status|s" also work, and must run even while busy.
     if (strcmp(sub, "cancel") == 0 || strcmp(sub, "c") == 0)
@@ -340,6 +390,21 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     if (strcmp(sub, "ping") == 0)
     {
         _client.requestPing(pa);
+        return true;
+    }
+    if (strcmp(sub, "feat") == 0)
+    {
+        _client.requestFeatures(pa);
+        return true;
+    }
+    if (strcmp(sub, "exists") == 0)
+    {
+        if (argc < 3)
+        {
+            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> exists <path>");
+            return true;
+        }
+        _client.requestExists(pa, arg);
         return true;
     }
 #ifdef OPENKNX_FTC_SECURITY
@@ -431,15 +496,17 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         // Order-tolerant trailing tokens: verbose/v is a flag anywhere; a pure number 16..240 is the download
         // chunk size (pkg, helps constrained tunnels); the first remaining non-flag is the local dest (default
         // = same path as remote). So `receive f l 16 v`, `receive f 16 l` and `receive f l` all work.
-        bool verbose = false;
+        uint8_t verbosity = _client.verbosity();
         bool noResume = false; // default: auto-resume a matching local partial
+        bool fDummy = false, aDummy = false, kDummy = false;
         uint8_t pkg = 0;
         const char *local = rem;
         const char *toks[3] = {a2, a3, a4};
         for (int i = 0; i < n - 1; i++)
         {
             const char *t = toks[i];
-            if (strcmp(t, "verbose") == 0 || strcmp(t, "v") == 0) { verbose = true; continue; }
+            if (ftcFlagToken(t, verbosity, fDummy, aDummy, kDummy, noResume)) continue;
+            if (strcmp(t, "verbose") == 0 || strcmp(t, "v") == 0) { verbosity = 2; continue; }
             if (strcmp(t, "no-resume") == 0 || strcmp(t, "noresume") == 0 || strcmp(t, "nr") == 0 ||
                 strcmp(t, "fresh") == 0) { noResume = true; continue; } // force a fresh (truncating) download
             bool num = t[0] != 0;
@@ -448,7 +515,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             if (num) { const int v = atoi(t); if (v >= 16 && v <= 240) pkg = (uint8_t)v; continue; } // [pkg]
             if (local == rem) local = t;
         }
-        _client.setVerbose(verbose);
+        _client.setVerbosity(verbosity);
         _client.requestDownload(pa, rem, local, pkg, noResume);
         return true;
     }
@@ -518,10 +585,21 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %23s %23s %23s %23s %23s %23s", t[0], t[1], t[2], t[3], t[4], t[5]);
         unsigned kb = 0, pk = 0, seenNum = 0, fixedWnd = 0;
         uint8_t mode = 0;
-        bool keep = false, verbose = false;
+        bool keep = false;
+        uint8_t verbosity = _client.verbosity();
         char pdrive[8] = {0}; // "sd" / "efc" target drive (empty = LittleFS)
         for (int i = 0; i < nt; i++)
         {
+            {
+                // perf writes a generated pattern, so `apply` and `no-resume` carry no meaning here --
+                // they are accepted and dropped rather than rejected, so one habit works everywhere.
+                bool fastFlag = (mode == 1), ignored = false;
+                if (ftcFlagToken(t[i], verbosity, fastFlag, ignored, keep, ignored))
+                {
+                    if (fastFlag) mode = 1;
+                    continue;
+                }
+            }
             if (isdigit((unsigned char)t[i][0]))
             {
                 if (seenNum++ == 0)
@@ -534,12 +612,12 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             else if (strcmp(t[i], "keep") == 0)
                 keep = true;
             else if (strcmp(t[i], "verbose") == 0 || strcmp(t[i], "v") == 0)
-                verbose = true;
+                verbosity = 2;
             else if (strcmp(t[i], "auto") == 0)
                 pk = 0; // pkg auto (default) -- explicit token, leave pk at 0
             else if (strcmp(t[i], "nr") == 0 || strcmp(t[i], "no-resume") == 0 ||
                      strcmp(t[i], "noresume") == 0 || strcmp(t[i], "fresh") == 0)
-                ; // no-resume: perf regenerates the pattern (fresh by default) -- accept the token, don't let it reset the mode
+                ; // perf regenerates the pattern anyway -- accept the token without resetting the mode
             else if (strcmp(t[i], "sd") == 0 || strcmp(t[i], "sd/") == 0 || strcmp(t[i], "efc") == 0 || strcmp(t[i], "efc/") == 0)
             {
                 strncpy(pdrive, t[i], sizeof(pdrive) - 1); // perf target drive -> sd/ftcperf.bin etc. (accept "sd" or "sd/")
@@ -555,7 +633,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             }
         }
         if (kb == 0) kb = 16;
-        _client.setVerbose(verbose);
+        _client.setVerbosity(verbosity);
         _client.requestPerf(pa, kb * 1024u, pk, mode, keep, (uint16_t)fixedWnd, pdrive); // pk 0 -> auto; w<N> pins the fast window; pdrive = sd/efc
         return true;
     }
@@ -565,56 +643,70 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         openknx.logger.logWithPrefixAndValues("FTC", "unknown command '%s' -- try 'ftc ?'", sub);
         return true;
     }
-    // ftc <pa> send|upload <src> [pkg] [mode] [flags]. src is mandatory (first token after sub); the
-    // trailing tokens are order-tolerant: a number (or `auto`) is pkg, apply|on|yes / no|off|noapply
-    // toggles the opt-in self-apply, no-resume|nr|fresh forces a fresh upload, verbose|v = 1 Hz progress,
-    // and anything else is the mode (safe|fast).
-    char src[FTC_PATH_MAX] = {0}, t1[24] = {0}, t2[24] = {0}, t3[24] = {0}, t4[24] = {0}, t5[24] = {0};
-    const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %23s %23s %23s %23s %23s", src, t1, t2, t3, t4, t5);
-    if (nt < 1)
+    // ftc <pa> send|upload <src> [<dst>] [options]. Operands are positional and typed; every modifier is
+    // an option in one of three spellings (long, bundled short, legacy bare word) -- see ftcXferOpt.
+    char src[FTC_PATH_MAX] = {0};
+    char target[FTC_PATH_MAX] = {0}; // explicit remote target; empty -> /<basename of src>
+    char tok[FTC_PATH_MAX] = {0}, nxt[FTC_PATH_MAX] = {0};
+    bool trunc = false;
+    const char *p = cmd.c_str();
+    ftcTok(p, tok, sizeof(tok), trunc); // "ftc"
+    ftcTok(p, tok, sizeof(tok), trunc); // <pa>
+    ftcTok(p, tok, sizeof(tok), trunc); // <sub>
+    if (!ftcTok(p, src, sizeof(src), trunc))
     {
-        openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> send <src> [pkg] [mode] [flags]   e.g. ftc 5.0.3 send sd/fw.bin");
+        openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> send <src> [<dst>] [options]   e.g. ftc 5.0.3 send fw.bin sd/fw.bin --mode fast");
         return true;
     }
-    unsigned pk = 0;
-    uint8_t mode = 0;
-    bool apply = false;    // opt-in (default off): never reboot a target unless explicitly asked
-    bool noResume = false; // default: auto-resume a matching partial
-    bool verbose = false;
-    unsigned fixedWnd = 0; // fast w<N>: pin the fast window (0 = adaptive AIMD)
-    char target[32] = {0}; // explicit remote target ("sd/foo", "efc/foo", "/foo"); empty -> /<basename>
-    const char *rest[5] = {t1, t2, t3, t4, t5};
-    for (int i = 0; i < nt - 1; i++)
+
+    FtcXferOpts o;
+    o.mode = 0;
+    uint8_t operands = 0;
+    bool havePending = false;
+    while (havePending || ftcTok(p, tok, sizeof(tok), trunc))
     {
-        const char *tk = rest[i];
-        if (strchr(tk, '/') != nullptr && target[0] == '\0')
+        havePending = false;
+        const bool haveNext = ftcTok(p, nxt, sizeof(nxt), trunc);
+        bool usedNext = false;
+        const char *err = nullptr;
+        if (ftcXferOpt(tok, haveNext ? nxt : nullptr, o, usedNext, err))
         {
-            strncpy(target, tk, sizeof(target) - 1);
-            target[sizeof(target) - 1] = '\0';
+            if (err != nullptr)
+            {
+                openknx.logger.logWithPrefixAndValues("FTC", "%s: %s", tok, err);
+                return true;
+            }
+            if (!usedNext && haveNext) { strncpy(tok, nxt, sizeof(tok) - 1); tok[sizeof(tok) - 1] = 0; havePending = true; }
+            continue;
         }
-        else if (isdigit((unsigned char)tk[0]))
-            pk = (unsigned)atoi(tk);
-        else if (strcmp(tk, "auto") == 0)
-            pk = 0; // pkg auto (default)
-        else if (strcmp(tk, "apply") == 0 || strcmp(tk, "on") == 0 || strcmp(tk, "yes") == 0)
-            apply = true;
-        else if (strcmp(tk, "no") == 0 || strcmp(tk, "off") == 0 || strcmp(tk, "noapply") == 0)
-            apply = false;
-        else if (strcmp(tk, "no-resume") == 0 || strcmp(tk, "noresume") == 0 || strcmp(tk, "nr") == 0 || strcmp(tk, "fresh") == 0)
-            noResume = true;
-        else if (strcmp(tk, "verbose") == 0 || strcmp(tk, "v") == 0)
-            verbose = true;
-        else if ((tk[0] == 'w' || tk[0] == 'W') && isdigit((unsigned char)tk[1]))
-            fixedWnd = (unsigned)atoi(tk + 1); // fast w<N>: pin the fast window (no AIMD probe-up; loss still ratchets down)
-        else
+        if (operands++ > 0)
         {
-            const uint8_t m = ftcParseModeWord(tk);
-            if (m != 0 || strcmp(tk, "safe") == 0) mode = m;
+            openknx.logger.logWithPrefixAndValues("FTC", "unexpected argument '%s' -- send takes <src> [<dst>]", tok);
+            return true;
         }
+        strncpy(target, tok, sizeof(target) - 1);
+        target[sizeof(target) - 1] = 0;
+        if (haveNext) { strncpy(tok, nxt, sizeof(tok) - 1); tok[sizeof(tok) - 1] = 0; havePending = true; }
     }
+    if (trunc)
+    {
+        openknx.logger.logWithPrefix("FTC", "argument too long for this build's path buffer");
+        return true;
+    }
+    const char *bad = ftcXferCheck(o);
+    if (bad != nullptr)
+    {
+        openknx.logger.logWithPrefixAndValues("FTC", "%s", bad);
+        return true;
+    }
+    const unsigned pk = o.pkg;
+    const uint8_t mode = o.mode;
+    const bool apply = o.apply, noResume = o.noResume;
+    const unsigned fixedWnd = o.window;
+    if (o.verbosity != 0xFF) _client.setVerbosity(o.verbosity);
+
     // mode + apply + resume are echoed by the CONFIG box (Mode / Options rows) that requestUpload prints.
     // The client range-checks pkg and the path length against its own constants/buffers.
-    _client.setVerbose(verbose);
     _client.requestUpload(pa, src, pk, noResume, mode, apply, target, (uint16_t)fixedWnd); // fast w<N> pins the window
     return true;
 }

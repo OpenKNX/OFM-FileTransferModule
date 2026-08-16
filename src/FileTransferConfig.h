@@ -1,11 +1,12 @@
 #pragma once
-// Central FTC feature-switch configuration. Include FIRST in every FTC translation unit so the
-// derived defaults and couplings below are visible before any feature guard is evaluated.
-//
-// Policy: all optional features default ON (opt-out) so nothing breaks and they work WITHOUT a
-// webserver. A product strips down with -DOPENKNX_FTC_MINIMAL (extras default OFF) or by pinning an
-// individual gate to 0 (e.g. -DOPENKNX_FTC_DIROPS=0). The core (FwUpdate, classic upload, FileInfo,
-// FilesystemInfo, Format/Exists/Rename/Delete, ModuleVersion, CheckFeatures, Cancel) has no switch.
+/**
+ * @file        FileTransferConfig.h
+ * @brief       Feature switches for the whole module -- include FIRST in every FTC translation unit
+ * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
+ *              Licensed under GNU GPL v3.0
+ */
+// Every optional feature defaults ON; strip down with -DOPENKNX_FTC_MINIMAL or pin one gate to 0 (e.g.
+// -DOPENKNX_FTC_DIROPS=0). The core (upload, FileInfo, FilesystemInfo, Format/.../Delete, FwUpdate, ...) has no switch.
 
 #ifdef OPENKNX_FTC_MINIMAL
     #define FTC_EXTRA_DEFAULT 0
@@ -44,4 +45,15 @@
 //     unauthenticated. Opt out deliberately with -DOPENKNX_FTC_CONSOLE_INSECURE (dev / trusted bus). ---
 #if defined(OPENKNX_FTC_CONSOLE) && !defined(OPENKNX_FTC_CONSOLE_INSECURE) && !defined(OPENKNX_FTC_SECURITY)
     #define OPENKNX_FTC_SECURITY
+#endif
+
+// ESP32 only: unpack a gzipped staged firmware into the OTA slot on the fly (inflate from mask ROM, no
+// flash cost; ~44 KB heap only during the apply pass). Roughly halves the bus time of an update.
+#ifndef OPENKNX_FTC_GZIP_UPDATE
+    #define OPENKNX_FTC_GZIP_UPDATE 1
+#endif
+
+// Bytes read from the staged file per inflate pass. Small on purpose: the window, not this, does the work.
+#ifndef FTM_GZIP_IN_CHUNK
+    #define FTM_GZIP_IN_CHUNK 1024
 #endif
