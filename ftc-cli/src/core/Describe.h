@@ -73,6 +73,7 @@ struct IfaceDesc
     bool hasIp = false;
     uint32_t ip = 0, subnet = 0, gw = 0;
     uint8_t ipMethod = 0;
+    bool haveIpMethod = false; // the DIB carried a method byte -- "not reported" is not "unset"
     // Filled by the HOST after DESCRIPTION (NOT by the core parser): APDU auto-detection results.
     uint16_t apduReported = 0; // 0 = not obtained
     uint8_t apduReportedPid = 0;
@@ -113,6 +114,7 @@ inline void parseDibs(const unsigned char* d, int len, IfaceDesc& o)
             o.subnet = (uint32_t)((b[6] << 24) | (b[7] << 16) | (b[8] << 8) | b[9]);
             o.gw = (uint32_t)((b[10] << 24) | (b[11] << 16) | (b[12] << 8) | b[13]);
             o.ipMethod = b[18];
+            o.haveIpMethod = true;
         }
         else if (dt == 0x08 && dl >= 8) // Extended Device Information DIB (v2): maxLocalApdu + mask
         {

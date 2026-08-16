@@ -38,6 +38,7 @@ struct DiscoveredIface
     std::string ip;
     std::string name;
     uint8_t medium = 0; // KNX medium code from the Device Information DIB
+    uint16_t ia = 0;    // the interface's own individual address — its LINE decides what it can reach
 };
 
 namespace detail
@@ -214,6 +215,9 @@ inline std::vector<DiscoveredIface> discoverInterfaces(uint16_t port = 3671, int
         std::snprintf(ip, sizeof(ip), "%u.%u.%u.%u", buf[8], buf[9], buf[10], buf[11]);
         f.ip = ip;
         f.medium = buf[16];
+        // Device Information DIB +4: the individual address. Which line an interface sits on decides
+        // whether it can reach a given device at all — withholding it makes the choice a guess.
+        f.ia = (uint16_t)((buf[18] << 8) | buf[19]);
         char nm[31];
         std::memcpy(nm, &buf[38], 30);
         nm[30] = 0;

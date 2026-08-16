@@ -20,6 +20,7 @@ using FtcDdCb = void (*)(uint16_t pa, uint8_t descriptorType, const uint8_t* dat
 using FtcPropCb = void (*)(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, const uint8_t* data, uint8_t length);
 using FtcMemCb = void (*)(uint16_t pa, uint16_t addr, const uint8_t* data, uint8_t len);
 using FtcAdcCb = void (*)(uint16_t pa, uint8_t channel, uint8_t count, int16_t value);
+using FtcConCb = void (*)(uint16_t pa, bool ok);
 
 class KnxIpTunnel
 {
@@ -107,8 +108,13 @@ class KnxIpTunnel
     void pacingRate(uint32_t deliveredBps, bool clean);
 
     // --- callback registration (HostBau.ftcSet*Callback forwards here) ---------------------------
+    void setConfirmCallback(FtcConCb cb) { _conCb = cb; }
+    FtcConCb confirmCallback() const { return _conCb; }
     void setResponseCallback(FtcResponseCb cb) { _responseCb = cb; }
+    FtcResponseCb responseCallback() const { return _responseCb; } // so a probe can restore, not clear
+    FtcPropCb propertyCallback() const { return _propCb; }
     void setDeviceDescriptorCallback(FtcDdCb cb) { _ddCb = cb; }
+    FtcDdCb deviceDescriptorCallback() const { return _ddCb; }
     void setPropertyCallback(FtcPropCb cb) { _propCb = cb; }
     void setMemoryCallback(FtcMemCb cb) { _memCb = cb; }
     void setAdcCallback(FtcAdcCb cb) { _adcCb = cb; }
@@ -126,6 +132,7 @@ class KnxIpTunnel
     uint8_t _txPriority = 0x03;   // FTC data-frame KNX priority (2-bit): 3 = LowPriority (polite default)
     int _lastConnectStatus = -1; // see lastConnectStatus(); -1 until a CONNECT_RESPONSE arrives
     FtcResponseCb _responseCb = nullptr;
+    FtcConCb _conCb = nullptr;
     FtcDdCb _ddCb = nullptr;
     FtcPropCb _propCb = nullptr;
     FtcMemCb _memCb = nullptr;

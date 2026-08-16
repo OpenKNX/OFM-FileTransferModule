@@ -169,6 +169,7 @@ static constexpr uint8_t TUNNEL_LINKLAYER = 0x02; // CRI KNX layer: link layer
 // MC_LDATA_IND, so the dispatcher ignores them.
 static constexpr uint8_t MC_LDATA_REQ = 0x11;
 static constexpr uint8_t MC_LDATA_IND = 0x29;
+static constexpr uint8_t MC_LDATA_CON = 0x2E;
 
 // APCI (10-bit, collapsed) — response services we decode (§5)
 static constexpr uint16_t APCI_FUNC_PROP_STATE_RESP = 0x2C9;
@@ -193,7 +194,9 @@ static constexpr uint32_t RECONNECT_BACKOFF_MS = 2000;  // between tunnel re-dia
 static constexpr uint8_t RECONNECT_MAX = 8;             // consecutive failed re-dials (~16s) before giving up -> the FTC layer then fails the transfer cleanly
 static constexpr int RX_BUF = 1024;
 static constexpr uint32_t TX_ACK_TIMEOUT_MS = 1000; // KNXnet/IP tunneling: TUNNELING_ACK deadline before retransmit (03_08_04 §2.6)
-static constexpr uint8_t TX_ACK_MAX_RETRIES = 5;    // retransmits of the same (seq) frame before the slot is freed
+// 03_08_04 2.6.1 says repeat once then disconnect; 5 instead, because a repeat is defined harmless (the server
+// discards the seq below the expected one) while an early disconnect costs a reconnect+resume. Ends at ~6 s.
+static constexpr uint8_t TX_ACK_MAX_RETRIES = 5;
 
 // NOTE ON TX PIPELINING (why there is exactly one in-flight frame): we tried sending a second TUNNELING_REQUEST
 // before the first was ACKed, to overlap the tunnel round-trip with the ~290 ms TP wire time (a measured
@@ -328,7 +331,7 @@ uint16_t buildCemi(uint8_t* out, uint16_t sa, uint16_t da, const uint8_t* tpdu, 
     uint8_t len = (uint8_t)(tpduLen - 1); // NPDU octetCount = TPDU bytes after byte0
     uint8_t ctrl1 = 0;
     ctrl1 |= (len <= 15) ? 0x80 : 0x00; // FrameType: standard / extended
-    ctrl1 |= 0x20;                      // do-not-repeat
+    ctrl1 |= 0x20; // wire meaning "not a repetition" (cEMI 03_06_03 4.1.5.3.2 reads it as "do not repeat"); 0 would suppress repetitions
     ctrl1 |= 0x10;                      // broadcast domain
     ctrl1 |= (uint8_t)((priority & 0x03) << 2);
     ctrl1 |= ackReq ? 0x02 : 0x00; // AckRequest
@@ -488,6 +491,7 @@ struct DispatchCbs
     FtcPropCb prop;
     FtcMemCb mem;
     FtcAdcCb adc;
+    FtcConCb con;   // L_Data.con of our own TX -> link-layer presence
 };
 
 } // namespace
@@ -591,7 +595,17 @@ static void handleCemi(uint16_t selfPa, const DispatchCbs& cb, uint8_t* cemi, in
         return;
     } // truncated — never over-read
 
-    // Only indications carry answers. Confirmations (L_Data.con 0x2E) of our own TX are ignored here.
+    // A confirmation carries no answer, but it does say whether the frame reached anybody: on TP1 the
+    // addressed device acknowledges at data-link level, so ctrl1 bit 0 == 0 means "someone is there".
+    if (mc == MC_LDATA_CON)
+    {
+        if (cb.con != nullptr)
+        {
+            const uint16_t da = (uint16_t)((cemi[base + 4] << 8) | cemi[base + 5]);
+            cb.con(da, (cemi[base] & 0x01) == 0);
+        }
+        return;
+    }
     if (mc != MC_LDATA_IND) return;
     g_rxActivity++; // a received bus indication (RX activity for the status bar)
 
@@ -816,7 +830,7 @@ void KnxIpTunnel::pump()
                 s.rxSeqValid = true;
                 int cemiOff = KNXIP_HEADER_LEN + 4;
                 int cemiLen = (int)total - cemiOff;
-                DispatchCbs cb{_responseCb, _ddCb, _propCb, _memCb, _adcCb};
+                DispatchCbs cb{_responseCb, _ddCb, _propCb, _memCb, _adcCb, _conCb};
                 if (cemiLen > 0 && cemiOff + cemiLen <= n) handleCemi(_assignedPA, cb, &buf[cemiOff], cemiLen);
                 break;
             }
