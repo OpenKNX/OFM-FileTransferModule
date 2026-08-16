@@ -1,3 +1,9 @@
+/**
+ * @file        FileTransferModule.h
+ * @brief       KNX file transfer SERVER: serves file, directory, firmware-update and console commands
+ * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
+ *              Licensed under GNU GPL v3.0
+ */
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
 #include "FileTransferConfig.h"
 #include "FastCRC.h"
@@ -5,7 +11,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 
-#define HEARTBEAT_INTERVAL 30000
+#define HEARTBEAT_INTERVAL 30000 // ms without a client heartbeat -> close the open file/dir
 
 class FileTransferModule : public OpenKNX::Module
 {
@@ -53,7 +59,7 @@ class FileTransferModule : public OpenKNX::Module
     static constexpr uint8_t CON_OBJECT_INDEX = 160; // separate from FTC-159
     static constexpr uint8_t CON_PID_IN = 1;         // A_FunctionProperty_Command: input / control
     static constexpr uint8_t CON_PID_OUT = 2;        // A_FunctionProperty_Command: output drain
-    static constexpr uint8_t CON_DRAIN_MIN = 4;      // smallest drain cap a client may request (4 keeps margin under a 15-octet-APDU interface; below this a request is ignored -> full window)
+    static constexpr uint8_t CON_DRAIN_MIN = 4; // smaller requests are ignored; keeps margin under a 15-octet APDU
     static constexpr uint8_t CON_DRAIN_MAX = 247;    // max console text per PID_OUT answer (one APDU minus the 7 B header)
     static constexpr uint32_t CON_IDLE_TMO = 60000;  // reap an orphaned session, re-enable the local console
     bool _conActive = false;
@@ -89,6 +95,9 @@ class FileTransferModule : public OpenKNX::Module
     File _crcFile;               // LittleFS read handle for the cooperative CRC job (FD_INT)
     void crcLoop();              // advance the CRC by a bounded slice; called from loop() (SD/EFC builds)
     void crcCancel();            // close the read handle + clear the job state
+
+    // Max result payload: octetCount = 3 + resultLength must stay <= 254. Tighter than the 255 B bau buffer.
+    static constexpr uint8_t FTM_RESULT_MAX = 251;
 
     // Fast-transfer server state, STATIC (no malloc). Received-bitmap indexed by (seq-1); a bit is set
     // only after the per-chunk CRC verifies AND the write succeeds. Over FTM_FAST_MAX_CHUNKS -> 0x4A -> classic.
@@ -172,6 +181,15 @@ class FileTransferModule : public OpenKNX::Module
     void cmdExists(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
     void cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+    // Is there a slot to write an update into? RP2040 always has one (PicoOTA); on ESP32 a single-app layout
+    // has none (IDF returns the RUNNING partition). Checked before writing + before cmdCheckFeatures.
+    static bool otaSlotAvailable();
+#ifdef ARDUINO_ARCH_ESP32
+    static bool espImageFitsThisChip(const uint8_t *hdr24, uint16_t &imgChip, uint16_t &runChip);
+    #if OPENKNX_FTC_GZIP_UPDATE
+    size_t inflateToOta(File &img, size_t dataStart, size_t outSize); // gzipped staged image -> OTA slot
+    #endif
+#endif
 #endif
     void cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);

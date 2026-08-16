@@ -1,3 +1,9 @@
+/**
+ * @file        FileTransferModule.cpp
+ * @brief       KNX file transfer SERVER: serves file, directory, firmware-update and console commands
+ * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
+ *              Licensed under GNU GPL v3.0
+ */
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
 #include "FileTransferModule.h"
 #include "versions.h"
@@ -10,6 +16,8 @@
 #ifdef ARDUINO_ARCH_RP2040
 #include <PicoOTA.h>
 #elif defined(ARDUINO_ARCH_ESP32)
+
+    #include <esp_ota_ops.h> // esp_ota_get_running_partition: the chip the running image was built for
 #include <Update.h>
 #endif
 #ifdef OPENKNX_FTC_SECURITY
@@ -19,11 +27,8 @@ static const uint8_t FTM_SEC_K0[16] = {0x4F, 0x70, 0x65, 0x6E, 0x4B, 0x4E, 0x58,
 #endif
 
 #ifdef OPENKNX_FTC_CONSOLE
-// OGM-Common compat: newer commons have disableConsole(bool, const char* reason) (the "external console
-// session active (remote a.b.c)" notice); older ones (as some products still pin) only have disableConsole(bool). This shim picks
-// the two-arg form when it compiles and silently drops the reason otherwise -> every downstream product
-// builds regardless of its pinned OGM-Common version, with NO OGM-Common edit. Overload ranking: the `int`
-// tag is preferred; if disableConsole(bool, const char*) is ill-formed, SFINAE falls back to the `long` one.
+// OGM-Common compat: the two-argument (reason) form is picked where it compiles, else the reason is
+// dropped, so every product builds against whichever OGM-Common it pins.
 template <typename C>
 static auto ftcDisableConsole(C& c, bool disable, const char* reason, int)
     -> decltype(c.disableConsole(disable, reason), void())
@@ -79,7 +84,7 @@ void FileTransferModule::loop(bool configured)
 
 enum class FtmCommands
 {
-    Format, // LittleFS.format()
+    Format,
     Exists, // LittleFS.exists(path)
     Rename,
     FileUpload = 40,
@@ -627,7 +632,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         case FtmCommands::FwUpdate:
         {
             cmdFwUpdate(length, data, resultData, resultLength);
-            return false; // false is correct
+            return false; // never answers: it sets no result, and on success the device restarts
         }
 #endif
     }
@@ -657,10 +662,8 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
 #endif
             if (_conActive)
             {
-                // A DIFFERENT owner is refused (single-owner console, no hijack). But the SAME owner
-                // re-opening means its previous session was lost (e.g. a drain answer that never crossed a
-                // constrained interface, or a client that died without a CLOSE) -> take it over cleanly and
-                // reset below, instead of locking it out until CON_IDLE_TMO. reqPa 0 (no PA sent) stays busy.
+                // Single-owner console: a different owner is refused; the same owner re-opening takes over its
+                // own lost session (died without CLOSE) instead of waiting out the idle timeout.
                 const uint16_t reqPa = (len >= 3) ? (uint16_t)((data[1] << 8) | data[2]) : 0;
                 if (reqPa == 0 || reqPa != _conOwnerPa)
                 {
@@ -677,7 +680,8 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
             _conOwnerPa = (len >= 3) ? (uint16_t)((data[1] << 8) | data[2]) : 0;
             _conLastAccess = millis();
             snprintf(_conOwnerStr, sizeof(_conOwnerStr), "remote %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
-            ftcDisableConsole(openknx.console, true, _conOwnerStr, 0); // silence the local console; local input now gets a one-line "external console session active (remote a.b.c)" notice (reason dropped on older OGM-Common)
+            // Silence the local console; local input now gets a one-line "session taken over" notice.
+            ftcDisableConsole(openknx.console, true, _conOwnerStr, 0);
             logInfoP("Console taken over by %u.%u.%u", (_conOwnerPa >> 12) & 0x0F, (_conOwnerPa >> 8) & 0x0F, _conOwnerPa & 0xFF);
             res[0] = 0x00;
             resLen = 1;
@@ -735,10 +739,8 @@ bool FileTransferModule::conFunctionProperty(uint8_t pid, uint8_t len, uint8_t *
         }
         _conLastAccess = millis();
 #ifdef OPENKNX_FTC_SECURITY
-        // An attached console (its 3 s keepalive) is ACTIVE diagnosis, not inactivity -> keep the PW auth
-        // window fresh so a logged-in user is NEVER auto-logged-out while the console stays open (error
-        // analysis may sit idle watching logs). The "Automatischer Logout nach Inaktivität" resumes counting
-        // down normally once the console is closed. No effect on non-PW stages (window unused there).
+        // An attached console is active use, not idle: keep the auth window fresh so a watcher is not logged
+        // out mid-session; the idle countdown resumes when the console closes.
         if (secStage() == FTM_SEC_PW && _authorized) secRefreshWindow();
 #endif
         const uint32_t wp = openknx.logger.ringWritePos(); // snapshot once
@@ -923,6 +925,19 @@ void FileTransferModule::cmdModuleVersion(uint8_t length, uint8_t *data, uint8_t
     resultData[5] = _revision & 0xFF;
 }
 
+// A second app slot is where an update is written. RP2040 always has one (PicoOTA stages via the filesystem).
+// On ESP32 esp_ota_get_next_update_partition() wraps to the RUNNING partition on a single-app layout, so
+// Update.begin() would succeed and erase the running code -- hence the explicit check.
+bool FileTransferModule::otaSlotAvailable()
+{
+#ifdef ARDUINO_ARCH_ESP32
+    const esp_partition_t *slot = esp_ota_get_next_update_partition(nullptr);
+    return slot != nullptr && slot != esp_ota_get_running_partition();
+#else
+    return true;
+#endif
+}
+
 #ifdef ARDUINO_ARCH_RP2040
 void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -946,8 +961,123 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     logIndentDown();
 }
 #elif defined(ARDUINO_ARCH_ESP32)
+
+    #if OPENKNX_FTC_GZIP_UPDATE
+        #include <miniz.h> // tinfl lives in the chip's mask ROM (esp_rom): streaming inflate at zero flash cost
+
+/**
+ * @brief Unpack a gzipped staged image straight into the OTA slot. Returns the number of bytes written.
+ * @details The ESP updater takes a raw image only — it checks the image magic on the very first byte — so a
+ *          compressed transfer has to be undone here rather than on the wire. Worth it: an ESP application
+ *          is around 2 MB, the bus carries ~400 B/s, and compression takes that from ~88 to ~54 minutes.
+ *
+ *          Streams through a 32 KiB dictionary window, the size tinfl needs to resolve back-references; the
+ *          window doubles as the output buffer and is flushed to Update.write() whenever it fills. All of it
+ *          is heap, freed on every exit — this runs once, immediately before a reboot, so it does not sit in
+ *          any hot path. `outSize` is the uncompressed length from the gzip trailer, which Update.begin()
+ *          needs up front.
+ */
+size_t FileTransferModule::inflateToOta(File &img, size_t dataStart, size_t outSize)
+{
+    tinfl_decompressor *inf = (tinfl_decompressor *)malloc(sizeof(tinfl_decompressor));
+    uint8_t *dict = (uint8_t *)malloc(TINFL_LZ_DICT_SIZE);
+    uint8_t *in = (uint8_t *)malloc(FTM_GZIP_IN_CHUNK);
+    if (inf == nullptr || dict == nullptr || in == nullptr)
+    {
+        logErrorP("not enough memory to unpack the firmware");
+        free(inf); free(dict); free(in);
+        return 0;
+    }
+    tinfl_init(inf);
+    img.seek(dataStart);
+
+    size_t written = 0, dictOfs = 0, inAvail = 0, inPos = 0;
+    bool eof = false;
+    for (;;)
+    {
+        if (inAvail == 0 && !eof)
+        {
+            const int rd = img.read(in, FTM_GZIP_IN_CHUNK);
+            if (rd <= 0) eof = true;
+            else { inAvail = (size_t)rd; inPos = 0; }
+        }
+        size_t inBytes = inAvail;
+        size_t outBytes = TINFL_LZ_DICT_SIZE - dictOfs;
+        const tinfl_status st = tinfl_decompress(inf, in + inPos, &inBytes, dict, dict + dictOfs, &outBytes,
+                                                 eof ? 0 : TINFL_FLAG_HAS_MORE_INPUT);
+        inPos += inBytes;
+        inAvail -= inBytes;
+        dictOfs += outBytes;
+
+        // Flush when the window is full, and once more at the end — the window IS the output buffer, so it
+        // must be handed over before tinfl wraps around and overwrites it.
+        if (dictOfs == TINFL_LZ_DICT_SIZE || st == TINFL_STATUS_DONE)
+        {
+            if (written == 0 && dictOfs >= 24) // the very first bytes are the image header: check the chip now
+            {
+                uint16_t imgChip = 0, runChip = 0;
+                if (!espImageFitsThisChip(dict, imgChip, runChip))
+                {
+                    logErrorP("this firmware is for chip 0x%04X, this device is 0x%04X -- not written",
+                              (unsigned)imgChip, (unsigned)runChip);
+                    free(inf); free(dict); free(in);
+                    return 0;
+                }
+            }
+            if (dictOfs > 0 && Update.write(dict, dictOfs) != dictOfs)
+            {
+                logErrorP("Update.write failed: %s", Update.errorString());
+                free(inf); free(dict); free(in);
+                return written;
+            }
+            written += dictOfs;
+            dictOfs = 0;
+        }
+        if (st == TINFL_STATUS_DONE) break;
+        if (st < TINFL_STATUS_DONE) // any negative status is a corrupt stream
+        {
+            logErrorP("the compressed firmware is damaged (%d)", (int)st);
+            break;
+        }
+        if (eof && inAvail == 0 && outBytes == 0 && inBytes == 0)
+        {
+            logErrorP("the compressed firmware ended early");
+            break;
+        }
+    }
+    free(inf); free(dict); free(in);
+    if (written != outSize) logErrorP("unpacked %u bytes, expected %u", (unsigned)written, (unsigned)outSize);
+    return written;
+}
+    #endif // OPENKNX_FTC_GZIP_UPDATE
+
+/**
+ * @brief Refuse an application image built for a different ESP chip, before a single byte is written.
+ * @details The Arduino updater checks only the image magic; the chip is verified by the bootloader, which
+ *          means a wrong-silicon image is written, activated, and only rejected at the next boot. The
+ *          rollback then saves the device — but it costs a reboot and a confusing round trip, and the user
+ *          is left guessing. Comparing against the RUNNING image's own header needs no chip table: both
+ *          headers carry the same field, so like is compared with like.
+ */
+bool FileTransferModule::espImageFitsThisChip(const uint8_t *hdr24, uint16_t &imgChip, uint16_t &runChip)
+{
+    imgChip = 0xFFFF;
+    runChip = 0xFFFF;
+    if (hdr24 == nullptr || hdr24[0] != 0xE9) return false; // not an application image at all
+    imgChip = (uint16_t)(hdr24[12] | (hdr24[13] << 8));
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    uint8_t own[24];
+    if (running == nullptr || esp_partition_read(running, 0, own, sizeof(own)) != ESP_OK) return true; // cannot tell -> do not block
+    if (own[0] != 0xE9) return true;
+    runChip = (uint16_t)(own[12] | (own[13] << 8));
+    return imgChip == runChip;
+}
+
 /**
  * @brief ESP32 self-apply: stream the staged LittleFS image into the OTA (app1) slot, then defer-reboot to boot it.
+ * @details A gzipped image is unpacked on the fly; anything else is written through unchanged, so a client
+ *          that knows nothing about compression keeps working exactly as before.
  */
 void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -967,19 +1097,80 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         return;
     }
     size_t sz = img.size();
-    if (!Update.begin(sz)) // fails loud on a non-OTA/single-app partition layout
+
+    // gzip? The magic is the only thing that decides — the file name is cosmetic.
+    bool gz = false;
+    size_t outSize = sz, dataStart = 0;
+#if OPENKNX_FTC_GZIP_UPDATE
+    uint8_t hdr[10];
+    if (sz > 18 && img.read(hdr, 10) == 10 && hdr[0] == 0x1F && hdr[1] == 0x8B && hdr[2] == 0x08)
     {
-        logErrorP("Update.begin(%u) failed: %s", (unsigned)sz, Update.errorString());
+        dataStart = 10;
+        const uint8_t flg = hdr[3];
+        if (flg & 0x04) // FEXTRA: a 2-byte length followed by that many bytes
+        {
+            uint8_t xl[2];
+            img.seek(dataStart);
+            if (img.read(xl, 2) != 2) { img.close(); logErrorP("damaged gzip header"); logIndentDown(); return; }
+            dataStart += 2 + ((size_t)xl[0] | ((size_t)xl[1] << 8));
+        }
+        if (flg & 0x08) { img.seek(dataStart); while (img.available() && img.read() != 0) {} dataStart = img.position(); } // FNAME
+        if (flg & 0x10) { img.seek(dataStart); while (img.available() && img.read() != 0) {} dataStart = img.position(); } // FCOMMENT
+        if (flg & 0x02) dataStart += 2;                                                                                    // FHCRC
+        uint8_t isize[4];
+        img.seek(sz - 4);
+        if (img.read(isize, 4) != 4) { img.close(); logErrorP("damaged gzip trailer"); logIndentDown(); return; }
+        outSize = (size_t)isize[0] | ((size_t)isize[1] << 8) | ((size_t)isize[2] << 16) | ((size_t)isize[3] << 24);
+        if (outSize == 0 || dataStart >= sz - 8) { img.close(); logErrorP("implausible compressed firmware"); logIndentDown(); return; }
+        gz = true;
+        logInfoP("compressed image: %u -> %u bytes", (unsigned)sz, (unsigned)outSize);
+    }
+    img.seek(0);
+#endif
+
+    if (!gz) // a raw image states its header directly; the compressed path checks after the first inflate
+    {
+        uint8_t hdr24[24];
+        img.seek(0);
+        uint16_t imgChip = 0, runChip = 0;
+        if (img.read(hdr24, sizeof(hdr24)) == (int)sizeof(hdr24) && !espImageFitsThisChip(hdr24, imgChip, runChip))
+        {
+            logErrorP("this firmware is for chip 0x%04X, this device is 0x%04X -- not written",
+                      (unsigned)imgChip, (unsigned)runChip);
+            img.close();
+            logIndentDown();
+            return;
+        }
+        img.seek(0);
+    }
+
+    // Must be checked BEFORE Update.begin(): with a single app partition begin() does NOT fail, it targets
+    // the running partition, and the write below would erase the code currently executing.
+    if (!otaSlotAvailable())
+    {
+        logErrorP("no second OTA slot in this partition layout -- update over the bus not possible, use USB");
         img.close();
         logIndentDown();
         return;
     }
-    size_t w = Update.writeStream(img);
+    if (!Update.begin(outSize))
+    {
+        logErrorP("Update.begin(%u) failed: %s", (unsigned)outSize, Update.errorString());
+        img.close();
+        logIndentDown();
+        return;
+    }
+    size_t w;
+#if OPENKNX_FTC_GZIP_UPDATE
+    if (gz) w = inflateToOta(img, dataStart, outSize);
+    else
+#endif
+        w = Update.writeStream(img);
     img.close();
-    if (w != sz || !Update.end(true) || !Update.isFinished())
+    if (w != outSize || !Update.end(true) || !Update.isFinished())
     {
         logErrorP("Update failed: %s", Update.errorString());
-        Update.abort(); // release the OTA engine (frees the ~4KB sector buffer, re-arms begin()); idempotent if a write-fail already reset it
+        Update.abort(); // frees the sector buffer and re-arms begin(); idempotent
         logIndentDown();
         return;
     }
@@ -1270,8 +1461,11 @@ void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resu
     String fileName = subDirectory.name();
     logDebugP("- %s", fileName.c_str());
 
-    memcpy(resultData + 2, fileName.c_str(), fileName.length());
-    resultLength = fileName.length() + 2;
+    // Filesystem-supplied name (up to LFS_NAME_MAX), not ours -- unclamped it overruns the answer and resultData.
+    size_t nlen = fileName.length();
+    if (nlen > (size_t)(FTM_RESULT_MAX - 2)) nlen = FTM_RESULT_MAX - 2;
+    memcpy(resultData + 2, fileName.c_str(), nlen);
+    resultLength = (uint8_t)(nlen + 2);
 }
 
 void FileTransferModule::cmdDirCreate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -1356,7 +1550,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         if(data[3] > 1)
         {
             pushByte(0x42, resultData);
-            resultLength = 1; // was missing: the client only sends flag 0/1 so this is unreachable, but never return an uninitialised length
+            resultLength = 1; // unreachable for a well-formed client, but never return an uninitialised length
             logErrorP("Start file upload to \"%s\" is failed", filename);
             return;
         }
@@ -1395,7 +1589,9 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
         logInfoP("The file upload was successfully completed");
         ftmXferClose();
         _fileOpen = false;
-        resultLength = 0;
+        // An answer without a return code means "not a PDT_Function property" (03_03_07 3.4.7.3), not success.
+        pushByte(0x00, resultData);
+        resultLength = 1;
         return;
     }
 
@@ -1408,8 +1604,9 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
 /**
  * @brief FAST upload (cmd44): open(00 00)/close(FF FF) answered, DATA silent (returns false => no L7 answer).
  *
- * DATA frames are still AckRequested on the wire, so TP1 L2 keeps doing L_ACK/BUSY/retransmit --
- * the only remaining flow-control backstop for the silent stream.
+ * The silence is deliberate -- one frame per chunk instead of two, confirmation batched into the cmd45
+ * bitmap. Deviates from 03_03_07 3.4.7.1 (every command must be answered), so fast needs this server.
+ * Flow control is the client window + that bitmap, NOT the L2 ack (not evaluated on the TP send path).
  */
 #if OPENKNX_FTC_FASTUPLOAD
 bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
@@ -1501,7 +1698,7 @@ bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_
         if (!(cell & mask)) _fastRateBytes += n; // count NEW chunks only -> true forward-progress ingest rate
         cell |= mask;
     }
-    return false; // SILENT (no L7 answer). L2 still ACKs -- the client sends fast DATA AckRequested.
+    return false; // SILENT (no L7 answer) -- deliberate, see the function header.
 }
 
 /**
@@ -1581,9 +1778,8 @@ void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t 
 
         _size = data[2];
 
-        // -6 = the 4-byte header (result/seq) + 2-byte CRC readFile() appends after the payload; without it a
-        // 250..255 pkg overruns the fixed result buffer (bau resultData[0xFF]).
-        if (data[2] > resultLength - 6)
+        // -6 = the 4-byte header (result/seq) + 2-byte CRC readFile() appends; bound by FTM_RESULT_MAX, not the buffer.
+        if (data[2] > FTM_RESULT_MAX - 6)
         {
             logIndentUp();
             logErrorP("Requested pkg is greater than max resultLength");
@@ -1625,10 +1821,16 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
     uint8_t result = 0;
     result |= 0x1; // Resume
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
-    result |= 0x2; // Update
+    // On ESP32 the partition table decides if an update can be applied; advertising it on a single-app
+    // layout would send a client through a ~50 min transfer that only fails at the end.
+    if (otaSlotAvailable()) result |= 0x2; // Update
 #endif
 #if OPENKNX_FTC_FASTUPLOAD
     result |= 0x4; // FAST: server understands cmd44/cmd45 (windowed fast upload).
+#endif
+#if defined(ARDUINO_ARCH_ESP32) && OPENKNX_FTC_GZIP_UPDATE
+    // Only meaningful together with Update -- unpacking is a property of the apply step.
+    if (otaSlotAvailable()) result |= 0x40; // GZIP_UPDATE: staged firmware may be sent compressed
 #endif
 #ifdef OPENKNX_FTC_CONSOLE
     result |= 0x8; // Console: obj-160 console tunnel available (ftc <pa> console)
