@@ -354,3 +354,7 @@ MigrationBackup/
 
 # macOS Finder metadata
 .DS_Store
+
+# Generated conformance / hardening reports
+scripts/Test/Reports/
+scripts/Hardening/Reports/

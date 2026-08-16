@@ -162,7 +162,10 @@ if engine == "clang":
     # (the active CLT often lacks <chrono> etc.); -isysroot/-arch pick the SDK + target arch.
     env.Append(CCFLAGS=["-arch", mac_arch, "-isysroot", sdk],
                CXXFLAGS=["-nostdinc++", "-isystem", cxx_inc],
-               LINKFLAGS=["-arch", mac_arch, "-isysroot", sdk])
+               LINKFLAGS=["-arch", mac_arch, "-isysroot", sdk,
+                          # CoreFoundation: the desktop language on macOS is its own setting, not LC_*
+                          # (cli/I18n.h). It has to go here — build_flags never reach the link step.
+                          "-framework", "CoreFoundation"])
 else:
     # linux/windows: project-local zig cross-compiler. PlatformIO's native platform resolves the
     # compiler by NAME (cc/c++) from the build PATH, so prepend the wrapper dir there (env.Replace(CXX=...)
