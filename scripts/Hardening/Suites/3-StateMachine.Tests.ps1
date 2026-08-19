@@ -130,8 +130,17 @@ function Invoke-FtmSuiteState {
     }
 
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-S-7' -Title 'A timed-out operation does not block the next one' -Reference 'FTC-Reference: bounded, non-re-armed deadlines' -Body {
-        # Aim at an unreachable target, let it time out, then immediately do real work.
+        # Aim at an unreachable target, let it time out, then do real work.
+        #
+        # The 60 s here is the CONSOLE read window, not the client's deadline. The prompt
+        # comes back at once while the lookup keeps running, so asking "are you ready?"
+        # straight away got a perfectly correct "busy" - and this case called that a defect,
+        # then left the operation running for F-S-8 to trip over as well. Wait for the client
+        # to actually go idle first; F-R-5 already proves the deadline itself expires.
         [void](Invoke-FtmConsoleCommand -Console $con -Command 'ftc 15.15.253 info x' -TimeoutMs 60000)
+        $idle = Wait-FtmClientIdle -Console $con -Target $t
+        Add-FtmEvidence -Note "client idle after the timed-out operation: $idle"
+        Assert-FtmTrue $idle 'the client never became idle again after an operation that timed out'
         $still = Test-FtmStillWorks -Console $con -Target $t
         Add-FtmEvidence -Output $still.Output
         Assert-FtmTrue $still.Ok 'the client is still busy after an operation that timed out'
@@ -140,8 +149,18 @@ function Invoke-FtmSuiteState {
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-S-8' -Title 'Self-addressing is refused or times out cleanly, never wedges' -Reference 'Known limit: a KNX device does not process bus frames it transmitted to itself' -Body {
         # This is a documented KNX limitation, not a defect. The suite pins it so that a
         # later change which makes it hang instead of failing is noticed.
-        $own = Invoke-FtmConsoleCommand -Console $con -Command 'ftc info' -TimeoutMs 15000
-        Add-FtmEvidence -Output $own
+        # "ftc info" carries NO address, so the client answers "bad PA 'info'" - a correct
+        # rejection of a malformed command, not self-addressing. The case has to name the
+        # device's OWN individual address for the documented limit to be exercised at all.
+        $ownPa = if ($Ctx.PSObject.Properties['OwnPa'] -and $Ctx.OwnPa) { $Ctx.OwnPa } else { '' }
+        if (-not $ownPa) { Set-FtmTestSkip 'the device individual address is unknown - cannot address it by its own address' }
+
+        [void](Wait-FtmClientIdle -Console $con -Target $t -Cancel)
+        $own = Invoke-FtmConsoleCommand -Console $con -Command "ftc $ownPa info x" -TimeoutMs 20000
+        Add-FtmEvidence -Output $own -Note "addressed its own PA $ownPa"
+        $idle = Wait-FtmClientIdle -Console $con -Target $t
+        Add-FtmEvidence -Note "client idle after self-addressing: $idle"
+        Assert-FtmTrue $idle 'the client never became idle again after addressing itself - the documented limit must fail cleanly, not hang'
         $still = Test-FtmStillWorks -Console $con -Target $t
         Assert-FtmTrue $still.Ok 'the client is wedged after addressing itself - the documented limit must fail cleanly, not hang'
     }

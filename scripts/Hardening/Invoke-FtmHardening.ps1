@@ -31,6 +31,9 @@ FILEPATH: scripts/Hardening/Invoke-FtmHardening.ps1
 .PARAMETER Port
     Serial port of the DRIVING device's console (the ftc client). Mandatory unless -SelfTest.
 
+.PARAMETER TargetPassword
+    Password for the FTC target when it is built with OPENKNX_FTC_SECURITY. Without it every
+    WRITE on that device is refused with 0xA0 and the cases that stage a file report SKIP.
 .PARAMETER Target
     Individual address of the FTC target device, e.g. 5.0.3.
 
@@ -70,6 +73,7 @@ param(
     [string]$Port = '',
     [int]$Baud = 115200,
     [string]$Target = '5.0.3',
+    [string]$TargetPassword = '',
         [string[]]$Suite = @('All'),
     [switch]$Dtr,
         [string[]]$Drive = @('LittleFS'),
@@ -173,9 +177,37 @@ if (-not (Test-FtmConsoleAlive -Console $console)) {
 }
 Write-Host "  Console on $Port answers" -ForegroundColor Green
 
-$ver = Invoke-FtmConsoleCommand -Console $console -Command 'version' -TimeoutMs 6000
-$firmware = ($ver -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 3) -join ' / '
+# "version" is not a console command - it answered "command not found" and that string
+# went into the report as the firmware. The information block has the real values, and it
+# is read a few lines below anyway.
+$firmware = 'unknown'
+
+# The device's OWN individual address, read from its information block. F-S-8 pins the
+# documented self-addressing limit, and it can only do that by naming this address - it
+# used to send "ftc info", which carries no address at all and is simply rejected as a
+# malformed command, so the case proved nothing.
+$ownPa = ''
+$info = Invoke-FtmConsoleCommand -Console $console -Command 'i' -TimeoutMs 8000
+if ($info -match '(?im)^\s*Address:\s*(\d{1,2}\.\d{1,2}\.\d{1,3})') { $ownPa = $Matches[1] }
+# Firmware name and version come from the same block - "Name:" appears twice (device and
+# firmware), so take the one that follows the Firmware heading.
+if ($info -match "(?ms)Firmware\s*`n\s*Name:\s*(.+?)\s*`n\s*Version:\s*(\S+)") {
+    $firmware = "$($Matches[1]) v$($Matches[2])"
+}
+Write-Host "  Own address   : $(if ($ownPa) { $ownPa } else { 'unknown - F-S-8 will report SKIP' })"
 Write-Host "  Firmware      : $firmware"
+# A target built with OPENKNX_FTC_SECURITY refuses every WRITE with 0xA0 until a session
+# is opened, so any case that has to stage a file needs the password. Reads stay open, which
+# is why most of the suite runs without it.
+if ($TargetPassword) {
+    $login = Invoke-FtmConsoleCommand -Console $console -Command "ftc $Target login $TargetPassword" -TimeoutMs 20000
+    if ($login -match '0xA1' -or $login -match '(?i)(failed|denied)') {
+        Write-Host "  ABORT: login on $Target was refused - the password is wrong or the stage does not allow it." -ForegroundColor Red
+        Close-FtmConsole -Console $console
+        exit 3
+    }
+    Write-Host "  Target login  : accepted on $Target" -ForegroundColor Green
+}
 Write-Host "  FTC target    : $Target"
 Write-Host "  Drives        : $($Drive -join ', ')"
 if ($Security) { Write-Host '  Security      : OPENKNX_FTC_SECURITY expected' -ForegroundColor Yellow }
@@ -184,10 +216,12 @@ if ($IncludeDestructive) { Write-Host '  Destructive   : ENABLED (may fill the f
 # ─── Context ────────────────────────────────────────────────────────────────────
 
 $driveList = Expand-ListArgument -Value $Drive -Allowed @('LittleFS','sd','efc') -Name 'Drive'
+
 $ctx = [pscustomobject]@{
     Console            = $console
     Port               = $Port
     Target             = $Target
+    OwnPa              = $ownPa
     Drives             = @($driveList)
     Security           = [bool]$Security
     IncludeDestructive = [bool]$IncludeDestructive
@@ -197,6 +231,7 @@ $ctx = [pscustomobject]@{
 [void](Start-FtmTestRun -Product 'FTC-hardening' -Target $Target -RunProfile $(if ($IncludeDestructive) { 'Full' } else { 'Safe' }) -Environment @{
         'Console port' = $Port
         'FTC target'   = $Target
+        'Own address'  = $(if ($ownPa) { $ownPa } else { 'unknown' })
         'Drives'       = ($driveList -join ', ')
         'Firmware'     = $firmware
         'Security'     = $Security.ToString()

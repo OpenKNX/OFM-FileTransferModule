@@ -82,8 +82,48 @@ function Invoke-FtmSuiteResponse {
             # Every consumer must re-poll until 0x00/0x01. The visible symptom of a missing
             # re-poll is exactly this: a file that exists is reported as 0 bytes or missing.
             $probe = "${prefix}ftm-hard-probe.bin"
-            $mk = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send $probe" -TimeoutMs 40000
+
+            # Nothing in this suite ever CREATED that file, and the old line sent it as the
+            # SOURCE: "ftc <t> send <probe>" shipped a file that does not exist, the target
+            # stayed empty, FileInfo answered 0x42 - correctly, the file really is absent -
+            # and the loop below read that as "the client treated 0x02 as absent". A test
+            # whose setup fails silently does not find a defect, it invents one.
+            #
+            # "send test <dst>" ships a GENERATED pattern instead, so no local source has to
+            # exist (FileTransferClient.cpp: _ftcTestSource = strcmp(src,"test")==0). Then
+            # PROVE it arrived, and only then judge the consumers.
+            $mk = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send test $probe" -TimeoutMs 40000
             Add-FtmEvidence -Output $mk
+            if ($mk -match '(?i)(not found|no such|missing source|unknown command)') {
+                Set-FtmTestSkip "could not stage a probe file on $t - the source is missing on the client device"
+            }
+            # 0xA0 is the access layer doing its job, not a transfer failure: the target is
+            # built with OPENKNX_FTC_SECURITY and refuses WRITES until a session is opened.
+            # Saying "the probe did not reach the target" about that sent the reader looking
+            # for a broken transfer instead of a missing password.
+            if ($mk -match '0xA0' -or $mk -match '(?i)auth required') {
+                Set-FtmTestSkip "$t requires authentication for writes (0xA0) - pass -TargetPassword, or point -Target at a device without OPENKNX_FTC_SECURITY"
+            }
+            if ($mk -match '0xA2') {
+                Set-FtmTestSkip "$t has writes disabled (0xA2) - nothing can be staged there"
+            }
+            # A generated pattern lands under the CLIENT's own name (/ftctest.bin), not under
+            # the one passed in - so asking about $probe afterwards asked about a file that
+            # was never written. The client prints the name it decided on in its config box;
+            # read it there instead of assuming, which also keeps this right per drive.
+            if ($mk -match '(?im)^\s*Target\s+(\S+)') { $probe = $Matches[1] }
+            Add-FtmEvidence -Note "probe staged as $probe"
+            # The send returns the prompt as soon as it is CONFIGURED - the nine chunks then
+            # go out over seconds. Asking one second later got 0x42 for a file that was still
+            # on its way, which is the same "console quiet means finished" mistake this suite
+            # made in two other places. Wait for the client to finish before checking.
+            $done = Wait-FtmClientIdle -Console $con -Target $t -TimeoutMs 90000
+            Add-FtmEvidence -Note "transfer finished before the staging check: $done"
+            $staged = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t info $probe" -TimeoutMs 25000
+            Add-FtmEvidence -Note "staging check: $(($staged -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))"
+            if ($staged -match '0x42') {
+                Set-FtmTestSkip "the probe file did not reach $t (FileInfo answered 0x42) - nothing to judge the poll-again handling with"
+            }
 
             $problems = @()
             foreach ($c in @($consumers | Where-Object { $_.Key -in @('FtcInfo', 'FtcDirInfo', 'FtcApplyCheck') })) {
@@ -91,10 +131,14 @@ function Invoke-FtmSuiteResponse {
                 $out = Invoke-FtmConsoleCommand -Console $con -Command $cmd -TimeoutMs 25000
                 Add-FtmEvidence -Note "$($c.Key): $(($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))"
                 if ($out -match '(?i)size\s*[:=]?\s*0\b') { $problems += "$($c.Key) reported size 0 for an existing file - it stopped at status 0x02" }
-                if ($out -match '(?i)not found') { $problems += "$($c.Key) reported not-found for an existing file - it treated 0x02 as absent" }
+                # "not found" alone cannot tell the two apart: with 0x42 the device says the
+                # file is genuinely absent, with 0x02 it says "CRC still running, ask again".
+                # The device prints the code, so read it rather than infer it - the old match
+                # blamed the client for the server's correct answer.
+                if ($out -match '(?i)not found' -and $out -notmatch '0x42') { $problems += "$($c.Key) reported not-found for an existing file - it treated 0x02 as absent" }
+                if ($out -match '0x42') { $problems += "$($c.Key) got 0x42 for a file that was staged successfully - the staging or the drive routing is wrong, not the poll-again handling" }
             }
             foreach ($p in $problems) { Add-FtmEvidence -Note $p }
-            if ($mk -match '(?i)(not found|no such)') { Set-FtmTestSkip 'could not stage a probe file on the target - the source is missing on the client device' }
             Assert-FtmTrue ($problems.Count -eq 0) ("poll-again handling broken: " + ($problems -join '; '))
         }
 

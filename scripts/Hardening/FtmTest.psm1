@@ -269,6 +269,34 @@ function Close-FtmConsole {
     try { $Console.Dispose() } catch { }
 }
 
+function Wait-FtmClientIdle {
+    <#
+    .SYNOPSIS
+        Waits until the FTC client reports it is no longer busy. Returns $true when idle.
+    .DESCRIPTION
+        The console goes quiet long BEFORE the operation behind it finishes: a lookup to an
+        unreachable address returns the prompt at once and keeps running until its own
+        deadline expires. A case that judges readiness the moment the console falls silent
+        therefore sees "busy" and blames the client for a state it created itself - and the
+        next case inherits it, which is how one wrong wait produced two red lines.
+
+        It POLLS by default and does not cancel. Cancelling first would abort the very
+        operation being waited for - it reported "idle" three seconds into a nine-chunk
+        transfer because it had just killed it - and in F-S-7 it would destroy the point of
+        the case, which is that the client recovers BY ITSELF. Pass -Cancel only to clean up
+        between cases, where ending whatever is running is the intent.
+    #>
+    param($Console, [string]$Target, [int]$TimeoutMs = 45000, [switch]$Cancel)
+    if ($Cancel) { [void](Invoke-FtmConsoleCommand -Console $Console -Command 'ftc cancel' -TimeoutMs 8000 -QuietMs 500) }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $out = Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target df" -TimeoutMs 15000
+        if ($out -notmatch '(?i)(busy|in progress|already running)') { return $true }
+        Start-Sleep -Milliseconds 1500
+    }
+    return $false
+}
+
 function Invoke-FtmConsoleCommand {
     <#
     .SYNOPSIS
@@ -312,10 +340,40 @@ function Invoke-FtmConsoleCommand {
     $raw = $sb.ToString()
     $clean = [regex]::Replace($raw, "\x1b\[[0-9;]*[A-Za-z]", '')
     $clean = $clean -replace "\r", ''
-    # Drop the echoed command line itself, and the timestamp prefix the console adds.
+    # The line editor echoes every KEYSTROKE and redraws its prompt after each one, so the
+    # echo arrives as "f$ ft$ ftc$ ftc $ ..." on a SINGLE line and never equals the command.
+    # Dropping only a line equal to the command therefore removed nothing, and every verdict
+    # was then derived from a text that contained the command itself - which is how "ftc info"
+    # came to look like an answer. Cut at the LAST complete echo of the command instead;
+    # everything before it is keystroke noise by construction.
+    #
+    # FIRST occurrence, not the last: the keystroke chain BUILDS UP to the command, so the
+    # first time the complete string appears is the end of the echo. Cutting at the last
+    # occurrence discarded the answer whenever the command word also appears in it - "help"
+    # lists a command called help, so the alive check saw an empty console and aborted a
+    # perfectly healthy device.
+    # Only for a command long enough to be unambiguous. A one- or two-letter command such
+    # as "i" or "ll" occurs everywhere in a banner, and cutting at its first letter threw
+    # the whole information block away - which is how the device's own address came back
+    # as "unknown". Short commands echo almost nothing, so the line filter below is enough.
+    $cmdText = $Command.Trim()
+    if ($cmdText.Length -ge 3) {
+        $cut = $clean.IndexOf($cmdText)
+        if ($cut -ge 0) { $clean = $clean.Substring($cut + $cmdText.Length) }
+    }
+
+    # Drop the prompt marks and the timestamp prefix the console puts on every line.
+    # The timestamp is NOT at the start of the line: the editor redraws its input buffer
+    # after every output line, so each line arrives as "<echo><timestamp>: <text>" - e.g.
+    # "i2026-08-20 13:52:41: Address: 5.0.10". An anchored ^ therefore matched nothing and
+    # every value stayed hidden behind one echoed character. Cut at wherever the timestamp
+    # is, not where it ought to be.
     $lines = @()
     foreach ($ln in ($clean -split "`n")) {
-        $t = $ln -replace '^\s*\$\s*', '' -replace '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}:\s*', ''
+        $t = $ln
+        $m = [regex]::Match($t, '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}:\s*')
+        if ($m.Success) { $t = $t.Substring($m.Index + $m.Length) }
+        $t = $t -replace '^\s*\$\s*', ''
         if (-not $t.Trim()) { continue }
         if ($t.Trim() -eq $Command.Trim()) { continue }
         $lines += $t
