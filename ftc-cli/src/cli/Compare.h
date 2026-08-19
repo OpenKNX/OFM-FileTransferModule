@@ -633,21 +633,8 @@ class Compare
         handleFrame(side, w, out);
     }
 
-    /**
-     * @brief Header-derived total telegram length (incl. FCS). STD = 8 + LG(octet5 low nibble) · EXT = 9 + LG
-     *        (octet6). Matches knx cemi_frame telegramLengthtTP (std octetCount+8, ext octetCount+9). 0 = need more.
-     */
-    static int expectedLen(const uint8_t* a, int n)
-    {
-        if (n < 1) return 0;
-        if (a[0] & 0x80) // standard frame (CTRL bit7 = 1)
-        {
-            if (n < 6) return 0;
-            return 8 + (a[5] & 0x0F);
-        }
-        if (n < 7) return 0; // extended frame
-        return 9 + a[6];
-    }
+    /** @brief Header-derived total telegram length -- the shared spec helper (see Monitor.h). */
+    static int expectedLen(const uint8_t* a, int n) { return tpExpectedLen(a, n); }
 
     /** @brief Byte count of a space-separated hex string (2 hex digits per byte). */
     static int byteLen(const std::string& hexStr)
@@ -658,15 +645,8 @@ class Compare
         return digits / 2;
     }
 
-    /** @brief TP1 frame-check: last octet == complement of the XOR of all preceding octets. */
-    static bool fcsOk(const uint8_t* a, int len)
-    {
-        if (len < 2) return false;
-        uint8_t x = 0;
-        for (int i = 0; i < len - 1; ++i)
-            x ^= a[i];
-        return (uint8_t)(x ^ 0xFF) == a[len - 1];
-    }
+    /** @brief TP1 frame check -- the shared spec helper (see Monitor.h). */
+    static bool fcsOk(const uint8_t* a, int len) { return tpFcsOk(a, len); }
 
     /** @brief Append the bytes of a space-separated hex string to @p acc. */
     static void appendHexBytes(std::vector<uint8_t>& acc, const std::string& hexStr)

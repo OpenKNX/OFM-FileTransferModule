@@ -10,6 +10,7 @@
  *              Licensed under GNU GPL v3.0
  **/
 #pragma once
+#include "../core/MakeDir.h"
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -36,6 +37,34 @@
 
 namespace ftc
 {
+
+/**
+ * @brief Header-derived total telegram length incl. FCS (03_02_02 §2.2.2/2.2.4).
+ * @details Standard = 8 + LG (low nibble of octet 5) · Extended = 9 + LG (octet 6, max 263). 0 = header not
+ *          complete yet. The announced length is the ONLY legitimate cut: a busmon indication may carry less
+ *          than it announces (a telegram cut short on the bus), and then the last octet is not an FCS.
+ */
+inline int tpExpectedLen(const uint8_t* a, int n)
+{
+    if (n < 1) return 0;
+    if (a[0] & 0x80) // CTRL bit7 = 1 -> standard frame
+    {
+        if (n < 6) return 0;
+        return 8 + (a[5] & 0x0F);
+    }
+    if (n < 7) return 0; // extended frame
+    return 9 + a[6];
+}
+
+/** @brief TP1 frame check (03_02_02 §2.2.4.6): last octet == 0xFF XOR all preceding octets. */
+inline bool tpFcsOk(const uint8_t* a, int len)
+{
+    if (len < 2) return false;
+    uint8_t x = 0;
+    for (int i = 0; i < len - 1; ++i)
+        x ^= a[i];
+    return (uint8_t)(x ^ 0xFF) == a[len - 1];
+}
 
 /**
  * @brief One decoded monitor frame, handed to a sink / capture buffer (compare + XML export use it).
@@ -300,6 +329,10 @@ class Monitor
     // scratch for the current L_Busmon.ind's 0x03 status add-info (parsed in decodeBusmon, copied into _pend)
     bool _abStat = false, _abLost = false, _abFerr = false, _abBerr = false, _abPerr = false;
     uint8_t _abSeq = 0;
+    uint8_t _lastSeq = 0;        // previous indication's sequence number -> a gap means the monitor lost one
+    bool _haveLastSeq = false;
+    uint64_t _seqGaps = 0;       // sequence gaps seen in this capture
+    bool _seqGap = false;        // the indication being decoded broke the chain
 
     /**********************************************************************
      ***************************** LIFECYCLE *****************************
@@ -796,6 +829,18 @@ class Monitor
             i += 2 + len;
         }
 
+        // Sequence counts every received telegram (mod 8), acknowledges included. A gap means the monitor
+        // dropped one, which the Lost bit does not always report -- 03_06_03 §4.1.5.8.1: evaluate both.
+        if (_abStat)
+        {
+            _seqGap = false;
+            if (_haveLastSeq && _abSeq != (uint8_t)((_lastSeq + 1) & 0x07)) { _seqGap = true; _seqGaps++; }
+            _lastSeq = _abSeq;
+            _haveLastSeq = true;
+        }
+        else
+            _haveLastSeq = false; // no status -> the chain cannot be verified across this indication
+
         // Single-octet L2 control acknowledge: 0xCC ACK · 0xC0 BUSY · 0x0C NAK. It follows a telegram, so it
         // resolves the pending telegram's ACK colour rather than printing as its own line.
         if (n == 1)
@@ -819,6 +864,14 @@ class Monitor
 
         // A new telegram arrived while one was pending -> the pending one had no ACK following -> flush green.
         if (_pend.active) flushPending(0); // ackKind 0 = none observed
+
+        // 03_02_02 §2.2.2/2.2.4: the header announces the total length and an indication may carry less (a
+        // telegram cut short on the bus). Then the last octet is no FCS -- read neither checksum nor TPDU.
+
+
+        const int expLen = tpExpectedLen(lpdu, n);
+        const bool torso = expLen > 0 && n < expLen;
+        const bool fcsBad = expLen > 0 && n >= expLen && !tpFcsOk(lpdu, expLen);
 
         // Parse control + addresses. Standard: ctrl bit7=1. Extended: ctrl bit7=0, extra CTRLE octet.
         const bool ext = (lpdu[0] & 0x80) == 0;
@@ -847,10 +900,21 @@ class Monitor
             if (7 + tpduLen > n - 1) tpduLen = 0;
         }
 
+        if (torso) tpduLen = 0; // announced more than was delivered -> the TPDU is incomplete, do not read it
         std::string dec = interpret(src, dst, group, tpdu, tpduLen);
         _pend.active = true;
         _pend.ms = detail::nowMs();
         _pend.tag = ext ? _p.chip("EXT", 'o') : _p.chip("STD", 'c');
+        // A torso is not a frame, a bad FCS is not packaging, a sequence gap means the capture missed one.
+        if (torso)
+        {
+            char t[48];
+            std::snprintf(t, sizeof(t), "TORSO %d/%d", n, expLen);
+            _pend.tag += " " + _p.chip(t, 'r');
+        }
+        else if (fcsBad)
+            _pend.tag += " " + _p.chip("FCS", 'r');
+        if (_seqGap) _pend.tag += " " + _p.chip("SEQ", 'a');
         _pend.dec = dec;
         _pend.raw = hex(lpdu, n);
         _pend.time = timeStr();
@@ -1478,7 +1542,8 @@ class Monitor
         if (base.empty()) return ".";
         fs::path dir = base / "ftc";
         std::error_code ec;
-        fs::create_directories(dir, ec);
+        std::string mkErr;
+        ftc::makeDirs(dir.string(), mkErr);
         return ec ? std::string(".") : dir.string();
     }
 
