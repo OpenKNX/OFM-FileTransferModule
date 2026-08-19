@@ -90,6 +90,14 @@ struct FtcStatus
     uint16_t chunk = 0;            // current chunk (1-based)
     uint16_t chunks = 0;
     uint16_t window = 0;           // fast: current AIMD window size (grows on clean, halves on loss); 0 = safe/n.a.
+    // What the window regulation is DOING, so a frontend can show the search instead of just its result.
+    uint16_t windowFrom = 0;       // window before the last change (0 = never changed) -> "32>40"
+    uint32_t windowSinceMs = 0;    // when it last changed -> a frontend blinks only while the change is fresh
+    uint8_t windowState = 0;       // 0 probing (ceiling unknown) · 1 settled · 2 pinned by the user · 3 backing off
+    uint8_t windowClean = 0;       // clean windows in a row since the last change -> how sure "settled" is
+    uint16_t reportMs = 0;         // last report answer latency; the other half of the window's cost
+    uint8_t lastGapKind = 0;       // last lossy window: 0 none · 1 contiguous tail (receiver full) · 2 scattered
+    uint16_t lastGapCount = 0;     // chunks missing in it -> a frontend can show the event without a text field
     // Monotonic within one operation -- a frontend samples the deltas to mark the throughput curve.
     uint16_t verifies = 0;         // delivery confirmations: safe = per chunk (CRC) · fast = per window (bitmap report)
     uint16_t crcErrors = 0;        // CRC mismatches encountered (a retry is made for each)
@@ -190,6 +198,8 @@ struct FtcTransferSetup
     bool noResume = false;
     bool willApply = false;              // upload: flash + reboot after the transfer
     bool keep = false;
+    uint16_t fixedWindow = 0;            // fast: window pinned by `--window`/`w<N>` (0 = adaptive AIMD)
+    uint16_t targetApdu = 0;             // max APDU the TARGET reported (0 = it did not) -> the framing decision
     uint32_t resumedBytes = 0;           // upload: bytes already on the target that a resume skips (0 = fresh); set once FtcResumeInfo decided
 };
 
@@ -480,6 +490,7 @@ class FileTransferClient : public OpenKNX::Module
     // After the resume decision: open the transfer via the fast path (mode 1) or the classic path
     // (mode 0). A single dispatcher so the classic call sites in FtcResumeInfo stay byte-for-byte.
     void ftcProceedToUpload();
+    void ftcWndSet(uint16_t wnd, uint8_t state); // single writer for _ftcWnd -> keeps the reported state honest
     void ftcAutoDegradePayload();                      // auto-pkg: drop the payload toward FTC_PKG_MIN on a link retry (fresh OR resume)
     void ftcSendFastOpen();                            // cmd44 open (flags: resume?, keepBitmap for recovery; expectedChunks) -> FtcFastOpen
     void ftcFastOpenWindow();                          // freeze the current window's high edge _ftcWndEnd = min(base+wnd, chunks+1)
@@ -543,6 +554,7 @@ class FileTransferClient : public OpenKNX::Module
     char _ftcPath[FTC_PATH_MAX] = {0};
     uint8_t _ftcPayloadSize = 0;       // = pkg - 6, mirrored to the target as its _size
     uint16_t _ftcPayloadBase = 0;      // original payload for this request -> pkg-auto degrade recomputes from this (survives retries)
+    bool _ftcPayloadProven = false;    // the target accepted at least one chunk at the CURRENT payload size -> the link carries it
     uint16_t _ftcSequence = 0;         // 1-based; 0 and 0xFFFF are the open/close markers
     uint16_t _ftcChunks = 0;
     uint32_t _ftcSize = 0;
@@ -556,6 +568,8 @@ class FileTransferClient : public OpenKNX::Module
     uint16_t _ftcWnd = 16; // climbs until the first loss, which locks it at the last clean size
     bool _ftcWndLocked = false;                     // set on the first lossy window -> _ftcWnd never probes up again (stable, no edge oscillation)
     uint16_t _ftcWndClean = 16;                     // last window proven clean (0 loss) -> the lock target when the next x2 probe overruns
+    uint8_t _ftcCleanRun = 0;                       // consecutive clean windows since the last back-off -> earns one step back up
+    uint16_t _ftcLastTxQ = 0;                       // last observed send-queue depth -> a shrinking queue is forward progress
     uint16_t _ftcWndFix = 0;                        // fast: fixed window (0 = adaptive AIMD). >0 pins the ceiling: NO grow (no
                                                     // "feel-its-way-up" that floods at the end); loss still ratchets it down one
                                                     // step and it STAYS there. Set per-request (perf `w<N>`); 0 for uploads.

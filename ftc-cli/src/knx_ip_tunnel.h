@@ -107,6 +107,9 @@ class KnxIpTunnel
      */
     void pacingRate(uint32_t deliveredBps, bool clean);
 
+    /** @brief Current paced send rate (B/s) -- so the UI can say whether WE are the brake, or the link is. */
+    uint32_t paceBps() const;
+
     // --- callback registration (HostBau.ftcSet*Callback forwards here) ---------------------------
     void setConfirmCallback(FtcConCb cb) { _conCb = cb; }
     FtcConCb confirmCallback() const { return _conCb; }

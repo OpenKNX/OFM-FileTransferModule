@@ -371,10 +371,16 @@ double g_vfifoFrameBytes = 245.0; // bytes of the last transmitted frame -> the 
 // via what it actually delivers, sets the rate -- it finds the top, holds just under it, and self-recovers
 // from a kick. Byte-based, since APDU auto-framing makes frame sizes vary. VFIFO_* are control gains.
 double g_vfifoDrainBps = 450.0;          // launch (safe); the delivery-rate loop takes over immediately
-constexpr double VFIFO_RATE_MIN = 120.0; // floor so a burst of losses cannot stall the transfer entirely
-constexpr double VFIFO_PROBE = 1.12;     // clean window -> probe the send rate up this much
+// Floor: lockstep `safe` reaches ~437 B/s here, so pacing a windowed mode below that is strictly worse than
+// the mode it exists to beat. A slow target is protected by the ahead-of-link depth, not by a low rate.
+constexpr double VFIFO_RATE_MIN = 450.0;
+constexpr double VFIFO_PROBE_MAX = 1.5;  // hard ceiling on the probe, relative to the best sample seen
+constexpr double VFIFO_PROBE = 1.12;    // clean window -> push slightly past the best sample seen
 constexpr double VFIFO_MARGIN = 0.95;    // on loss, pace to 95% of the measured wire rate (small headroom)
 constexpr double VFIFO_KICK = 0.8;       // report-timeout kick -> multiplicative back-off (no sample)
+constexpr unsigned VFIFO_BW_WINDOW = 8;  // delivery-rate samples kept for the running-maximum capacity estimate
+double g_bwSample[VFIFO_BW_WINDOW] = {}; // recent delivery-rate samples (B/s)
+unsigned g_bwIx = 0, g_bwCount = 0;      // ring position / how many samples are valid
 
 /**
  * @brief Drain the modeled TP-FIFO by the elapsed time at the current adaptive send rate.
@@ -1102,19 +1108,29 @@ uint16_t KnxIpTunnel::txQueueSize() const
  *          holds just under it, and self-recovers from a kick. Only fast mode drives this; classic is
  *          self-clocked.
  */
+uint32_t KnxIpTunnel::paceBps() const { return (uint32_t)(g_vfifoDrainBps + 0.5); }
+
 void KnxIpTunnel::pacingRate(uint32_t deliveredBps, bool clean)
 {
-    if (!clean && deliveredBps == 0)
-        g_vfifoDrainBps *= VFIFO_KICK; // kick: no delivery sample -> ease off
-    else if (clean)
-        g_vfifoDrainBps *= VFIFO_PROBE; // link kept up -> probe higher (find the ceiling)
+    // Estimate the target's ingest rate rather than hunt for it -- it is near constant. Keep the MAXIMUM of
+    // the recent samples: pacing at the latest one decays (pacing 5% under capacity idles the target 5%, which
+    // the next sample reports as 5% less capacity), while a genuinely slower target ages out within a few reports.
+    if (deliveredBps == 0)
+        g_vfifoDrainBps *= VFIFO_KICK; // no sample at all (report timeout) -> ease off until one arrives
     else
-        g_vfifoDrainBps = (double)deliveredBps * VFIFO_MARGIN; // overshot -> snap to the measured wire ceiling
+    {
+        g_bwSample[g_bwIx] = (double)deliveredBps;
+        g_bwIx = (g_bwIx + 1u) % VFIFO_BW_WINDOW;
+        if (g_bwCount < VFIFO_BW_WINDOW) g_bwCount++;
+        double best = 0.0;
+        for (unsigned i = 0; i < g_bwCount; i++)
+            if (g_bwSample[i] > best) best = g_bwSample[i];
+        // A sample can only report what this pacer allowed, so pacing at or under the best one only turns
+        // down. A clean window pushes slightly past it; one that overran sits back under it.
+        g_vfifoDrainBps = best * (clean ? VFIFO_PROBE : VFIFO_MARGIN);
+        if (g_vfifoDrainBps > best * VFIFO_PROBE_MAX) g_vfifoDrainBps = best * VFIFO_PROBE_MAX; // no runaway
+    }
     if (g_vfifoDrainBps < VFIFO_RATE_MIN) g_vfifoDrainBps = VFIFO_RATE_MIN;
-    // Runaway guard: if the bottleneck is LATENCY not rate (delivered plateaus while clean), the probe would
-    // climb forever harmlessly (the pacer just never binds). Cap it so it stays a sane multiple of what the
-    // link actually delivers -- there is no point pacing far above the measured ceiling.
-    if (deliveredBps > 0 && g_vfifoDrainBps > 2.0 * deliveredBps) g_vfifoDrainBps = 2.0 * deliveredBps;
 }
 
 /**

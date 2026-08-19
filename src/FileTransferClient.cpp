@@ -307,12 +307,20 @@ static constexpr uint32_t FTC_FS_MARGIN = 8192;         // headroom demanded abo
 // AIMD window: grow +8 after a clean window, halve on loss, clamp to [FTC_WND_MIN, FTC_WND_MAX]. The
 // small bounds keep the exposure to a target flash-erase stall short.
 static constexpr uint16_t FTC_WND_INIT = 16; // measured near-optimal, so no slow climb from the minimum
-static constexpr uint16_t FTC_WND_MIN = 4;
+static constexpr uint16_t FTC_WND_MIN = 8; // below this the per-window report round trip starts to show
+static constexpr uint16_t FTC_WND_STEP = 4; // one back-off / recovery step
 static constexpr uint16_t FTC_WND_MAX = 64;
+static constexpr uint8_t FTC_WND_RECOVER = 3; // clean windows in a row that earn one step back up after a back-off
 // TP transmit-FIFO water marks (via ftcTxQueueSize()): the pump sends only below HIGH, and drains below
 // LOW before a report/close so the report reflects what the SERVER received, not still-queued frames.
 // LOW=1 (empty) is deliberate: a higher LOW would fire the report behind a small window's undrained tail.
-static constexpr uint16_t FTC_TX_HIGH = 30;
+// HIGH = how much of a window may sit ahead of the link. A tunnel ACK is not flow control (the interface acks
+// on receipt, forwards to TP after), so handing over a whole window buries its TP queue: 16 chunks arrived as 2.
+#if !defined(ARDUINO_ARCH_RP2040) && !defined(ARDUINO_ARCH_ESP32) && !defined(ARDUINO_ARCH_ESP8266)
+static constexpr uint16_t FTC_TX_HIGH = 6; // host: see above -- the modelled FIFO only paces while it binds
+#else
+static constexpr uint16_t FTC_TX_HIGH = 30; // device: a real TP FIFO, already paced by the wire; unchanged
+#endif
 static constexpr uint16_t FTC_TX_LOW = 1;
 // Per-loop() send cap: a real SD read costs loop time, so cap bursts hard; the RAM pattern is cheap, so
 // a bigger burst is fine. Keeps the FTC pump off the "loop took >50 ms" list.
@@ -1080,6 +1088,7 @@ void FileTransferClient::ftcApplyTargetApdu()
     }
     uint16_t link = _tgtApdu;
     if (iface >= FTC_PKG_MIN && iface < link) link = iface;
+    _xferSetup.targetApdu = _tgtApdu; // set here too: the setup is built before the target has reported
 
     if (_ftcDownload)
     {
@@ -1110,6 +1119,7 @@ void FileTransferClient::ftcApplyTargetApdu()
             _status.chunks = _ftcChunks;
             _xferSetup.chunkSize = _ftcPayloadSize;
             _xferSetup.chunks = _ftcChunks;
+            _xferSetup.fixedWindow = _ftcWndFix;
         }
     }
     openknx.logger.logWithPrefixAndValues("FTC", "target APDU %u B, interface %u B -> pkg %u, %u B/chunk, %u chunks",
@@ -1319,6 +1329,7 @@ void FileTransferClient::ftcPerfCrcDone()
     _ftcPerfKeep = _crcPerfKeep;
     _xferSetup = FtcTransferSetup{};
     _xferSetup.valid = true;
+    _xferSetup.targetApdu = _tgtApdu; // what the target allowed -> the UI can show how the framing was decided
     _xferSetup.kind = FtcXferKind::Perf;
     _xferSetup.target = _crcPerfPa;
     strncpy(_xferSetup.local, "generated test pattern", sizeof(_xferSetup.local) - 1);
@@ -1330,6 +1341,7 @@ void FileTransferClient::ftcPerfCrcDone()
     _xferSetup.chunkSize = _ftcPayloadSize;
     _xferSetup.chunks = _ftcChunks;
     _xferSetup.keep = _crcPerfKeep;
+    _xferSetup.fixedWindow = _ftcWndFix; // pinned by --window/w<N>; 0 = the AIMD window adapts
 }
 
 void FileTransferClient::ftcSendNextChunk()
@@ -1410,6 +1422,22 @@ void FileTransferClient::ftcSendClose()
 // Everything below runs only when FAST was negotiated (ftcGateFast kept _ftcMode 1); the classic path
 // above is untouched. All non-blocking: bursts capped per loop(), FIFO-gated, waits are millis() deadlines.
 
+/** @brief Record a window change so a frontend can show the regulation, not just its outcome.
+ *  @param state 0 probing (ceiling still unknown) - 1 settled - 2 pinned by the user - 3 backing off.
+ *  Called for every write to _ftcWnd, so the reported state can never drift from the value it describes. */
+void FileTransferClient::ftcWndSet(uint16_t wnd, uint8_t state)
+{
+    if (wnd != _ftcWnd)
+    {
+        _status.windowFrom = _ftcWnd;
+        _status.windowSinceMs = millis();
+        _ftcWnd = wnd;
+    }
+    _status.window = _ftcWnd;
+    _status.windowState = state;
+    _status.windowClean = _ftcCleanRun;
+}
+
 /** @brief auto-pkg degrade: step the payload down from the requested base toward FTC_PKG_MIN on a link
  *  retry, so a link that only passes tiny frames (a foreign tunnel capping around 16-55 B) still gets there.
  *  Sets _ftcPayloadSize/_ftcChunks and falls back to classic if the smaller frame overflows the fast window.
@@ -1419,6 +1447,9 @@ void FileTransferClient::ftcSendClose()
 void FileTransferClient::ftcAutoDegradePayload()
 {
     if (!_ftcPkgAuto || _ftcTransferRetries == 0) return;
+    // A retry says nothing about the frame SIZE. Degrading is for a link that carries nothing at all; once a
+    // chunk was accepted at this size the link has proven it, and shrinking only wastes payload per frame.
+    if (_ftcPayloadProven) return;
     // Degrade linearly from the requested base down to FTC_PKG_MIN, reaching the floor on the LAST retry.
     // The step spans base..MIN across the whole retry budget, so the floor is reached regardless of how many
     // retries are configured.
@@ -1445,6 +1476,7 @@ void FileTransferClient::ftcAutoDegradePayload()
         _ftcPayloadSize = (uint8_t)want;
         _ftcChunks = (uint16_t)nch;
         _status.chunks = _ftcChunks;
+        _ftcPayloadProven = false; // a new size is unproven again, whatever the previous one managed
         openknx.logger.logWithPrefixAndValues("FTC", "auto pkg -> %u B/chunk (link retries, robuster frame)", (unsigned)_ftcPayloadSize);
     }
 }
@@ -1489,6 +1521,11 @@ void FileTransferClient::ftcProceedToUpload()
                          : FTC_WND_INIT;            // AUTO: x2 ramp start
     _ftcWndLocked = false;                          // Discover&Lock: fresh transfer starts unlocked
     _ftcWndClean = FTC_WND_INIT;                    // no window proven clean yet -> first-loss fallback (halve if it overruns immediately)
+    _status.windowFrom = 0;
+    _status.windowSinceMs = 0;
+    _status.windowClean = 0;
+    _status.reportMs = 0;
+    _status.windowState = _ftcWndFix ? 2 : 0; // pinned -> no search at all
     _ftcPrevMissing = 0xFFFF;
     _ftcNoProgress = 0;
     _ftcReportRetries = 0;
@@ -3437,6 +3474,7 @@ void FileTransferClient::ftcResetTransferJob(unsigned pkg, uint8_t mode)
     // (same wire frame size). A fast request later downgraded to classic just runs 2 payload bytes short.
     _ftcPayloadSize = (uint8_t)(pkg - FTC_PKG_OVERHEAD - (mode != 0 ? 2 : 0));
     _ftcPayloadBase = _ftcPayloadSize; // pkg-auto degrade baseline for this request
+    _ftcPayloadProven = false;         // nothing accepted at this size yet
     _activeSrc = nullptr;
 }
 
@@ -3610,6 +3648,7 @@ void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pk
     // Transfer info-API (setup) -- structured mirror of the config box for the CLI Panel / WebConfig.
     _xferSetup = FtcTransferSetup{};
     _xferSetup.valid = true;
+    _xferSetup.targetApdu = _tgtApdu; // what the target allowed -> the UI can show how the framing was decided
     _xferSetup.kind = FtcXferKind::Upload;
     _xferSetup.target = pa;
     strncpy(_xferSetup.local, _ftcTestSource ? "generated test pattern" : src, sizeof(_xferSetup.local) - 1);
@@ -3845,6 +3884,7 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     ftcConfigBox(pa, "Download", _ftcPath, _dlLocal, 0, false, 0, nullptr, nullptr, nullptr);
     _xferSetup = FtcTransferSetup{};
     _xferSetup.valid = true;
+    _xferSetup.targetApdu = _tgtApdu; // what the target allowed -> the UI can show how the framing was decided
     _xferSetup.kind = FtcXferKind::Download;
     _xferSetup.target = pa;
     strncpy(_xferSetup.remote, _ftcPath, sizeof(_xferSetup.remote) - 1);
@@ -5445,9 +5485,18 @@ void FileTransferClient::loopFast()
         {
             // The pump. Burst-capped per loop() and gated on the TP FIFO high-water (yield when near full,
             // never block). Streams [_ftcNextSeq, _ftcWndEnd); DATA frames are SILENT (no response armed).
+            // A draining send queue is progress, not a wedge -- no sequence folds until it has room again.
+            {
+                const uint16_t q = ftcTxQueueSize();
+                if (q != _ftcLastTxQ)
+                {
+                    if (q < _ftcLastTxQ) _ftcDeadline = millis() + FTC_FAST_STALL_MS;
+                    _ftcLastTxQ = q;
+                }
+            }
             if (millis() > _ftcDeadline)
             {
-                ftcAbort("fast: overall deadline exceeded");
+                ftcAbort("fast: stall timeout (30s)");
                 return;
             }
             const uint8_t cap = _ftcTestSource ? FTC_FAST_BURST_RAM : FTC_FAST_BURST_SD;
@@ -5493,6 +5542,7 @@ void FileTransferClient::loopFast()
                 const uint16_t dbgRetr = _ftcReportRetries;                                    // [dbg] timeouts before this answer (0 = answered on the first query)
                 const uint32_t dbgWait = _ftcRepWaitStart ? (millis() - _ftcRepWaitStart) : 0; // [dbg] first-query -> answer latency for this window/round
                 _ftcReportRetries = 0;
+                _status.reportMs = (uint16_t)(dbgWait > 65535u ? 65535u : dbgWait);
                 const uint16_t bmpBytes = (uint16_t)((count + 7) / 8);
                 if ((uint16_t)(6 + bmpBytes) > _ftcRespLen) return; // truncated bitmap
                 // Merge the received bits into the absolute client mirror (bounds-checked).
@@ -5509,10 +5559,39 @@ void FileTransferClient::loopFast()
                 uint16_t missing = 0;
                 for (uint16_t s = _ftcReportBase; s < _ftcWndEnd; s++)
                     if (!(_ftcRecvBmp[(s - 1) >> 3] & (1u << ((s - 1) & 7)))) missing++;
+                if (missing < (uint16_t)(_ftcWndEnd - _ftcReportBase))
+                    _ftcPayloadProven = true; // the target stored a chunk at this size -> the link carries it
 
                 // [dbg] per-window report-gap breakdown: how long the target took to answer + how many 4 s
                 // report timeouts elapsed first. A ~13 s gap = dbgWait ~13000 with dbgRetr ~3 (query kept
                 // timing out) vs dbgRetr 0 (one slow answer). Verbose only -> off the quiet default fast path.
+                if (missing)
+                {
+                    // WHERE the gaps sit is the diagnosis: a contiguous run to the window edge is a full
+                    // receiver, scattered gaps are line interference. Opposite causes, opposite fixes.
+                    uint16_t first = 0, last = 0, holes = 0, runs = 0;
+                    bool prevMissing = false;
+                    for (uint16_t sq = _ftcReportBase; sq < _ftcWndEnd; sq++)
+                    {
+                        const bool miss = !(_ftcRecvBmp[(sq - 1) >> 3] & (1u << ((sq - 1) & 7)));
+                        if (miss)
+                        {
+                            if (!first) first = sq;
+                            last = sq;
+                            holes++;
+                            if (!prevMissing) runs++;
+                        }
+                        prevMissing = miss;
+                    }
+                    const bool tail = (runs == 1) && (last + 1 == _ftcWndEnd);
+                    _status.lastGapKind = tail ? 1 : 2; // published for the UI: the pattern IS the diagnosis
+                    _status.lastGapCount = holes;
+                    if (_ftcVerbosity >= 2)
+                    openknx.logger.logWithPrefixAndValues("FTC", "[dbg] window [%u..%u): %u lost, %u-%u -- %s",
+                                                          (unsigned)_ftcReportBase, (unsigned)_ftcWndEnd,
+                                                          (unsigned)holes, (unsigned)first, (unsigned)last,
+                                                          tail ? "contiguous tail (receiver full)" : "scattered (line disturbance)");
+                }
                 if (_ftcVerbosity >= 2)
                     openknx.logger.logWithPrefixAndValues("FTC", "[dbg] report ans %ums  retr %u/%u  missing %u  wnd %u [%u..%u)",
                                                           (unsigned)dbgWait, (unsigned)dbgRetr, (unsigned)FTC_REPORT_RETRIES,
@@ -5532,17 +5611,24 @@ void FileTransferClient::loopFast()
                     uint32_t bps = 0;
                     if ((uint16_t)(6 + bmpBytes + 2) <= _ftcRespLen)
                         bps = (uint32_t)((_ftcResp[6 + bmpBytes] << 8) | _ftcResp[6 + bmpBytes + 1]);
+                    const bool fromTarget = (bps > 0);
+                    // Measure the WHOLE cycle: timing the send phase alone measures how fast we filled our own
+                    // queue, not how fast the link drained it. The cycle is a lower bound; the pacer's max lifts it.
                     if (bps == 0 && dtRep > 0)
                     {
                         const uint16_t win = (uint16_t)(_ftcWndEnd - _ftcReportBase);
                         const uint32_t deliveredB = (uint32_t)(win - missing) * _ftcPayloadSize;
                         bps = (uint32_t)(((uint64_t)deliveredB * 1000ULL) / dtRep);
                     }
+                    if (_ftcVerbosity >= 2)
+                        openknx.logger.logWithPrefixAndValues("FTC", "[dbg] rate %u B/s from %s  dt %ums",
+                                                              (unsigned)bps, fromTarget ? "target" : "self", (unsigned)dtRep);
                     if (bps > 0) knx.bau().ftcPacingRate(bps, missing == 0); // no-op on embedded (real TP FIFO paces)
                 }
 
                 if (missing == 0)
                 {
+                    _ftcCleanRun++; // a clean window is a clean window, locked or still probing
                     // Whole window/page received -> advance. AIMD additive-increase (windowed only).
                     _status.verifies++; // window confirmed via the report bitmap (fast: one per window)
                     _ftcReportBase = _ftcWndEnd;
@@ -5552,8 +5638,27 @@ void FileTransferClient::loopFast()
                     _ftcNoProgress = 0;
                     if (!_ftcWndFix && !_ftcWndLocked) // Discover: probe higher only until the first loss locks us (fixed window never probes)
                     {
-                        _ftcWndClean = _ftcWnd;                                                           // this window was clean -> the revert target if the next probe overruns
-                        _ftcWnd = (uint16_t)((_ftcWnd + 8u <= FTC_WND_MAX) ? _ftcWnd + 8u : FTC_WND_MAX); // gentle +8 climb: approaches the edge without an x2 overshoot into the overrun
+                        _ftcWndClean = _ftcWnd; // this window was clean -> the revert target if the next probe overruns
+                        // Stop at the measured optimum: at FTC_WND_INIT the report is ~1% of the cycle. Beyond
+                        // it the target falls behind and the report queues up (86 ms at 16 -> 4.0 s at 40).
+                        const uint16_t up = (uint16_t)((_ftcWnd + 8u <= FTC_WND_INIT) ? _ftcWnd + 8u : FTC_WND_INIT);
+                        ftcWndSet(up, up == _ftcWnd ? 1 : 0); // at the cap and clean -> the search is over
+                    }
+                    else if (!_ftcWndFix && _ftcWndLocked)
+                    {
+                        // A run of clean windows outlives the back-off's cause -> earn one step back.
+                        _ftcWndClean = _ftcWnd;
+                        // Recover to the measured optimum: the losses are sporadic, not size-driven, so capping
+                        // below a size that once overran would pin the transfer at the floor for good.
+                        const uint16_t ceil = FTC_WND_INIT;
+                        if (_ftcCleanRun >= FTC_WND_RECOVER && _ftcWnd < ceil)
+                        {
+                            const uint16_t up = (uint16_t)(_ftcWnd + FTC_WND_STEP > ceil ? ceil : _ftcWnd + FTC_WND_STEP);
+                            ftcWndSet(up > FTC_WND_MAX ? FTC_WND_MAX : up, 0); // earned a step back -> searching again
+                            _ftcCleanRun = 0;
+                        }
+                        else
+                            ftcWndSet(_ftcWnd, 1); // holding at the found ceiling
                     }
                     if (_ftcReportBase > _ftcChunks)
                     {
@@ -5585,20 +5690,31 @@ void FileTransferClient::loopFast()
                 }
                 if (millis() > _ftcDeadline)
                 {
-                    ftcAbort("fast: overall deadline exceeded");
+                    ftcAbort("fast: stall timeout (30s)");
                     return;
                 }
-                // Lock (adaptive) or ratchet (fixed / already-locked) -- sizes the NEXT window, not this one.
-                if (!_ftcWndFix && !_ftcWndLocked)
+                // Sizes the NEXT window. Only an OVERRUN resizes -- a sporadic loss says nothing about the
+                // size, and resizing on it ratchets the window to the floor with no way back.
+                const uint16_t wndSpan = (uint16_t)(_ftcWndEnd - _ftcReportBase);
+                const uint16_t overrunAt = (uint16_t)(wndSpan / 4 >= 2 ? wndSpan / 4 : 2); // >=25% of the window, at least 2
+                const bool overrun = missing >= overrunAt;
+                _ftcCleanRun = 0; // any loss restarts the run that earns a step back up
+                if (_ftcWndFix)
                 {
-                    // First loss -> LOCK: drop to the last proven-clean window and never probe up again. If no
-                    // clean window is below us yet (the very first window overran), halve instead of locking at it.
-                    _ftcWnd = (_ftcWndClean < _ftcWnd) ? _ftcWndClean
-                                                       : (uint16_t)(_ftcWnd / 2 >= FTC_WND_MIN ? _ftcWnd / 2 : FTC_WND_MIN);
+                    // A window the user pinned stays pinned -- that is the whole point of asking for one.
+                }
+                else if (overrun)
+                {
+                    // First overrun -> drop to the last proven-clean window. If none is below us yet (the very
+                    // first window overran), halve instead.
+                    // One step down, not half: halving reaches the floor after a few unrelated overruns.
+                    if (!_ftcWndLocked && _ftcWndClean < _ftcWnd)
+                        ftcWndSet(_ftcWndClean, 3);
+                    else
+                        ftcWndSet((uint16_t)(_ftcWnd > FTC_WND_MIN + FTC_WND_STEP ? _ftcWnd - FTC_WND_STEP : FTC_WND_MIN), 3);
                     _ftcWndLocked = true;
                 }
-                else // fixed window, or already locked + a fresh (congestion) loss -> back off a step, stay put
-                    _ftcWnd = (uint16_t)((_ftcWnd / 2 >= FTC_WND_MIN) ? _ftcWnd / 2 : FTC_WND_MIN);
+                // else: sporadic loss -> resend the gaps at the SAME window size.
                 // (the send-rate snap-to-measured already fired via ftcPacingRate above for this lossy report)
                 _status.resends++; // window had gaps -> retransmit marker on the curve
                 _ftcResendCur = _ftcReportBase;
@@ -5632,7 +5748,7 @@ void FileTransferClient::loopFast()
             // edge, all gaps are queued -> drain, then re-report the SAME window (fresh nonce).
             if (millis() > _ftcDeadline) // backstop: a wedged FIFO here would otherwise never re-report
             {
-                ftcAbort("fast: overall deadline exceeded");
+                ftcAbort("fast: stall timeout (30s)");
                 return;
             }
             const uint8_t cap = _ftcTestSource ? FTC_FAST_BURST_RAM : FTC_FAST_BURST_SD;
@@ -6764,6 +6880,7 @@ void FileTransferClient::loop(bool configured)
                 _status.verifies++; // chunk CRC confirmed by the target (safe: one verify per chunk)
 
                 _ftcDone += _ftcTx[2];         // payload length of the frame just acknowledged
+                _ftcPayloadProven = true;      // acknowledged at this size -> the link carries it
                 _ftcLastProgressMs = millis(); // forward progress -> retry dead-window base (parity with the fast path)
                 _status.done = _ftcDone;
                 _status.chunk = _ftcSequence;
