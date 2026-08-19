@@ -61,6 +61,7 @@ typedef int sock_t;
 #include "cli/ConsoleUi.h"
 #include "cli/I18n.h"
 #include "cli/KnxOta.h"
+#include "cli/OtaSession.h"
 #include "cli/Prompt.h"
 #include "core/Access.h"
 #include "core/FastScan.h"
@@ -1628,6 +1629,23 @@ static std::string openSessionLog(const std::string& pa, const std::string& expl
  * @brief Path to the persistent console command history (<config-dir>/history, shared across sessions).
  * @details Ensures the directory exists so the first-ever session can append; empty on failure (history off).
  */
+/** @brief Where the unfinished-knxOTA record lives (<config-dir>/knxota_last). */
+static std::string otaSessionPath()
+{
+    const std::string cfg = g_cfg.path();
+    const size_t sl = cfg.find_last_of("/\\");
+    if (sl == std::string::npos) return std::string("knxota_last");
+    const std::string dir = cfg.substr(0, sl);
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string mkErr;
+    ftc::makeDirs(dir, mkErr); // best-effort: no record is not worth failing an update over
+    return dir + sep + "knxota_last";
+}
+
 static std::string consoleHistoryPath()
 {
     const std::string cfg = g_cfg.path(); // .../ftc/config.toml
@@ -2352,6 +2370,42 @@ static std::vector<std::string> buildTransferDash(const FtcStatus& st, bool up, 
     if (g_verbose)
         for (const std::string& r : regulationBlock(st, openknxFileTransferClient.transferSetup(), avgBps)) L.push_back(r);
     return L;
+}
+
+/**
+ * @brief Is a second attempt worth offering, given how the transfer ended?
+ * @details Only for causes a retry can clear (transient: dropped tunnel, target quiet, stall); a full
+ *          target or a cancel is final. @p why receives the plain reason to show next to the question.
+ */
+static bool knxotaRetryable(const char* reason, std::string& why)
+{
+    ftc::I18n& L = g_i18n;
+    if (reason == nullptr || !*reason) return false;
+    struct Rule { const char* needle; bool retry; const char* en; const char* de; };
+    static const Rule RULES[] = {
+        {"full",        false, "the target has no room left",        "auf dem Ziel ist kein Platz mehr"},
+        {"space",       false, "the target has no room left",        "auf dem Ziel ist kein Platz mehr"},
+        {"cancel",      false, "you cancelled it",                   "du hast abgebrochen"},
+        {"refused",     false, "the target refused the transfer",    "das Ziel hat die Übertragung abgelehnt"},
+        {"source",      false, "the firmware file could not be read","die Firmware-Datei ist nicht lesbar"},
+        {"cannot read", false, "the firmware file could not be read","die Firmware-Datei ist nicht lesbar"},
+        {"too many",    false, "the file needs more chunks than the protocol allows",
+                               "die Datei braucht mehr Chunks, als das Protokoll erlaubt"},
+        {"no progress", false, "the same chunks kept failing",       "dieselben Chunks scheiterten immer wieder"},
+        {"stall",       true,  "the transfer stalled",               "die Übertragung blieb stehen"},
+        {"unanswered",  true,  "the target stopped answering",       "das Ziel antwortete nicht mehr"},
+        {"no answer",   true,  "the target did not answer",          "das Ziel hat nicht geantwortet"},
+        {"timeout",     true,  "it timed out",                       "es lief in eine Zeitüberschreitung"},
+    };
+    for (const Rule& r : RULES)
+        if (std::strstr(reason, r.needle) != nullptr)
+        {
+            why = L.tr(r.en, r.de);
+            return r.retry;
+        }
+    // Unknown cause: a transfer resumes where it stopped, so one more attempt costs little and may well work.
+    why = reason;
+    return true;
 }
 
 /**
@@ -4366,6 +4420,8 @@ int main(int argc, char** argv)
     bool knxotaScan = false;       // the assistant will search the bus for a target once connected
     bool knxotaScanAsk = false;    // ...and lets the user name the line first (c instead of s)
     std::string knxotaLine;        // the line last searched: searching again must not fall back to another one
+    bool knxotaResume = false;     // continuing an unfinished run: every answer is already known
+    uint16_t knxotaResumePa = 0;   // ...including the target, so the device search is skipped too
     std::string installDirArg;    // --dir <path>: explicit install/uninstall directory (overrides the default)
     std::vector<std::string> pos; // positional tokens -> the `ftc ...` command tail
 
@@ -4758,6 +4814,42 @@ int main(int argc, char** argv)
             socketCleanup();
             return 0;
         }
+        // An unfinished run for THIS firmware: everything it asked is already answered, so offer to carry on.
+        // Everything that would be reused is shown -- resuming blind would be worse than asking again.
+        {
+            const ftc::OtaSession prev = ftc::otaSessionLoad(otaSessionPath());
+            const uint32_t crc = ftc::otaCrc32(knxotaFw.payload.data(), knxotaFw.payload.size());
+            if (prev.valid && prev.crc == crc && g_term.isTty() && !quiet && !knxotaForce)
+            {
+                char pa[16];
+                std::snprintf(pa, sizeof(pa), "%u.%u.%u", (prev.pa >> 12) & 0x0F, (prev.pa >> 8) & 0x0F, prev.pa & 0xFF);
+                g_tpl.panelTop(L.tr("Unfinished run", "Angefangener Lauf"), pa);
+                g_tpl.kv(L.tr("Firmware", "Firmware"), c.txt(prev.file) +
+                         (prev.version.empty() ? std::string() : c.dim("  ·  " + prev.version)) +
+                         (prev.hardware.empty() ? std::string() : c.dim("  ·  " + prev.hardware)));
+                g_tpl.kv(L.tr("Interface", "Interface"), c.txt(prev.ip + ":" + std::to_string((unsigned)prev.port)));
+                g_tpl.kv(L.tr("Target", "Ziel"), c.txt(pa));
+                if (prev.total)
+                {
+                    char pr[80];
+                    std::snprintf(pr, sizeof(pr), "%.1f %% (%u / %u B)", prev.done * 100.0 / prev.total,
+                                  (unsigned)prev.done, (unsigned)prev.total);
+                    g_tpl.kv(L.tr("Got to", "Gekommen bis"), c.txt(pr));
+                }
+                g_tpl.panelEnd();
+                g_tpl.note(L.tr("the same firmware -- the transfer continues where it stopped",
+                                "dieselbe Firmware -- die Übertragung setzt dort an, wo sie aufhörte"));
+                if (ftc::confirm(g_term, c, L, L.tr("Continue this run?", "Diesen Lauf fortsetzen?"), true))
+                {
+                    if (ip.empty()) ip = prev.ip;
+                    port = prev.port;
+                    knxotaResumePa = prev.pa;
+                    knxotaResume = true;
+                    knxotaScan = false; // the target is known; nothing left to search for
+                }
+            }
+        }
+
         // --- the assistant: find the interface, then the device. Nothing here sends the user away. ---
         if (ip.empty())
         {
@@ -5602,6 +5694,13 @@ int main(int argc, char** argv)
         ftc::I18n& L = g_i18n;
         ftc::Theme& c = g_theme;
         std::string paText = (knxotaVerb > 0) ? pos[0] : std::string();
+        if (knxotaResume && paText.empty())
+        {
+            char b[16];
+            std::snprintf(b, sizeof(b), "%u.%u.%u", (knxotaResumePa >> 12) & 0x0F, (knxotaResumePa >> 8) & 0x0F,
+                          knxotaResumePa & 0xFF);
+            paText = b;
+        }
 
         // The assistant offered to search: do it now that the tunnel is up. The scan runs on the line the
         // interface itself sits on and asks only OpenKNX devices, so the list stays short and relevant.
@@ -5916,7 +6015,7 @@ int main(int argc, char** argv)
             socketCleanup();
             return 1;
         }
-        if (verdict == ftc::Verdict::AlreadyInstalled && !knxotaForce)
+        if (verdict == ftc::Verdict::AlreadyInstalled && !knxotaForce && !knxotaResume)
         {
             g_tpl.status(ftc::Tpl::Stat::Ok,
                          L.tr("this version is already installed", "diese Version läuft bereits"),
@@ -6051,11 +6150,50 @@ int main(int argc, char** argv)
         // 3x the estimate plus five minutes: enough for resends and a busy bus, still bounded.
         g_xferCapMs = (uint64_t)(knxotaFw.payload.size() / 350) * 3000ull + 300000ull;
         g_tpl.section(L.tr("Transfer", "Übertragung"));
-        openknxFileTransferClient.requestUpload(targetPa, staged.path().c_str(), 0, false, 1,
-                                                canSelfApply, remoteName.c_str(), 0);
-        g_ftcSuppress = true;
-        const int xrc = runTransferPresenter();
-        g_ftcSuppress = false;
+        ftc::OtaSession sess;
+        sess.crc = ftc::otaCrc32(knxotaFw.payload.data(), knxotaFw.payload.size());
+        sess.bytes = (uint32_t)knxotaFw.payload.size();
+        sess.file = pos[knxotaVerb + 1];
+        sess.version = ftc::fwVersionText(knxotaFw.id);
+        sess.hardware = knxotaFw.hardware;
+        sess.ip = ip;
+        sess.port = port;
+        sess.pa = targetPa;
+        sess.total = (uint32_t)knxotaFw.payload.size();
+        sess.when = (uint64_t)std::time(nullptr);
+        ftc::otaSessionSave(otaSessionPath(), sess);
+
+        // A broken-off transfer resumes where it stopped, so the retry belongs HERE -- restarting the whole
+        // assistant to re-answer questions nobody's answers changed is the thing worth avoiding.
+        int xrc = 0;
+        for (;;)
+        {
+            g_ftcSuppress = true; // arm BEFORE the request: requestUpload narrates its framing decision at once
+            openknxFileTransferClient.requestUpload(targetPa, staged.path().c_str(), 0, false, 1,
+                                                    canSelfApply, remoteName.c_str(), 0);
+            xrc = runTransferPresenter();
+            g_ftcSuppress = false;
+            if (xrc == 0) break;
+
+            sess.done = openknxFileTransferClient.status().done;
+            sess.when = (uint64_t)std::time(nullptr);
+            ftc::otaSessionSave(otaSessionPath(), sess); // keep the record, now with how far it got
+
+            std::string why;
+            const bool again = knxotaRetryable(openknxFileTransferClient.status().message, why);
+            if (!again || !g_term.isTty() || quiet || g_abort) break;
+            char got[80];
+            std::snprintf(got, sizeof(got), "%s %.1f %% (%u / %u B)", L.tr("got to", "gekommen bis"),
+                          sess.total ? sess.done * 100.0 / sess.total : 0.0, (unsigned)sess.done,
+                          (unsigned)sess.total);
+            g_tpl.status(ftc::Tpl::Stat::Warn, why, {got});
+            g_tpl.note(L.tr("a retry continues where it stopped -- the bytes already on the target stay",
+                            "ein neuer Versuch setzt dort an -- die schon übertragenen Bytes bleiben"));
+            if (!ftc::confirm(g_term, c, L, L.tr("Try again?", "Erneut versuchen?"), true)) break;
+            g_tpl.section(L.tr("Transfer", "Übertragung"));
+        }
+
+        if (xrc == 0 && !canSelfApply) ftc::otaSessionClear(otaSessionPath()); // nothing left for us to do
 
         // The transfer being verified is not the same as the update having happened. The device now
         // reboots into the new firmware, and only reading its version back proves that it did.
@@ -6100,6 +6238,7 @@ int main(int argc, char** argv)
             const ftc::DevVersion nv = ftc::devVersionFrom(after.hardware, after.haveHw, after.version, after.haveVersion);
             if (back && nv.valid && ftc::devVersionText(nv) == ftc::fwVersionText(knxotaFw.id))
             {
+                ftc::otaSessionClear(otaSessionPath()); // proven done -> never offer to continue it again
                 g_tpl.status(ftc::Tpl::Stat::Ok,
                              std::string(L.tr("done — ", "fertig — ")) + paText +
                                  L.tr(" is now running ", " läuft jetzt mit ") + ftc::devVersionText(nv),
