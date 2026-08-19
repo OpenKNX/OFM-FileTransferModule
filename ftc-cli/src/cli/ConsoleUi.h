@@ -78,6 +78,7 @@ class ConsoleUi
      * @details Must be set BEFORE begin() — the reserved-row count (and thus the scroll region) depends on it.
      */
     void setVerbose(bool v) { _verbose = v; }
+    bool verbose() const { return _verbose; }
 
     /**
      * @brief Feed the verbose l3 figures: the console drain cap (B/answer) and the detected interface max APDU.

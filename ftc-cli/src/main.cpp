@@ -890,6 +890,8 @@ static uint32_t g_conTrunc = 0;
 // Stage 2: while a <pa> command is rendered from the client's STRUCTURED getters, its raw text lines are
 // suppressed here (still tee'd to the session log). The structured renderer owns the output.
 static bool g_ftcSuppress = false;
+static bool g_quiet = false;   // -q: a transfer then reports itself as key<TAB>value facts, nothing else
+static bool g_verbose = false; // -V: the live line then also shows what the window regulation decided on
 
 /**
  * @brief Emit one line — into the console TUI scroll region if one is active, else straight to stdout.
@@ -1021,6 +1023,14 @@ static bool ftcLineHook(const std::string& in, uint8_t color)
         std::fputc('\n', g_logFp);
     }
     if (in.find("[...output truncated...]") != std::string::npos) g_conTrunc++; // device console-ring overflow
+    // -q during a TRANSFER: the facts block is the whole report. Narrowed to a running transfer -- `info -q`
+    // emits the key/value protocol the parallel scan parses, and that must keep flowing.
+    if (g_quiet && openknxFileTransferClient.transferSetup().valid) return true;
+    // Detail lines are written for the log. On screen they belong to -V only -- and there without the marker,
+    // which is a filter tag, not something a reader needs to see.
+    // Detail lines go to the log only: the live block repaints by counting its rows, so one stray line
+    // between repaints shifts the region and it stacks. Their content is in the control block anyway.
+    if (in.find("[dbg]") != std::string::npos) return true;
     if (g_ftcSuppress) return true; // a structured renderer owns this command's output -> swallow the raw line
     if (!g_term.useColor())
     {
@@ -1630,7 +1640,8 @@ static std::string consoleHistoryPath()
     const char sep = '/';
 #endif
     std::error_code ec; // no shell -> a config dir with a quote/metachar can't inject
-    std::filesystem::create_directories(dir, ec);
+    std::string mkErr;
+    ftc::makeDirs(dir, mkErr); // best-effort: no history is not worth failing the session over
     return dir + sep + "history";
 }
 
@@ -1828,7 +1839,19 @@ static void renderXferSetup(const FtcTransferSetup& s)
         const char* sem = s.mode == 1 ? L.tr("windowed · CRC per window (report)", "windowed · CRC pro Fenster (Report)")
                                       : L.tr("CRC per chunk · reliable", "CRC pro Chunk · zuverlässig");
         const char mc = s.mode == 1 ? 'c' : 'g';
-        p.kv(L.tr("Mode", "Modus"), t.chip(xferModeName(s.mode), mc) + "  " + c.dim(sem));
+        std::string modeRow = t.chip(xferModeName(s.mode), mc) + "  " + c.dim(sem);
+        if (s.mode == 1)
+        {
+            // Say which window is in force -- otherwise pinned and adaptive look the same.
+            char wb[48];
+            if (s.fixedWindow)
+                std::snprintf(wb, sizeof(wb), L.tr("  ·  window %u (pinned)", "  ·  Fenster %u (fest)"),
+                              (unsigned)s.fixedWindow);
+            else
+                std::snprintf(wb, sizeof(wb), "%s", L.tr("  ·  window adapts", "  ·  Fenster regelt sich"));
+            modeRow += c.dim(wb);
+        }
+        p.kv(L.tr("Mode", "Modus"), modeRow);
     }
     if (s.chunkSize && s.chunks) // download learns size/chunks only after the open answer -> skip until known
     {
@@ -2113,6 +2136,152 @@ static std::vector<std::string> scopeRows(const std::vector<double>& hist, const
     return out;
 }
 
+static constexpr uint32_t WIN_FRESH_MS = 4000; // how long a window change stays "fresh" (shown as from>to, blinking)
+static constexpr uint32_t WIN_BLINK_MS = 450;  // blink half-period of a fresh change
+
+/**
+ * @brief The window field: what the regulation is doing, not just the number it arrived at.
+ * @details Colour carries the state (amber = still searching, red = backing off after an overrun, green =
+ *          settled, blue = pinned by the user, which is the ABSENCE of regulation). "32>40" and the blink
+ *          show only while a change is fresh -- a permanently blinking field stops being read. Verbose adds
+ *          the two numbers the window trades against each other: clean windows and the report round trip.
+ */
+static std::string winField(const FtcStatus& st, bool verbose)
+{
+    const ftc::Theme& c = g_theme;
+    ftc::I18n& L = g_i18n;
+    const uint32_t age = st.windowSinceMs ? (uint32_t)(nowMs() - st.windowSinceMs) : 0xFFFFFFFFu;
+    const bool fresh = st.windowSinceMs && age < WIN_FRESH_MS;
+    // Blink by redraw phase, not SGR 5 -- half the terminals ignore or reinterpret that attribute.
+    const bool on = !fresh || ((nowMs() / WIN_BLINK_MS) & 1u) == 0u;
+
+    std::string val = std::to_string(st.window);
+    if (fresh && st.windowFrom) val = std::to_string(st.windowFrom) + g_term.glyph("\u203a", ">") + val;
+
+    std::string body = std::string(g_term.glyph("\u27e6", "[")) + val + g_term.glyph("\u27e7", "]");
+    std::string painted;
+    switch (st.windowState)
+    {
+        case 2: painted = c.blue(body); break;
+        case 3: painted = c.red(body); break;
+        case 1: painted = c.green(body); break;
+        default: painted = c.amber(body); break;
+    }
+    if (!on) painted = c.mut(body); // the off half of the blink -- same width, so the line never jitters
+
+    std::string out = c.dim("    win ") + c.bold(painted);
+    if (!verbose) return out;
+
+    const char* word = st.windowState == 2   ? L.tr("pinned", "fest")
+                       : st.windowState == 3 ? L.tr("backing off", "weicht aus")
+                       : st.windowState == 1 ? L.tr("settled", "steht")
+                                             : L.tr("probing", "tastet");
+    out += " " + c.mut(word);
+    // Both sides of the trade: a bigger window amortises the report, a smaller one survives a slow target.
+    char ex[64];
+    std::snprintf(ex, sizeof(ex), "%s%u %s  %s %u ms", g_term.glyph("\u00b7 ", "- "), (unsigned)st.windowClean,
+                  L.tr("clean", "sauber"), L.tr("report", "Report"), (unsigned)st.reportMs);
+    out += " " + c.dim(ex);
+    return out;
+}
+
+/**
+ * @brief The regulation block (-V only): why the transfer runs at the speed it runs at.
+ * @details Each line answers one question that costs a measurement session to answer otherwise:
+ *          is the window still searching, is OUR pacer the brake, and how much of the TP line is in use.
+ *          The line figure is derived: frame = payload + ~16 octets of KNX header/FCS, TP1 = 11 bits/octet at 9600.
+ */
+static std::vector<std::string> regulationBlock(const FtcStatus& st, const FtcTransferSetup& setup, uint32_t avgBps)
+{
+    const ftc::Theme& c = g_theme;
+    ftc::I18n& L = g_i18n;
+    std::vector<std::string> out;
+    if (setup.mode != 1 || st.window == 0) return out; // windowed transfers only -- safe has no regulation
+
+    // window trajectory: one bar per distinct size the regulation settled on
+    static std::vector<uint16_t> hist;
+    static uint16_t lastW = 0;
+    if (st.window != lastW) { lastW = st.window; hist.push_back(st.window); if (hist.size() > 24) hist.erase(hist.begin()); }
+    std::string spark, path;
+    uint16_t hi = 1;
+    for (uint16_t w : hist) if (w > hi) hi = w;
+    static const char* BARS[8] = {"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
+    for (uint16_t w : hist) spark += g_term.glyph(BARS[(size_t)((uint32_t)w * 7u / hi)], "#");
+    for (size_t i = 0; i < hist.size() && i < 4; i++)
+        path += (i ? g_term.glyph("›", ">") : "") + std::to_string(hist[i]);
+    if (hist.size() > 4) path += g_term.glyph("›", ">") + std::to_string(hist.back());
+
+    const std::string lead = std::string("   ") + c.gold(L.tr("Control ", "Regelung")) + "  ";
+    const std::string pad = std::string("             ");
+
+    char b[220];
+    std::snprintf(b, sizeof(b), "%s, %s %u %s", path.c_str(), L.tr("held for", "seit"), (unsigned)st.windowClean,
+                  L.tr("windows", "Fenstern unverändert"));
+    out.push_back(lead + c.dim(L.tr("window  ", "Fenster ")) + "  " + c.green(spark) + "  " + c.dim(b));
+
+    // framing: what the two ends allowed, and what we made of it
+    std::snprintf(b, sizeof(b), "pkg %u", (unsigned)(setup.chunkSize + 8));
+    std::string fr = pad + c.dim(L.tr("framing ", "Rahmen  ")) + "  " + c.txt(b);
+    std::snprintf(b, sizeof(b), " (%s %u · %s %u)", L.tr("target", "Ziel"), (unsigned)setup.targetApdu,
+                  L.tr("interface", "Interface"), (unsigned)g_ifaceApdu);
+    fr += c.mut(b);
+    std::snprintf(b, sizeof(b), " %s %u B/chunk", g_term.glyph("→", "->"), (unsigned)setup.chunkSize);
+    fr += c.txt(b) + (st.done > setup.chunkSize ? c.mut(L.tr(" · proven", " · bewährt")) : std::string());
+    out.push_back(fr);
+
+    // are WE the brake? the one question that decides whether tuning the client is worth anything
+    // Judge on the AVERAGE: the momentary rate reads five-digit nonsense while the send queue fills. Below
+    // one delivered window there is nothing honest to say at all.
+    const uint32_t pace = g_knxTunnel.paceBps();
+    if (avgBps && st.done > (uint32_t)st.window * setup.chunkSize)
+    {
+        const bool binds = pace && pace < avgBps + avgBps / 10u;
+        std::snprintf(b, sizeof(b), "Pacer %u B/s", (unsigned)pace);
+        out.push_back(pad + c.dim(L.tr("rate    ", "Tempo   ")) + "  " + c.txt(b) +
+                      (binds ? c.amber(L.tr(" · binds", " · bremst")) : c.mut(L.tr(" · does not bind", " · bindet nicht"))) +
+                      c.dim(std::string(" ") + g_term.glyph("—", "-") + " ") +
+                      c.txt(std::to_string((unsigned)avgBps) + L.tr(" B/s from the link", " B/s liefert die Strecke")));
+    }
+
+    // how much of the wire is actually in use -- 100 % would mean the line is the ceiling, and it is not
+    if (avgBps && setup.chunkSize)
+    {
+        const double airMs = (setup.chunkSize + 16.0) * 11.0 / 9.6;   // one frame on TP1 at 9600 bit/s
+        const double beatMs = 1000.0 * setup.chunkSize / (double)avgBps; // measured chunk cadence
+        if (beatMs > airMs)
+        {
+            std::snprintf(b, sizeof(b), "%s %.0f ms · %s %.0f ms", L.tr("frame", "Rahmen"), airMs,
+                          L.tr("beat", "Takt"), beatMs);
+            std::string ln = pad + c.dim(L.tr("line    ", "Linie   ")) + "  " + c.txt(b) + c.dim(" " + std::string(g_term.glyph("→", "->")) + " ");
+            std::snprintf(b, sizeof(b), "%.0f %% %s", airMs / beatMs * 100.0, L.tr("in use", "belegt"));
+            ln += c.oper(b);
+            std::snprintf(b, sizeof(b), " · %.0f ms %s", beatMs - airMs, L.tr("idle per chunk", "Leerlauf je Chunk"));
+            out.push_back(ln + c.mut(b));
+        }
+    }
+
+    // the last loss, as the pattern that diagnoses it: contiguous tail = full receiver, scattered = interference
+    if (st.lastGapKind)
+    {
+        std::snprintf(b, sizeof(b), "%u %s %s", (unsigned)st.lastGapCount, L.tr("chunks", "Chunks"),
+                      st.lastGapKind == 1 ? L.tr("in one tail (receiver was full)", "am Stück am Ende (Empfänger war voll)")
+                                          : L.tr("scattered (line disturbance)", "verstreut (Störung auf der Linie)"));
+        out.push_back(pad + c.dim(L.tr("last loss", "Verlust ")) + "  " + c.amber(b));
+    }
+
+    // what the window is buying: the report amortised over the chunks it covers
+    if (st.reportMs && avgBps)
+    {
+        const double winMs = 1000.0 * st.window * setup.chunkSize / (double)avgBps;
+        std::snprintf(b, sizeof(b), "%s %u ms / %u B", L.tr("report per window", "Report je Fenster"),
+                      (unsigned)st.reportMs, (unsigned)(st.window * setup.chunkSize));
+        std::string ln = pad + c.dim(L.tr("cost    ", "Kosten  ")) + "  " + c.txt(b) + c.dim(" = ");
+        std::snprintf(b, sizeof(b), "%.0f %%", st.reportMs / (winMs + st.reportMs) * 100.0);
+        out.push_back(ln + c.oper(b));
+    }
+    return out;
+}
+
 /**
  * @brief The rich "speed-test scope" block: progress line + 4-row dotted throughput curve + speed + time + legend.
  * @details Auto-zoomed to the data band so it reads as a curve, not a flat line; now/avg/peak (speed is the star)
@@ -2168,8 +2337,7 @@ static std::vector<std::string> buildTransferDash(const FtcStatus& st, bool up, 
     std::string speed = std::string("   ") + c.cyan(g_term.glyph("▸", ">")) + " " + c.bold(c.cyan(std::string(sn) + " B/s")) +
                         c.dim("    ") + Lz.tr("avg ", "Ø ") + c.bold(c.green(std::string(sa) + " B/s")) +
                         c.dim("    ") + Lz.tr("peak ", "Peak ") + c.bold(c.amber(std::string(sp) + " B/s"));
-    if (st.window > 0) // fast: the live window (AIMD climb, or a fixed w<N>) as a first-class stat next to peak
-        speed += c.dim("    win ") + c.bold(c.amber(std::to_string(st.window)));
+    if (st.window > 0) speed += winField(st, g_verbose);
     L.push_back(speed);
     // 4) time — elapsed · ETA · expected finish clock
     const uint32_t rem = st.total > st.done ? st.total - st.done : 0;
@@ -2181,7 +2349,94 @@ static std::vector<std::string> buildTransferDash(const FtcStatus& st, bool up, 
     L.push_back(std::string("   ") + c.dim(tl));
     // 5) live marker counts (CRC/ack · resend · CRC-error), same glyphs as the lane above
     L.push_back(std::string("   ") + markerCounts(st.verifies, st.resends, st.crcErrors));
+    if (g_verbose)
+        for (const std::string& r : regulationBlock(st, openknxFileTransferClient.transferSetup(), avgBps)) L.push_back(r);
     return L;
+}
+
+/**
+ * @brief The transfer's own report, as plain label/value pairs.
+ * @details One source for both the Result Panel and the log file, so the two can never tell different
+ *          stories about the same run. Plain text on purpose: the log is read later, by someone without the
+ *          screen, and colour codes and box characters only get in the way there.
+ *          `verbose` adds the reasoning -- how the window got where it is, and whether WE were the brake.
+ */
+static std::vector<std::pair<std::string, std::string>> xferReportRows(const FtcTransferResult& r, bool verbose)
+{
+    ftc::I18n& L = g_i18n;
+    const FtcStatus& st = openknxFileTransferClient.status();
+    const FtcTransferSetup& setup = openknxFileTransferClient.transferSetup();
+    std::vector<std::pair<std::string, std::string>> rows;
+    char b[220];
+    static const char* WS_DE[4] = {"tastet", "steht", "fest", "weicht aus"};
+    static const char* WS_EN[4] = {"probing", "settled", "pinned", "backing off"};
+    const uint8_t ws = st.windowState < 4 ? st.windowState : 0;
+
+    if (r.mode == 1)
+        std::snprintf(b, sizeof(b), "fast · %s %u (%s)", L.tr("window", "Fenster"), (unsigned)st.window,
+                      L.tr(WS_EN[ws], WS_DE[ws]));
+    else
+        std::snprintf(b, sizeof(b), "safe · %s", L.tr("one CRC per chunk", "CRC je Chunk"));
+    rows.emplace_back(L.tr("Mode", "Modus"), b);
+
+    // A run that died before the framing was agreed has nothing to report there -- "pkg 8" would be invented.
+    if (r.chunkSize) {
+    std::snprintf(b, sizeof(b), "pkg %u (%s %u · %s %u) %s %u B/chunk", (unsigned)(r.chunkSize + 8),
+                  L.tr("target", "Ziel"), (unsigned)setup.targetApdu, L.tr("interface", "Interface"),
+                  (unsigned)g_ifaceApdu, g_term.glyph("→", "->"), (unsigned)r.chunkSize);
+    rows.emplace_back(L.tr("Framing", "Rahmen"), b);
+    }
+
+    // How much of the TP line the run used. Well below 100 % means the ceiling is the path's turnaround.
+    if (r.avgBps && r.chunkSize)
+    {
+        const double airMs = (r.chunkSize + 16.0) * 11.0 / 9.6;
+        const double beatMs = 1000.0 * r.chunkSize / (double)r.avgBps;
+        if (beatMs > airMs)
+        {
+            std::snprintf(b, sizeof(b), "%s %.0f ms · %s %.0f ms %s %.0f %% %s", L.tr("frame", "Rahmen"), airMs,
+                          L.tr("beat", "Takt"), beatMs, g_term.glyph("→", "->"), airMs / beatMs * 100.0,
+                          L.tr("in use", "belegt"));
+            rows.emplace_back(L.tr("Line", "Linie"), b);
+        }
+    }
+
+    std::snprintf(b, sizeof(b), "%u %s · %u %s · %u %s", (unsigned)st.verifies, L.tr("ack", "ack"),
+                  (unsigned)st.resends, L.tr("resend", "Resend"), (unsigned)st.crcErrors,
+                  L.tr("CRC errors", "CRC-Fehler"));
+    rows.emplace_back(L.tr("Markers", "Marker"), b);
+
+    if (!verbose || r.mode != 1) return rows;
+
+    std::snprintf(b, sizeof(b), "%u %s · %s %u ms", (unsigned)st.windowClean,
+                  L.tr("clean windows in a row", "saubere Fenster in Folge"), L.tr("report", "Report"),
+                  (unsigned)st.reportMs);
+    rows.emplace_back(L.tr("Control", "Regelung"), b);
+
+    const uint32_t pace = g_knxTunnel.paceBps();
+    const bool binds = pace && r.avgBps && pace < r.avgBps + r.avgBps / 10u;
+    std::snprintf(b, sizeof(b), "Pacer %u B/s · %s", (unsigned)pace,
+                  binds ? L.tr("binds (we are the brake)", "bremst (wir sind die Bremse)")
+                        : L.tr("does not bind (the path is the ceiling)", "bindet nicht (die Strecke ist die Decke)"));
+    rows.emplace_back(L.tr("Rate", "Tempo"), b);
+    return rows;
+}
+
+/**
+ * @brief Write the full report into the session log, whatever the console was told to show.
+ * @details The log exists to be analysed after the fact, so it always gets the verbose set -- a run recorded
+ *          with -q must still be readable months later. Plain text, no ANSI, one fact per line.
+ */
+static void logXferReport(const FtcTransferResult& r)
+{
+    if (!g_logFp || !r.bytes) return;
+    std::fprintf(g_logFp, "\n--- report ---\n");
+    for (const auto& kv : xferReportRows(r, true))
+        std::fprintf(g_logFp, "%-10s %s\n", kv.first.c_str(), kv.second.c_str());
+    const uint32_t secs = r.elapsedMs / 1000;
+    std::fprintf(g_logFp, "%-10s %u B in %um%02us = %u B/s\n", g_i18n.tr("Result", "Ergebnis"),
+                 (unsigned)r.bytes, (unsigned)(secs / 60), (unsigned)(secs % 60), (unsigned)r.avgBps);
+    std::fflush(g_logFp);
 }
 
 /**
@@ -2215,6 +2470,7 @@ static void renderXferResult(const FtcTransferResult& r, uint32_t peakOverride =
     std::snprintf(buf, sizeof(buf), "0x%08X", (unsigned)r.crc);
     p.kv("CRC32", c.txt(buf) + "   " + (r.verify == 1 ? c.green(vf) : r.verify == 2 ? c.red(vf)
                                                                                     : c.dim(vf)));
+    for (const auto& kv : xferReportRows(r, g_verbose)) p.kv(kv.first, c.txt(kv.second));
     if (r.retries)
     {
         const uint32_t ls = r.retryLostMs / 1000;
@@ -2503,6 +2759,35 @@ static int runTransferPresenter()
 }
 
 /**
+ * @brief -q after a transfer: the run as data, one fact per line, key<TAB>value.
+ * @details A measurement series is compared by machine, and a machine should not have to parse a dashboard.
+ *          Everything here is a number someone would put in a table -- no prose, no colour, no glyphs. Printed
+ *          only for a completed windowed/lockstep transfer, so `-q` on a read command stays silent as before.
+ */
+static void printXferFacts(const FtcStatus& st, const FtcTransferSetup& setup, uint32_t seconds, uint32_t bps)
+{
+    if (!setup.valid || !setup.size) return;
+    static const char* WSTATE[4] = {"probing", "settled", "pinned", "backing_off"};
+    std::printf("mode\t%s\n", setup.mode == 1 ? "fast" : "safe");
+    std::printf("bytes\t%u\n", (unsigned)setup.size);
+    std::printf("chunks\t%u\n", (unsigned)setup.chunks);
+    std::printf("chunk_size\t%u\n", (unsigned)setup.chunkSize);
+    std::printf("target_apdu\t%u\n", (unsigned)setup.targetApdu);
+    if (setup.mode == 1)
+    {
+        std::printf("window\t%u\n", (unsigned)st.window);
+        std::printf("window_state\t%s\n", WSTATE[st.windowState < 4 ? st.windowState : 0]);
+        std::printf("report_ms\t%u\n", (unsigned)st.reportMs);
+    }
+    std::printf("resends\t%u\n", (unsigned)st.resends);
+    std::printf("crc_errors\t%u\n", (unsigned)st.crcErrors);
+    std::printf("seconds\t%u\n", (unsigned)seconds);
+    std::printf("bps\t%u\n", (unsigned)bps);
+    std::printf("ok\t%u\n", st.ok ? 1u : 0u);
+    std::fflush(stdout);
+}
+
+/**
  * @brief Drive the cooperative loop until the client reaches a terminal phase or goes QUIET; 0 done / 1 failed / 2 timeout.
  * @details Read-chain commands (info/df/scan) never set isBusy() or a terminal phase, so "finished" = no TX frame,
  *          no phase/progress change, not busy for QUIET_MS. Shared by the one-shot path and the --verbose probe.
@@ -2532,6 +2817,12 @@ static int runOneShotToQuiescence()
                 g_knxTunnel.pump();
                 openknxFileTransferClient.loop(true);
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (g_quiet)
+            {
+                const uint32_t secs = (uint32_t)((nowMs() - t0) / 1000);
+                printXferFacts(st, openknxFileTransferClient.transferSetup(), secs,
+                               secs ? (uint32_t)(st.done / secs) : st.bps);
             }
             return rc;
         }
@@ -4125,9 +4416,9 @@ int main(int argc, char** argv)
             return 0;
         }
         else if (a == "--verbose" || a == "-V")
-            verbose = true;
+            verbose = g_verbose = true;
         else if (a == "--quiet" || a == "-q")
-            quiet = true;
+            quiet = g_quiet = true;
         else if (a == "--log")
             logRequested = true;
         else if (a.rfind("--log=", 0) == 0)
@@ -4879,7 +5170,12 @@ int main(int argc, char** argv)
             {
                 if (g_abort) break;
                 std::vector<std::string> lines;
-                if (!ws.poll(lines)) break;
+                if (!ws.poll(lines))
+                {
+                    // Plain mode is the scripted one -- the reason belongs on stderr so a pipe still sees it.
+                    if (ws.lost()) std::fprintf(stderr, "connection lost -- the device stopped answering\n");
+                    break;
+                }
                 for (const auto& l : lines)
                 {
                     std::printf("%s\n", l.c_str());
@@ -4920,7 +5216,16 @@ int main(int argc, char** argv)
                 break;
             }
             std::vector<std::string> lines;
-            if (!ws.poll(lines)) break;
+            if (!ws.poll(lines))
+            {
+                // Say WHY it ended. A session that dies because the device vanished looks exactly like one the
+                // user closed, and the difference is the whole message: the device is gone, nothing you typed
+                // after that arrived anywhere.
+                if (ws.lost())
+                    ui.emit(g_theme.red(g_i18n.tr("connection lost — the device stopped answering",
+                                                  "Verbindung verloren — das Gerät antwortet nicht mehr")));
+                break;
+            }
             for (const auto& l : lines)
             {
                 const std::string shown = styleWs(l);
@@ -5969,6 +6274,49 @@ int main(int argc, char** argv)
         }
     }
 
+    // A write needs the device's permission, and we can ASK before spending a transfer on a refusal. The
+    // console has done this since it was written; every other write command ran into the wall instead and
+    // reported it as a failure. Mirrored from the server's own gate (secIsWriteCommand) so the two lists
+    // cannot drift: reads stay open, writes do not.
+    if (!consoleMode && !knxotaActive && !g_pchild && reachHasPa && pos.size() >= 2)
+    {
+        static const char* WRITE_VERBS[] = {"send", "u", "upload", "perf", "pf", "apply", "a", "rm", "mv", "m",
+                                            "mkdir", "md", "rmdir", "rd", "format", "fwupdate", "fw"};
+        const std::string& verb = pos[1];
+        bool isWrite = false;
+        for (const char* w : WRITE_VERBS)
+            if (verb == w) { isWrite = true; break; }
+        if (isWrite)
+        {
+            ftc::I18n& L = g_i18n;
+            const uint16_t tgt = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
+            const ftc::AccessState acc = resolveAccessInteractively(tgt, 60, quiet);
+            if (acc.stage != ftc::Access::Open && acc.stage != ftc::Access::Unknown)
+            {
+                // Quiet is for scripts: one line they can act on, no prompt they cannot answer.
+                if (quiet)
+                    std::fprintf(stderr, "%s\n", acc.stage == ftc::Access::NeedPassword
+                                                     ? "please login first"
+                                                     : "target does not accept writes");
+                else
+                    g_ui.errorBlock(false,
+                                    acc.stage == ftc::Access::NeedPassword
+                                        ? L.tr("this device wants a password", "dieses Gerät verlangt ein Passwort")
+                                        : L.tr("this device is not accepting writes",
+                                               "dieses Gerät nimmt keine Schreibzugriffe an"),
+                                    {L.tr("nothing was sent", "es wurde nichts gesendet")},
+                                    acc.stage == ftc::Access::NeedPassword
+                                        ? L.tr("sign in first:  ftc <pa> login <password>",
+                                               "erst anmelden:  ftc <pa> login <Passwort>")
+                                        : L.tr("the parameter is called \"access protection\" in the OpenKNX application",
+                                               "der Parameter heißt \"Zugriffsschutz\" in der OpenKNX-Applikation"));
+                g_knxTunnel.disconnect();
+                socketCleanup();
+                return 3; // 3 = the device refuses, same as the console path
+            }
+        }
+    }
+
     // Stage 2: render read/status <pa> commands from the client's structured getters (raw text suppressed).
     // Not a structured command (or console mode) -> fall through to the normal one-shot path below.
     if (!consoleMode && ftcRenderStructured(pos, quiet, exitCode))
@@ -6065,6 +6413,23 @@ int main(int argc, char** argv)
             socketCleanup();
             return 3; // 3 = the device refuses, same as everywhere else
         }
+    }
+
+    // -V also raises the CLIENT's verbosity, not just the UI's: the per-window report diagnostics
+    // (answer latency, report timeouts) are gated on level 2 and are the only view into a fast stall.
+    if (verbose) openknxFileTransferClient.setVerbosity(2);
+    if (quiet) openknxFileTransferClient.setVerbosity(0); // -q reports as facts below; the client's own box would only be noise
+    // A log is written to be read later, by someone who no longer has the screen. So it gets everything the
+    // client can say, regardless of how quiet the console was told to be -- the console filters, the log does not.
+    if (logRequested) openknxFileTransferClient.setVerbosity(2);
+
+    // --log outside the console: the line hook tees every client line, so a transfer transcript needs
+    // nothing but an open file. The console path opens its own log further down, once its PA is known.
+    if (logRequested && !consoleMode)
+    {
+        if (openSessionLog(pos.empty() ? std::string("ftc") : pos[0], logPathArg).empty())
+            std::fprintf(stderr, "could not open log file%s%s\n",
+                         logPathArg.empty() ? "" : " ", logPathArg.c_str());
     }
 
     // Submit the command through the same Module entry the console uses.
@@ -6384,6 +6749,13 @@ int main(int argc, char** argv)
     }
 
     // --- clean shutdown ---------------------------------------------------------------------------
+    logXferReport(openknxFileTransferClient.transferResult());
+    if (g_logFp) // non-console log (the console path closes its own before it reaches here)
+    {
+        std::fclose(g_logFp);
+        g_logFp = nullptr;
+        if (!quiet && !g_logPath.empty()) std::printf("log saved: %s\n", g_logPath.c_str());
+    }
     g_knxTunnel.disconnect();
     if (exitCode == 130)
         std::fprintf(stderr, "%s -- transfer cancelled, tunnel closed cleanly (no interface lockout).\n", abortReason().c_str());
