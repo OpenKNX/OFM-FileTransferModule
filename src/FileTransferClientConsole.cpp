@@ -16,17 +16,6 @@
     #include <string.h>
 
 /**
- * @brief Transfer-mode keyword -> 0 safe/classic, 1 fast/windowed.
- *
- * Aliases: win/windowed -> fast; any unrecognised token -> safe.
- */
-static uint8_t ftcParseModeWord(const char *t)
-{
-    if (strcmp(t, "fast") == 0 || strcmp(t, "win") == 0 || strcmp(t, "windowed") == 0) return 1;
-    return 0;
-}
-
-/**
  * @brief Expand a verb to its canonical name, so the dispatch below only ever compares one spelling.
  * @details Short forms are for the commands a user repeats all day. The deleting ones -- rm, rmdir,
  *          format -- deliberately have none: on a console, one mistyped character should not erase.
@@ -578,63 +567,70 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
 
     if (strcmp(sub, "perf") == 0)
     {
-        // ftc <pa> perf [kb] [pkg] [mode] [flags] -- upload a generated pattern, report throughput. Trailing
-        // tokens are order-tolerant: numbers fill kb then pkg, `auto` = pkg auto, a keyword sets the mode,
-        // "keep" leaves the file (/ftcperf_<crc>.bin), "verbose"/"v" = 1 Hz progress, `w<N>` pins the fast window.
-        char t[6][24] = {{0}};
-        const int nt = sscanf(cmd.c_str(), "ftc %*s %*s %23s %23s %23s %23s %23s %23s", t[0], t[1], t[2], t[3], t[4], t[5]);
-        unsigned kb = 0, pk = 0, seenNum = 0, fixedWnd = 0;
-        uint8_t mode = 0;
-        bool keep = false;
-        uint8_t verbosity = _client.verbosity();
-        char pdrive[8] = {0}; // "sd" / "efc" target drive (empty = LittleFS)
-        for (int i = 0; i < nt; i++)
+        // ftc <pa> perf [kb] [sd|efc] [options] -- upload a generated pattern and report throughput.
+        // Options go through the SAME parser as send, so `--window 32`, `-f` and the bare `fast w32` all
+        // mean here what they mean there. Only two things are perf's own: the FIRST bare number is the
+        // size in KB (the shared parser would read a bare number as the package size), and the target
+        // drive. Everything else is an option -- and a wrong one is reported, not swallowed.
+        const char *p = cmd.c_str();
+        for (int skip = 0; skip < 3 && *p; ++skip) // "ftc", <pa>, "perf"
         {
+            while (*p == ' ') ++p;
+            while (*p && *p != ' ') ++p;
+        }
+        char tok[40] = {0}, nxt[40] = {0};
+        bool trunc = false, havePending = false, haveKb = false;
+        unsigned kb = 0;
+        char pdrive[8] = {0};
+        FtcXferOpts o;
+        o.verbosity = _client.verbosity();
+        while (havePending || ftcTok(p, tok, sizeof(tok), trunc))
+        {
+            havePending = false;
+            if (!haveKb && isdigit((unsigned char)tok[0]))
             {
-                // perf writes a generated pattern, so `apply` and `no-resume` carry no meaning here --
-                // they are accepted and dropped rather than rejected, so one habit works everywhere.
-                bool fastFlag = (mode == 1), ignored = false;
-                if (ftcFlagToken(t[i], verbosity, fastFlag, ignored, keep, ignored))
-                {
-                    if (fastFlag) mode = 1;
-                    continue;
-                }
+                kb = (unsigned)atoi(tok); // the size, before the option parser can claim it as pkg
+                haveKb = true;
+                continue;
             }
-            if (isdigit((unsigned char)t[i][0]))
+            if (strcmp(tok, "sd") == 0 || strcmp(tok, "sd/") == 0 || strcmp(tok, "efc") == 0 ||
+                strcmp(tok, "efc/") == 0)
             {
-                if (seenNum++ == 0)
-                    kb = (unsigned)atoi(t[i]);
-                else
-                    pk = (unsigned)atoi(t[i]);
-            }
-            else if ((t[i][0] == 'w' || t[i][0] == 'W') && isdigit((unsigned char)t[i][1]))
-                fixedWnd = (unsigned)atoi(t[i] + 1); // w<N>: pin the fast window (no AIMD probe-up; loss still ratchets down)
-            else if (strcmp(t[i], "keep") == 0)
-                keep = true;
-            else if (strcmp(t[i], "verbose") == 0 || strcmp(t[i], "v") == 0)
-                verbosity = 2;
-            else if (strcmp(t[i], "auto") == 0)
-                pk = 0; // pkg auto (default) -- explicit token, leave pk at 0
-            else if (strcmp(t[i], "nr") == 0 || strcmp(t[i], "no-resume") == 0 ||
-                     strcmp(t[i], "noresume") == 0 || strcmp(t[i], "fresh") == 0)
-                ; // perf regenerates the pattern anyway -- accept the token without resetting the mode
-            else if (strcmp(t[i], "sd") == 0 || strcmp(t[i], "sd/") == 0 || strcmp(t[i], "efc") == 0 || strcmp(t[i], "efc/") == 0)
-            {
-                strncpy(pdrive, t[i], sizeof(pdrive) - 1); // perf target drive -> sd/ftcperf.bin etc. (accept "sd" or "sd/")
+                strncpy(pdrive, tok, sizeof(pdrive) - 1);
                 char *sl = strchr(pdrive, '/');
                 if (sl) *sl = '\0'; // "sd/" -> "sd" (ftcPerfCrcDone re-adds the slash)
+                continue;
             }
-            else
+            const bool haveNext = ftcTok(p, nxt, sizeof(nxt), trunc);
+            bool usedNext = false;
+            const char *err = nullptr;
+            if (ftcXferOpt(tok, haveNext ? nxt : nullptr, o, usedNext, err))
             {
-                // Only a RECOGNISED mode word (fast) or an explicit "safe" sets the mode -- otherwise a
-                // stray trailing token (previously "nr") would silently reset a just-parsed mode to 0 (=safe).
-                const uint8_t m = ftcParseModeWord(t[i]);
-                if (m != 0 || strcmp(t[i], "safe") == 0) mode = m;
+                if (err != nullptr)
+                {
+                    openknx.logger.logWithPrefixAndValues("FTC", "%s: %s", tok, err);
+                    return true;
+                }
+                if (!usedNext && haveNext)
+                {
+                    strncpy(tok, nxt, sizeof(tok) - 1);
+                    tok[sizeof(tok) - 1] = 0;
+                    havePending = true;
+                }
+                continue;
             }
+            openknx.logger.logWithPrefixAndValues("FTC", "unexpected argument '%s' -- perf takes [kb] [sd|efc] [options]", tok);
+            return true;
+        }
+        const char *bad = ftcXferCheck(o);
+        if (bad != nullptr)
+        {
+            openknx.logger.logWithPrefix("FTC", bad);
+            return true;
         }
         if (kb == 0) kb = 16;
-        _client.setVerbosity(verbosity);
-        _client.requestPerf(pa, kb * 1024u, pk, mode, keep, (uint16_t)fixedWnd, pdrive); // pk 0 -> auto; w<N> pins the fast window; pdrive = sd/efc
+        if (o.verbosity != 0xFF) _client.setVerbosity(o.verbosity);
+        _client.requestPerf(pa, kb * 1024u, o.pkg, o.mode, o.keep, (uint16_t)o.window, pdrive);
         return true;
     }
 
