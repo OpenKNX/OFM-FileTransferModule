@@ -74,6 +74,13 @@
           </Dynamic>
         </ApplicationProgram>
       </ApplicationPrograms>
+      <!-- Declares this module's context help so a host product merges src/Baggages/Help_de into its
+           Help_de.zip (pulled per module via op:includetemplate //Manufacturer/Baggages). Mirrors OFM-Network. -->
+      <Baggages>
+        <Baggage TargetPath="" Name="Help_de.zip" Id="%FILE-HELP-de%">
+          <FileInfo TimeInfo="%DATETIME%" />
+        </Baggage>
+      </Baggages>
     </Manufacturer>
   </ManufacturerData>
 </KNX>
