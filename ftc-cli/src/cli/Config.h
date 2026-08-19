@@ -9,6 +9,7 @@
  *              Licensed under GNU GPL v3.0
  **/
 #pragma once
+#include "../core/MakeDir.h"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -118,7 +119,8 @@ class Config
         const size_t sl = file.find_last_of("/\\");
         if (sl == std::string::npos) return;
         std::error_code ec;
-        std::filesystem::create_directories(file.substr(0, sl), ec); // best-effort: failure -> the open below reports it
+        std::string mkErr;
+        ftc::makeDirs(file.substr(0, sl), mkErr); // best-effort: failure -> the open below reports it
     }
 
     std::map<std::string, std::string> _v;

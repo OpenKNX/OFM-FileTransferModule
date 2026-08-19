@@ -11,6 +11,7 @@
  *              Licensed under GNU GPL v3.0
  **/
 #pragma once
+#include "MakeDir.h"
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -285,8 +286,8 @@ inline InstallResult commitInstall(const InstallPlan& plan)
     InstallResult r;
     r.dest = plan.dest;
     std::error_code ec;
-    fs::create_directories(plan.dir, ec);
-    if (ec) { r.note = "cannot create '" + plan.dir.string() + "': " + ec.message(); return r; }
+    std::string mkErr;
+    if (!makeDirs(plan.dir.string(), mkErr)) { r.note = "cannot create " + mkErr; return r; }
 
     if (plan.selfIsDest) // running the installed copy itself -> nothing to copy
     {
