@@ -119,6 +119,9 @@ class WebConsole
      * @brief Non-blocking drain: parse frames, append complete TEXT lines to @p out, answer pings.
      * @details Returns false once the connection is closed.
      */
+    static constexpr uint64_t WS_PROBE_MS = 5000;  // silence this long -> ping the peer
+    static constexpr uint64_t WS_DEAD_MS = 15000;  // no byte at all this long (probe included) -> gone
+
     bool poll(std::vector<std::string>& out)
     {
         if (!_connected) return false;
@@ -130,6 +133,7 @@ class WebConsole
             {
                 _rx.append(b, (size_t)n);
                 _bytesIn += (uint32_t)n;
+                _lastRxMs = detail::nowMs(); // any byte proves the peer is still there
                 continue;
             }
             if (n == 0)
@@ -181,6 +185,9 @@ class WebConsole
             if (opcode == 0x1 || opcode == 0x0) pushLines(payload, out); // text / continuation
             else if (opcode == 0x9)
                 sendFrame(0x0A, payload); // ping -> pong
+            else if (opcode == 0xA)
+            {
+            } // pong: the bytes already refreshed the liveness clock, nothing else to do
             else if (opcode == 0x8)
             {
                 _connected = false;
@@ -189,8 +196,33 @@ class WebConsole
             } // close
         }
         _rx.erase(0, i);
+
+        // A device that vanishes closes nothing -- recv just keeps saying "nothing yet". Silence alone is no
+        // verdict either (an idle console is silent too), so probe: a ping must be answered, and bytes refresh
+        // the clock. Nothing within the deadline = gone.
+        const uint64_t now = detail::nowMs();
+        if (!_lastRxMs) _lastRxMs = now;
+        if (now - _lastRxMs > WS_PROBE_MS && now - _lastPingMs > WS_PROBE_MS)
+        {
+            _lastPingMs = now;
+            if (!sendFrame(0x09, std::string())) // send failed -> the socket is already gone
+            {
+                _connected = false;
+                _lost = true;
+                return false;
+            }
+        }
+        if (now - _lastRxMs > WS_DEAD_MS)
+        {
+            _connected = false;
+            _lost = true; // distinguishes "the device disappeared" from "the session was closed properly"
+            return false;
+        }
         return true;
     }
+
+    /** @brief True when the session ended because the peer stopped answering, not because it closed cleanly. */
+    bool lost() const { return _lost; }
 
     /**
      * @brief Send one command as a masked text frame (the webconsole runs it and echoes it back).
@@ -213,6 +245,9 @@ class WebConsole
     std::string _rx;      // unparsed inbound bytes
     std::string _lineBuf; // partial (no-newline-yet) inbound text line
     uint32_t _bytesIn = 0, _bytesOut = 0;
+    uint64_t _lastRxMs = 0;   // last byte received -> the liveness clock
+    uint64_t _lastPingMs = 0; // last probe sent
+    bool _lost = false;       // session ended by silence, not by a clean close
 
     /**
      * @brief Split inbound text on '\n' into complete lines, buffering the trailing partial.
