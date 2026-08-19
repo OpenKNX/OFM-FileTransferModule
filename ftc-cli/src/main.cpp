@@ -2426,9 +2426,14 @@ static std::vector<std::pair<std::string, std::string>> xferReportRows(const Ftc
     static const char* WS_EN[4] = {"probing", "settled", "pinned", "backing off"};
     const uint8_t ws = st.windowState < 4 ? st.windowState : 0;
 
+    static const char* DENIED_EN[5] = {"", "no CheckFeatures answer", "target has no fast", "chunk cap", "target refused"};
+    static const char* DENIED_DE[5] = {"", "keine CheckFeatures-Antwort", "Ziel kann kein fast", "Chunk-Grenze", "Ziel lehnte ab"};
     if (r.mode == 1)
         std::snprintf(b, sizeof(b), "fast · %s %u (%s)", L.tr("window", "Fenster"), (unsigned)st.window,
                       L.tr(WS_EN[ws], WS_DE[ws]));
+    else if (setup.fastDenied && setup.fastDenied < 5)
+        std::snprintf(b, sizeof(b), "safe · %s: %s", L.tr("fast refused", "fast abgelehnt"),
+                      L.tr(DENIED_EN[setup.fastDenied], DENIED_DE[setup.fastDenied]));
     else
         std::snprintf(b, sizeof(b), "safe · %s", L.tr("one CRC per chunk", "CRC je Chunk"));
     rows.emplace_back(L.tr("Mode", "Modus"), b);
@@ -2696,7 +2701,9 @@ static int runTransferPresenter()
         const bool up = setup.kind != FtcXferKind::Download;
         const uint64_t now = nowMs();
 
-        if (!setupDrawn && setup.valid)
+        // Wait for the fast probe to answer before drawing: the panel is printed once and stays in the
+        // scrollback, so a header claiming fast over a classic transfer is a lie nobody can correct later.
+        if (!setupDrawn && setup.valid && setup.modeSettled)
         {
             renderXferSetup(setup);
             setupDrawn = true;

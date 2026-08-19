@@ -1108,6 +1108,8 @@ void FileTransferClient::ftcApplyTargetApdu()
         if (_ftcMode != 0 && nch > FTC_FAST_MAX_CHUNKS)
         {
             _ftcMode = 0;
+            _xferSetup.mode = 0;
+            _xferSetup.fastDenied = 3;
             nch = (_ftcSize + (newPayload + 2) - 1) / (newPayload + 2);
             openknx.logger.logWithPrefix("FTC", "target APDU: chunk count over the fast window -> classic mode");
         }
@@ -1148,6 +1150,10 @@ void FileTransferClient::ftcGateFast(uint8_t features, bool answered)
     if (reason != nullptr)
     {
         _ftcMode = 0;
+        // The UI must show what the transfer IS, not what it asked for -- a panel saying "fast" over a
+        // classic transfer is worse than no panel at all.
+        _xferSetup.mode = 0;
+        _xferSetup.fastDenied = !answered ? 1 : !(features & FTC_FEAT_FAST) ? 2 : 3;
         openknx.logger.logWithPrefixAndValues("FTC", "%s -> classic: %s", ftcModeName(requested), reason);
     }
     else
@@ -1156,6 +1162,7 @@ void FileTransferClient::ftcGateFast(uint8_t features, bool answered)
         openknx.logger.logWithPrefixAndValues("FTC", "%s negotiated (server FAST ok) -- using fast data path",
                                               ftcModeName(requested));
     }
+    _xferSetup.modeSettled = true; // whichever way it went, `mode` is now final and the UI may render it
 }
 
 /** @brief Map the target's result byte to a human cause (values from the server, FileTransferModule.cpp). */
@@ -1338,6 +1345,7 @@ void FileTransferClient::ftcPerfCrcDone()
     _xferSetup.hasCrc = true;
     _xferSetup.crc = crc;
     _xferSetup.mode = _crcPerfMode;
+    _xferSetup.modeSettled = (_crcPerfMode == 0); // classic is final at once; fast waits for the probe
     _xferSetup.chunkSize = _ftcPayloadSize;
     _xferSetup.chunks = _ftcChunks;
     _xferSetup.keep = _crcPerfKeep;
@@ -3655,6 +3663,7 @@ void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pk
     strncpy(_xferSetup.remote, _ftcPath, sizeof(_xferSetup.remote) - 1);
     _xferSetup.size = _ftcSize;
     _xferSetup.mode = mode;
+    _xferSetup.modeSettled = (mode == 0);
     _xferSetup.chunkSize = _ftcPayloadSize;
     _xferSetup.chunks = _ftcChunks;
     _xferSetup.noResume = _ftcNoResume;
@@ -3886,6 +3895,7 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     _xferSetup.valid = true;
     _xferSetup.targetApdu = _tgtApdu; // what the target allowed -> the UI can show how the framing was decided
     _xferSetup.kind = FtcXferKind::Download;
+    _xferSetup.modeSettled = true; // a download never probes for fast -- nothing to wait for
     _xferSetup.target = pa;
     strncpy(_xferSetup.remote, _ftcPath, sizeof(_xferSetup.remote) - 1);
     strncpy(_xferSetup.local, _dlLocal, sizeof(_xferSetup.local) - 1);
@@ -5464,6 +5474,8 @@ void FileTransferClient::loopFast()
                 if (r == 0x4A)
                 {
                     _ftcMode = 0;
+                    _xferSetup.mode = 0;
+                    _xferSetup.fastDenied = 4;
                     openknx.logger.logWithPrefix("FTC", "target refused fast -> classic/safe");
                     ftcSendUploadOpen();
                     return;

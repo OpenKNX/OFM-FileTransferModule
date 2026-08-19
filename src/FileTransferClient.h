@@ -192,7 +192,9 @@ struct FtcTransferSetup
     char remote[FTC_PATH_MAX] = {0};
     uint32_t size = 0;                   // total bytes to transfer (0 = unknown yet, e.g. download pre-open)
     bool hasCrc = false; uint32_t crc = 0; // source CRC32 known up-front (perf deterministic pattern)
-    uint8_t mode = 0;                    // FtcMode: 0 safe · 1 fast
+    uint8_t mode = 0;                    // FtcMode: 0 safe · 1 fast -- the NEGOTIATED mode, not the requested one
+    uint8_t fastDenied = 0;              // why fast fell back: 0 none · 1 no answer · 2 no FAST bit · 3 chunk cap · 4 target refused
+    bool modeSettled = false;            // the fast probe has answered -> `mode` is final and safe to render
     uint16_t chunkSize = 0;              // payload bytes per chunk
     uint16_t chunks = 0;
     bool noResume = false;
