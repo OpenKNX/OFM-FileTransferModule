@@ -7,6 +7,7 @@
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
 #include "FileTransferConfig.h"
 #include "FastCRC.h"
+#include "FirmwarePatch.h"
 #include "OpenKNX.h"
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -26,6 +27,9 @@ class FileTransferModule : public OpenKNX::Module
     const uint8_t _minor = MODULE_FileTransferModule_Version_Minor;
     const uint8_t _revision = MODULE_FileTransferModule_Version_Revision;
     void loop(bool configured) override;
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    void processAfterStartupDelay() override; // release what a finished update left in the filesystem
+#endif
 
   private:
     // Remote `ll sd/…` / `ll efc/…` are served directly from sd::/efc::fileStore (guarded); LittleFS uses
@@ -163,7 +167,7 @@ class FileTransferModule : public OpenKNX::Module
     // (sequence-1)*_size and write n payload bytes; true only if the seek AND full write succeeded.
     bool writeChunk(uint16_t sequence, const uint8_t *payload, uint8_t n);
     void writeFile(uint16_t sequence, uint8_t *data, uint8_t length, uint8_t *resultData, uint8_t &resultLength);
-#if OPENKNX_FTC_FASTUPLOAD
+#ifdef OPENKNX_FTC_FASTUPLOAD
     // FAST upload (cmd44): open(00 00, answered) / close(FF FF, answered) / data(SILENT). Returns the
     // "handled" flag so a DATA frame produces NO L7 answer (the dispatcher only responds if handled).
     bool cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
@@ -184,9 +188,128 @@ class FileTransferModule : public OpenKNX::Module
     // Is there a slot to write an update into? RP2040 always has one (PicoOTA); on ESP32 a single-app layout
     // has none (IDF returns the RUNNING partition). Checked before writing + before cmdCheckFeatures.
     static bool otaSlotAvailable();
+
+
+    /** Why an update could not even be started. Above FirmwarePatch::Error, so one field carries both. */
+    enum ApplyError : uint8_t
+    {
+        APPLY_NOT_FOUND = 0x80,  // the staged file is not there or cannot be read
+        APPLY_NOT_IMAGE = 0x81,  // it is not a bootable image
+        APPLY_WRONG_CHIP = 0x82, // built for a different chip than this one
+        APPLY_NO_SLOT = 0x83,    // this partition layout has no second OTA slot
+        APPLY_BEGIN = 0x84,      // the flash could not be opened / armed
+        APPLY_WRITE = 0x85,      // writing or committing it failed
+        APPLY_GZIP = 0x86,       // the compressed image is damaged
+    };
+
+    /**
+     * @brief Record why an update stopped, so cmd 106 can tell the client.
+     * @details The same two fields the delta job uses -- an update that never got as far as a patch is
+     *          still an update that failed. Without delta there is no cmd 106 to report it, so the
+     *          recorder becomes a no-op rather than the call sites becoming conditional.
+     */
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    void applyFailed(uint8_t reason)
+    {
+        _deltaError = reason;
+        _deltaPhase = DELTA_FAILED;
+    }
+#else
+    void applyFailed(uint8_t) {}
+#endif
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // --- Delta update. The apply is a JOB, not a call: cmd 101 arms it and returns, the work happens in
+    // loop() in slices no larger than one flash sector. Nothing is made bootable before the rebuilt image
+    // has been checksummed, so every abort leaves the device on the firmware it is already running. ---
+    enum DeltaPhase : uint8_t
+    {
+        DELTA_IDLE = 0,
+        DELTA_UNZIP,  // packed patch: unpack the two streams before anything else looks at them
+        DELTA_RUN,    // interpret the patch: verify the source, then rebuild
+        DELTA_VERIFY, // RP2040/RP2350: read the staged image back before arming the bootloader
+        DELTA_ARM,    // hand the result to the platform and ask for the reboot
+        DELTA_FAILED,
+    };
+    // Where a packed patch is unpacked to. The interpreter then works on a plain file and knows nothing
+    // about compression -- which is the whole reason the unpacking is a separate phase.
+    static constexpr const char *DELTA_PLAIN_PATH = "/fw.okd.tmp";
+
+    bool deltaBusy() const { return _deltaPhase != DELTA_IDLE && _deltaPhase != DELTA_FAILED; }
+
+
+    static bool deltaIsPatchFile(const char *path); // decided by the file's magic, never by its name
+#ifdef ARDUINO_ARCH_RP2040
+    // Refuse to point the bootloader at something that is not an image. The bootloader itself checks
+    // nothing, so a mistaken file would be copied into the application area and brick the device.
+    static bool fwImagePlausible(const char *path);
+#endif
+    bool deltaArm(const char *patchPath);           // cmd 101 saw the "OKD1" magic
+    void deltaLoop();                     // one slice per loop() pass
+    void deltaStop(uint8_t err);          // release everything; err 0 = orderly end
+    uint32_t deltaSourceLimit();          // highest offset a patch may read from the running image
+
+    static bool deltaSrcRead(void *ctx, uint8_t *dst, uint32_t ofs, uint32_t len);
+    static bool deltaPatchRead(void *ctx, uint8_t *dst, uint32_t ofs, uint32_t len);
+    static bool deltaSinkWrite(void *ctx, const uint8_t *buf, uint32_t len);
+
+    // cmd 106: confirm the base a patch was built against, and report a running or failed apply. The
+    // checksum covers the whole image, so it is computed cooperatively and answered with 0x02 until done.
+    void cmdFwProbe(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
+    void probeLoop();
+    uint32_t deltaStagingRoom();
+    bool _probeActive = false;
+    uint32_t _probeLen = 0;
+    uint32_t _probeOff = 0;
+    uint32_t _probeCrc = 0;
+    uint32_t _probeLastAccess = 0;
+
+    uint8_t _deltaPhase = DELTA_IDLE;
+    // Why the last firmware update stopped, reported via cmd 106. Two ranges in ONE field, because the
+    // client asks one question ("what happened to my update?") and should not have to ask it twice:
+    //   0x00..0x7F  FirmwarePatch::Error -- the patch could not be turned into an image
+    //   0x80..      APPLY_* below  -- the image could not be staged or armed, patch or not
+    uint8_t _deltaError = 0;
+    uint8_t *_deltaBuf = nullptr; // one slice, heap, freed on every exit
+    File _deltaPatchFile;         // staged patch, kept open for the whole job
+    uint32_t _deltaPatchSize = 0;
+    FirmwarePatch::Job _deltaJob;
+    bool _deltaPacked = false;    // the staged patch carries its streams compressed
+    uint8_t _deltaUnzipErr = 0;   // why unpacking stopped: damaged stream vs. no room left
+    // Unpacking state. The dictionary is the window the format was compressed with; it is allocated for
+    // the unpack phase only and given back before the rebuild starts, so the two never add up.
+    void *_deltaInflate = nullptr;
+    uint8_t *_deltaDict = nullptr;
+    File _deltaPlain;             // the unpacked patch the interpreter then reads
+    uint32_t _deltaPlainWritten = 0;
+    uint32_t _deltaPlainExpect = 0;
+    uint32_t _deltaPackedRead = 0;  // how much of the packed file has been fed to the decompressor
+    char _deltaPackedPath[64] = {}; // released once unpacked; empty if the path did not fit
+    bool deltaStartJob();         // header is plain and readable -> wire up the interpreter and the sink
+    bool deltaUnzipBegin();
+    bool deltaUnzipStep();
+    void deltaUnzipEnd();
+#ifdef ARDUINO_ARCH_RP2040
+    void deltaReclaim(); // release the staged image once the bootloader has really used it
+#endif
+  public:
+    int deltaUnzipRefill(uint8_t *dst, uint32_t len); // used by the decompressor read callback
+  private:
+    // The rebuilt image is always staged under this name: the bootloader is told a path, and a
+    // client-chosen one would be a second thing to keep in step for no gain.
+    // NOT "/fw.bin": that is the name a client most often uploads a FULL image under, and the two would
+    // then be the same file -- one path staging what the other is about to apply. A name only the delta
+    // job ever writes is also what makes a leftover safe to delete without inspecting it.
+    static constexpr const char *DELTA_STAGE_PATH = "/fw.delta.bin";
+#ifdef ARDUINO_ARCH_RP2040
+    File _deltaStage;             // rebuilt image; the bootloader copies it to flash on the next start
+    uint32_t _deltaVerifyPos = 0; // read-back progress
+    uint32_t _deltaVerifyCrc = 0;
+#endif
+#endif
 #ifdef ARDUINO_ARCH_ESP32
     static bool espImageFitsThisChip(const uint8_t *hdr24, uint16_t &imgChip, uint16_t &runChip);
-    #if OPENKNX_FTC_GZIP_UPDATE
+    #ifdef OPENKNX_FTC_GZIP_UPDATE
     size_t inflateToOta(File &img, size_t dataStart, size_t outSize); // gzipped staged image -> OTA slot
     #endif
 #endif
@@ -194,14 +317,14 @@ class FileTransferModule : public OpenKNX::Module
     void cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdCancel(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
-#if OPENKNX_FTC_DIROPS
+#ifdef OPENKNX_FTC_DIROPS
     void cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdDirCreate(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdDirDelete(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
 #endif
     void cmdFileDelete(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
     void cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_DOWNLOAD
     void cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);
 #endif
     void cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength);

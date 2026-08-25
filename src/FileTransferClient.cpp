@@ -5,10 +5,12 @@
  * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
  *              Licensed under GNU GPL v3.0
  */
+#include "FileTransferConfig.h" // switches first -- every guard below depends on it
 #include "FileTransferClient.h"
+#include "FirmwarePatch.h"
 #include "KnxDeviceMap.h"
 
-#ifdef OPENKNX_FTC
+#ifdef OPENKNX_FTC_CLIENT
     #include <stdarg.h>
     #include <string.h>
     #include <string>
@@ -195,6 +197,9 @@ static constexpr uint8_t FTC_CMD_CANCEL = 90;
 static constexpr uint8_t FTC_CMD_MODULE_VERSION = 100;
 static constexpr uint8_t FTC_CMD_FW_UPDATE = 101;      // arm PicoOTA + reboot ~2s (RP2040 target only); fire-and-forget, no L7 reply
 static constexpr uint8_t FTC_CMD_CHECK_FEATURES = 102; // 1-byte flags: bit0 Resume, bit1 Update, bit2 FAST
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+static constexpr uint8_t FTC_CMD_FW_PROBE = 106; // delta: confirm the base image, and read the job status
+#endif
     #ifdef OPENKNX_FTC_SECURITY
 static constexpr uint8_t FTC_CMD_AUTH_CHALLENGE = 103; // login: request a nonce
 static constexpr uint8_t FTC_CMD_AUTH_RESPONSE = 104;  // login: submit the 4-byte MAC over the nonce
@@ -579,7 +584,7 @@ static bool ftcCat(char *buf, size_t cap, size_t &pos, const char *fmt, ...)
     return true;
 }
 
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
 void FileTransferClient::scanRecord(uint16_t pa, uint16_t mask)
 {
     char paStr[16];
@@ -871,7 +876,7 @@ bool FileTransferClient::ftcScanProbeStart(const FtcEntry &e)
     _ftcTarget = pa;
     _propPending = false;
     _ftcRespPending = false;
-#if OPENKNX_FTC_DEVICEINFO
+#ifdef OPENKNX_FTC_DEVICEINFO
     if (_scanInfo)
     {
         _scanProbeInFlight = 2;
@@ -996,7 +1001,8 @@ bool FileTransferClient::ftcSend(uint8_t propertyId, uint8_t length)
 {
 
     SecurityControl sec = {false, None};
-    _ftcRespPending = false; // arm before sending, so a fast answer cannot be missed
+    _ftcSentProp = propertyId; // what an answer must belong to
+    _ftcRespPending = false;   // arm before sending, so a fast answer cannot be missed
     _ftcSince = millis();
     return knx.bau().ftcSendCommand(_ftcTarget, sec, FTC_OBJECT_INDEX, propertyId, _ftcTx, length);
 }
@@ -2226,15 +2232,33 @@ void FileTransferClient::requestRename(uint16_t pa, const char *oldPath, const c
 {
     // Rename payload is "old\0new\0" (FileTransferModule::cmdRename splits on the first NUL).
     const size_t lo = strlen(oldPath), ln = strlen(newPath);
-    uint8_t buf[256];                   // matches _ftcTx; check must be against THIS size, not _ftcTx
-    if (lo + 1 + ln + 1 >= sizeof(buf)) // >= : 256 would fit buf but wrap the (uint8_t) length cast to 0
+    if (lo == 0 || ln == 0)
     {
-        openknx.logger.logWithPrefix("FTC", "paths too long");
+        openknx.logger.logWithPrefix("FTC", "mv: both names are required");
+        return;
+    }
+    if (lo > FTC_REMOTE_PATH_LIMIT || ln > FTC_REMOTE_PATH_LIMIT)
+    {
+        openknx.logger.logWithPrefix("FTC", "mv: path too long");
+        return;
+    }
+    // Both names travel in ONE frame, so the pair is bounded by the LINK, not by _ftcTx: a 256-B buffer
+    // check let a 250-B pair through that no 247-B APDU can carry -- and less still on an interface that
+    // negotiated a smaller one. The 7 B taken off a negotiated APDU is the header allowance used elsewhere
+    // in this file (CON_DRAIN_MAX); the command header itself is 4 B, so this errs on the short side --
+    // the safe side for a bound whose whole job is to keep an over-long frame off the wire.
+    size_t cap = FTC_WIRE_PAYLOAD_MAX;
+    if (_apduHint >= 7 + 16 && (size_t)(_apduHint - 7) < cap) cap = (size_t)(_apduHint - 7);
+    const size_t need = lo + 1 + ln + 1;
+    uint8_t buf[256];
+    if (need > cap || need > sizeof(buf))
+    {
+        openknx.logger.logWithPrefix("FTC", "mv: both names do not fit one frame");
         return;
     }
     memcpy(buf, oldPath, lo + 1);
     memcpy(buf + lo + 1, newPath, ln + 1);
-    ftcSimpleCmd(pa, FTC_CMD_RENAME, "mv", buf, (uint8_t)(lo + 1 + ln + 1), newPath);
+    ftcSimpleCmd(pa, FTC_CMD_RENAME, "mv", buf, (uint8_t)need, newPath);
 }
 
     #ifdef OPENKNX_FTC_SECURITY
@@ -2251,6 +2275,10 @@ void FileTransferClient::requestLogin(uint16_t pa, const char *pw)
         return;
     }
     _ftcLogout = false;
+    // The feature byte CARRIES the access state (WRITES_DISABLED / AUTH_REQUIRED), so a login makes any
+    // cached copy wrong. It was never invalidated anywhere, and a stale "writes disabled" then refused
+    // the fwupdate AFTER a successful login -- the transfer ran, the apply silently did not.
+    _ftcFeatValid = false;
     knx.bau().ftcSetResponseCallback(ftcOnResponse);
     _ftcTarget = pa;
     ftcStatusReset(FtcPhase::Ping, pa, "login");
@@ -2299,6 +2327,7 @@ void FileTransferClient::authAfterProbe(uint8_t features, bool answered)
 void FileTransferClient::requestLogout(uint16_t pa)
 {
     _ftcLogout = true;
+    _ftcFeatValid = false; // same reason as in requestLogin(): the access state just changed
     knx.bau().ftcSetResponseCallback(ftcOnResponse);
     _ftcTarget = pa;
     ftcStatusReset(FtcPhase::Ping, pa, "logout");
@@ -2317,6 +2346,10 @@ void FileTransferClient::ftcFinish()
     if (_ftcState == FtcScanPost && !_scanPostDone) return;
 
     _ftcHardDeadline = 0; // every op terminates here -> clear so a stale deadline never trips a later info-ga/scan
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    _ftcDeltaSend = false; // per-op: the next transfer is a plain one unless it says otherwise
+    _ftcDeltaDeadline = 0;
+#endif
 
     // Close the T_Connect the info-ga memory walk opened, if any. Only OURS: ftcScanConnect self-guards
     // against an existing connection, so _gaConnected is never set for someone else's ETS session.
@@ -2379,6 +2412,17 @@ void FileTransferClient::ftcApplyDecide()
         ftcFinish();
         return;
     }
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // A patch handed to a target that cannot interpret it would be flashed as firmware. The base was
+    // already confirmed before the transfer; this is the second half of the same guard, in case the
+    // feature byte was refreshed in between.
+    if (_ftcDeltaSend && !(_ftcFeatBits & 0x80))
+    {
+        openknx.logger.logWithPrefix("FTC", "target does not support delta updates -- apply NOT triggered");
+        ftcFinish();
+        return;
+    }
+#endif
     if (_ftcFeatBits & 0x2) // Update -> the target (RP2040 FTM) can arm PicoOTA and reboot
         ftcTriggerFwUpdate();
     else
@@ -2387,6 +2431,57 @@ void FileTransferClient::ftcApplyDecide()
         ftcFinish();
     }
 }
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+/**
+ * @brief Read the base a patch expects out of its own header.
+ * @details This is what makes a patch self-describing: length and checksum of the image it was built
+ *          against travel with it, so the sender can ask the target "is this you?" without holding a
+ *          single firmware binary of its own.
+ */
+bool FileTransferClient::ftcReadPatchHeader(const char *path)
+{
+    const char *stripped = path;
+    const FtcBackend *be = ftcResolveBackend(path, &stripped);
+    if (be == nullptr || be->src.open == nullptr || be->src.read == nullptr) return false;
+    _activeSrc = &be->src;
+    const int32_t sz = _activeSrc->open(path);
+    if (sz < (int32_t)FirmwarePatch::HDR_SIZE)
+    {
+        ftcCloseSource();
+        return false;
+    }
+    uint8_t hdr[FirmwarePatch::HDR_SIZE];
+    const int got = _activeSrc->read(0, hdr, (uint8_t)sizeof(hdr));
+    ftcCloseSource();
+    if (got != (int)sizeof(hdr)) return false;
+    if (memcmp(hdr, FirmwarePatch::MAGIC, 4) != 0) return false;
+    auto rd = [&](uint8_t o) {
+        return (uint32_t)hdr[o] | ((uint32_t)hdr[o + 1] << 8) | ((uint32_t)hdr[o + 2] << 16) |
+               ((uint32_t)hdr[o + 3] << 24);
+    };
+    _ftcDeltaSrcLen = rd(8);
+    _ftcDeltaSrcCrc = rd(12);
+    return _ftcDeltaSrcLen != 0;
+}
+
+/** @brief Ask the target whether it is running the image this patch expects (cmd 106). */
+void FileTransferClient::ftcDeltaProbeSend()
+{
+    _ftcTx[0] = (uint8_t)(_ftcDeltaSrcLen & 0xFF);
+    _ftcTx[1] = (uint8_t)((_ftcDeltaSrcLen >> 8) & 0xFF);
+    _ftcTx[2] = (uint8_t)((_ftcDeltaSrcLen >> 16) & 0xFF);
+    _ftcTx[3] = (uint8_t)((_ftcDeltaSrcLen >> 24) & 0xFF);
+    _ftcTx[4] = (uint8_t)(_ftcDeltaSrcCrc & 0xFF);
+    _ftcTx[5] = (uint8_t)((_ftcDeltaSrcCrc >> 8) & 0xFF);
+    _ftcTx[6] = (uint8_t)((_ftcDeltaSrcCrc >> 16) & 0xFF);
+    _ftcTx[7] = (uint8_t)((_ftcDeltaSrcCrc >> 24) & 0xFF);
+    if (ftcSend(FTC_CMD_FW_PROBE, 8))
+        _ftcState = FtcDeltaProbe;
+    else
+        ftcAbort("cannot reach the target");
+}
+#endif
 
 /** @brief Send FwUpdate(101) with the remote path (fire-and-forget: no L7 reply) + a loud log, then finish. */
 void FileTransferClient::ftcTriggerFwUpdate()
@@ -2406,6 +2501,56 @@ void FileTransferClient::ftcTriggerFwUpdate()
 
 // --- request* : the public API the console drives. The console has already gated diagnoseKo, the
 // "ftc " prefix, the PA format and the busy state, so these assume a valid, idle client. ---
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+/**
+ * @brief Send a prepared patch to another device and have it applied there.
+ * @details Two things are settled before a byte moves, because both cost minutes if found out late: the
+ *          target has to understand patches at all, and it has to be running exactly the image this patch
+ *          was built against. A device that does not advertise the feature is never sent a patch -- it
+ *          would flash it as firmware.
+ */
+void FileTransferClient::requestDeltaSend(uint16_t pa, const char *localPatch, const char *remoteName)
+{
+    if (!ftcReadPatchHeader(localPatch))
+    {
+        openknx.logger.logWithPrefixAndValues("FTC", "not a patch file: %s", localPatch);
+        return;
+    }
+    strncpy(_ftcDeltaLocal, localPatch, sizeof(_ftcDeltaLocal) - 1);
+    _ftcDeltaLocal[sizeof(_ftcDeltaLocal) - 1] = 0;
+    if (remoteName != nullptr && remoteName[0] != 0)
+        snprintf(_ftcDeltaRemote, sizeof(_ftcDeltaRemote), "%s", remoteName);
+    else
+        snprintf(_ftcDeltaRemote, sizeof(_ftcDeltaRemote), "/fw.okd");
+
+    knx.bau().ftcSetResponseCallback(ftcOnResponse);
+    _ftcTarget = pa;
+    _ftcDeltaSend = true;
+    _ftcRespPending = false;
+    _ftcDeltaDeadline = millis() + FTC_TIMEOUT; // one bound for the whole probe, never re-armed
+    ftcStatusReset(FtcPhase::Info, pa, _ftcDeltaLocal);
+    ftcStatusMsg("checking the target...");
+    openknx.logger.logWithPrefixAndValues("FTC", "delta -> %u.%u.%u: patch expects image %u B, crc %08X",
+                                          FTC_PA_ARGS(pa), (unsigned)_ftcDeltaSrcLen, (unsigned)_ftcDeltaSrcCrc);
+
+    if (_ftcFeatValid && _ftcFeatPa == pa)
+    {
+        if (!(_ftcFeatBits & 0x80))
+        {
+            openknx.logger.logWithPrefix("FTC", "target does not support delta updates -- send the full image instead");
+            ftcFinish();
+            return;
+        }
+        ftcDeltaProbeSend();
+        return;
+    }
+    if (ftcSend(FTC_CMD_CHECK_FEATURES, 0))
+        _ftcState = FtcDeltaFeat;
+    else
+        ftcAbort("cannot reach the target");
+}
+#endif
 
 void FileTransferClient::requestCancel()
 {
@@ -2433,7 +2578,7 @@ void FileTransferClient::requestCancel()
         _scanPostDone = true;
         openknx.logger.logWithPrefixAndValues("FTC", "scan cancelled at %u/%u addresses",
                                               (unsigned)_scanProbed, (unsigned)_status.total);
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
         scanReport();
 #endif
         ftcFinish();
@@ -2890,7 +3035,7 @@ void FileTransferClient::ftcPrintFsBar(uint32_t total, uint32_t used, bool full)
  * DeviceDescriptor gives the mask (class); ModuleVersion(100) + CheckFeatures(102) prove an FTM server
  * and its capabilities; a PropertyValue read of the app number resolves the exact model.
  */
-#if OPENKNX_FTC_DEVICEINFO
+#ifdef OPENKNX_FTC_DEVICEINFO
 void FileTransferClient::requestDeviceInfo(uint16_t pa)
 {
     ftcDevInfoBegin(pa, false);
@@ -3116,11 +3261,18 @@ void FileTransferClient::ftcDevReport()
     // --- File-Transfer section: is there a KnxFileTransfer server, and what can it do ---
     if (_devHasVer)
     {
-        char feat[32] = {0};
-        if (_devFeat & 0x1) strcat(feat, "Resume ");
-        if (_devFeat & 0x2) strcat(feat, "Update ");
-        if (_devFeat & 0x4) strcat(feat, "Fast ");
-        if (_devFeat & 0x8) strcat(feat, "Console ");
+        // Every bit the server can set, or the reader is told a device cannot do something it just
+        // offered. Sized for all of them at once: the four names added here take the longest possible
+        // line from 27 to 55 characters, which the previous 32-byte buffer would not have survived.
+        char feat[72] = {0};
+        if (_devFeat & 0x01) strcat(feat, "Resume ");
+        if (_devFeat & 0x02) strcat(feat, "Update ");
+        if (_devFeat & 0x04) strcat(feat, "Fast ");
+        if (_devFeat & 0x08) strcat(feat, "Console ");
+        if (_devFeat & 0x40) strcat(feat, "Gzip ");
+        if (_devFeat & 0x80) strcat(feat, "Delta ");
+        if (_devFeat & 0x10) strcat(feat, "Password ");
+        if (_devFeat & 0x20) strcat(feat, "Locked ");
         if (!feat[0]) strcpy(feat, "(none)");
         ftcOut(CONSOLE_HEADLINE_COLOR, "File-Transfer");
         ftcOut(0, "  Module version: %u.%u.%u", _devVerMaj, _devVerMin, _devVerRev);
@@ -3717,7 +3869,7 @@ void FileTransferClient::ftcCloseSink()
     _dlSinkOpen = false;
 }
 
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_CLIENT
 // FileDownload open: [0x00][0x00][pkg][path\0]. The answer is [0x00][size:4 BE][0x00].
 void FileTransferClient::ftcDlSendOpen()
 {
@@ -3906,7 +4058,7 @@ void FileTransferClient::requestDownload(uint16_t pa, const char *remotePath, co
     _ftcState = FtcDownloadOpen;
     _ftcSince = millis();
 }
-#endif // OPENKNX_FTC_DOWNLOAD
+#endif // OPENKNX_FTC_CLIENT
 
 // `ftc <pa> fwupdate <remote>`: trigger the target to apply an already-uploaded firmware (reboots it).
 void FileTransferClient::requestFwUpdate(uint16_t pa, const char *remotePath)
@@ -3921,6 +4073,7 @@ void FileTransferClient::requestFwUpdate(uint16_t pa, const char *remotePath)
     strncpy(_ftcPath, remotePath, sizeof(_ftcPath) - 1);
     _ftcPath[sizeof(_ftcPath) - 1] = 0;
     _ftcRespPending = false;
+    _ftcApplyRetried = false; // one retry per fwupdate, not per state entry
     ftcStatusReset(FtcPhase::Info, pa, _ftcPath);
     ftcStatusMsg("checking the file before apply...");
 
@@ -3935,7 +4088,7 @@ void FileTransferClient::requestFwUpdate(uint16_t pa, const char *remotePath)
         openknx.logger.logWithPrefix("FTC", "send failed");
 }
 
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_CLIENT
 // Download state group, extracted from loop() (verbatim; loop() dispatches here).
 void FileTransferClient::loopDownload()
 {
@@ -4262,9 +4415,9 @@ void FileTransferClient::loopDownload()
         default: break;
     }
 }
-#endif // OPENKNX_FTC_DOWNLOAD
+#endif // OPENKNX_FTC_CLIENT
 
-#if OPENKNX_FTC_DEVICEINFO
+#ifdef OPENKNX_FTC_DEVICEINFO
 // loopDeviceInfo state group, extracted from loop() (verbatim).
 void FileTransferClient::loopDeviceInfo()
 {
@@ -4302,7 +4455,7 @@ void FileTransferClient::loopDeviceInfo()
                 _ftcTxLen = 0;
                 if (ftcSend(FTC_CMD_MODULE_VERSION, 0))
                     _ftcState = FtcDevVer;
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
                 else if (_scanInfoActive) // scan FULL probe: cannot send -> bail to the next device, not abort the scan
                     ftcScanInfoBail();
 #endif
@@ -4488,7 +4641,7 @@ void FileTransferClient::loopDeviceInfo()
                     ftcDevSendProp();
                     _ftcState = FtcDevProp;
                 }
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
                 else if (_scanInfoActive) // scan FULL probe: nothing answered -> bail to the next device
                 {
                     ftcScanInfoBail();
@@ -4625,7 +4778,7 @@ void FileTransferClient::loopDeviceInfo()
 
             if (_devPropStep >= FTC_DEV_PROP_COUNT)
             {
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
                 if (_scanInfoActive)
                 {
                     ftcScanInfoBail();
@@ -4973,7 +5126,7 @@ void FileTransferClient::loopDeviceInfo()
 }
 #endif // OPENKNX_FTC_DEVICEINFO
 
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
 // loopScan state group, extracted from loop() (verbatim).
 void FileTransferClient::loopScan()
 {
@@ -6163,12 +6316,16 @@ void FileTransferClient::loop(bool configured)
             _apduNext = FtcIdle;
             _ftcRespPending = false; // the probe window may have parked a stale command answer
             _ftcSince = millis();
+#ifdef OPENKNX_FTC_CLIENT
+            // Gated like its definition: without downloads this branch is unreachable, and referring to
+            // a function that was compiled out fails at LINK time -- which is how the switch was broken.
             if (next == FtcDownloadOpen)
             {
                 ftcDlSendOpen();
                 _ftcState = FtcDownloadOpen;
                 return;
             }
+#endif
             if (_ftcMode != 0 && ftcBeginFeatureProbe()) return;
             ftcSendInfo();
             _ftcInfoDeadline = millis() + FTC_FAST_STALL_MS;
@@ -6193,6 +6350,10 @@ void FileTransferClient::loop(bool configured)
                 openknx.logger.logWithPrefixAndValues("FTC", "  writes %s%s",
                                                       (f & 0x20) ? "disabled" : "allowed",
                                                       (f & 0x10) ? " | password required" : "");
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+                openknx.logger.logWithPrefixAndValues("FTC", "  gzip update %s | delta update %s",
+                                                      (f & 0x40) ? "yes" : "no", (f & 0x80) ? "yes" : "no");
+#endif
                 _status.ok = true;
                 ftcFinish();
             }
@@ -6253,6 +6414,7 @@ void FileTransferClient::loop(bool configured)
             if (_ftcRespPending)
             {
                 _ftcRespPending = false;
+                if (_ftcRespProp != _ftcSentProp) return; // not the answer to what we sent
                 // SD/EFC CRC still computing on the target (0x02, carries the size) -> poll FileInfo again.
                 // Keep the no-answer timer fresh; a server that STOPS answering is caught by FTC_TIMEOUT below.
                 if (_ftcRespLen >= 5 && _ftcResp[0] == 0x02)
@@ -6528,6 +6690,7 @@ void FileTransferClient::loop(bool configured)
             if (_ftcRespPending)
             {
                 _ftcRespPending = false;
+                if (_ftcRespProp != _ftcSentProp) return; // not the answer to what we sent
                 if (ftcDropDup()) return;
                 _ftcPerfRemoved = (_ftcRespLen >= 1 && _ftcResp[0] == 0x00);
                 ftcPrintSummary();
@@ -6565,6 +6728,18 @@ void FileTransferClient::loop(bool configured)
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
+                // Ask once more before giving up. A target that has just been polled for half a minute --
+                // which is exactly what knxOTA does while it watches for the restart -- can be busy enough
+                // to miss one frame, and refusing to trigger over a single silence sent the user off to
+                // run fwupdate by hand for no reason.
+                if (!_ftcApplyRetried)
+                {
+                    _ftcApplyRetried = true;
+                    openknx.logger.logWithPrefix("FTC", "fwupdate: no answer to the existence check -- asking once more");
+                    const size_t n = strlen(_ftcPath) + 1;
+                    memcpy(_ftcTx, _ftcPath, n);
+                    if (ftcSend(FTC_CMD_FILE_INFO, (uint8_t)n)) return; // stays in FtcApplyCheck
+                }
                 openknx.logger.logWithPrefix("FTC", "fwupdate: no answer to the existence check -- not triggering");
                 ftcFinish();
             }
@@ -6591,6 +6766,87 @@ void FileTransferClient::loop(bool configured)
             }
             return;
         }
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+        case FtcDeltaFeat:
+        {
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_CHECK_FEATURES) return; // stale mirror -> keep waiting
+                _ftcFeatPa = _ftcTarget;
+                _ftcFeatBits = (_ftcRespLen >= 1) ? _ftcResp[0] : 0;
+                _ftcFeatValid = true;
+                if (!(_ftcFeatBits & 0x80))
+                {
+                    openknx.logger.logWithPrefix("FTC", "target does not support delta updates -- send the full image instead");
+                    ftcFinish();
+                    return;
+                }
+                ftcDeltaProbeSend();
+            }
+            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            {
+                openknx.logger.logWithPrefix("FTC", "target did not answer the feature query -- no patch sent");
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcDeltaProbe:
+        {
+            // The target checksums its whole image cooperatively, so 0x02 means "ask again". The retry is
+            // bounded by ONE deadline taken when the probe started: re-arming it on every 0x02 would keep
+            // a stuck target in this state for ever.
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_FW_PROBE) return; // stale mirror -> keep waiting
+                const uint8_t status = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                if (status == 0x02) // still computing
+                {
+                    if ((int32_t)(millis() - _ftcDeltaDeadline) >= 0)
+                    {
+                        ftcAbort("target still checking its image");
+                        return;
+                    }
+                    ftcDeltaProbeSend();
+                    return;
+                }
+                if (status == 0x00)
+                {
+                    openknx.logger.logWithPrefix("FTC", "base confirmed -- sending the patch");
+                    _ftcState = FtcIdle;
+                    requestUpload(_ftcTarget, _ftcDeltaLocal, 0, false, 0, true, _ftcDeltaRemote);
+                    return;
+                }
+                if (status == 0x42)
+                    openknx.logger.logWithPrefix("FTC", "target runs a different image than this patch expects -- send the full image instead");
+                else if (status == 0x05)
+                    openknx.logger.logWithPrefixAndValues("FTC", "the target's last update failed, reason %u",
+                                                          (unsigned)((_ftcRespLen >= 2) ? _ftcResp[1] : 0));
+                else if (status == 0x03)
+                {
+                    // The byte count comes with the answer; printing it is what tells a stalled job from
+                    // a slow one, and that is the first thing anyone asks.
+                    const uint32_t done = (_ftcRespLen >= 5)
+                                              ? ((uint32_t)_ftcResp[1] | ((uint32_t)_ftcResp[2] << 8) |
+                                                 ((uint32_t)_ftcResp[3] << 16) | ((uint32_t)_ftcResp[4] << 24))
+                                              : 0;
+                    openknx.logger.logWithPrefixAndValues("FTC", "the target is already applying an update (%u bytes rebuilt)",
+                                                          (unsigned)done);
+                }
+                else
+                    openknx.logger.logWithPrefixAndValues("FTC", "target refused the probe, status 0x%02X", status);
+                ftcFinish();
+            }
+            else if ((int32_t)(millis() - _ftcDeltaDeadline) >= 0)
+            {
+                ftcAbort("no answer to the base check");
+            }
+            return;
+        }
+#endif
 
         case FtcInfo:
         {
@@ -6746,6 +7002,7 @@ void FileTransferClient::loop(bool configured)
             if (_ftcRespPending)
             {
                 _ftcRespPending = false;
+                if (_ftcRespProp != _ftcSentProp) return; // not the answer to what we sent
                 if (ftcDropDup()) return; // ignore a mirrored duplicate result
                 _status.ok = (_ftcRespLen >= 1 && _ftcResp[0] == 0x00);
                 if (_ftcExistsQuery)
@@ -6776,6 +7033,9 @@ void FileTransferClient::loop(bool configured)
         {
             if (_ftcRespPending)
             {
+                // A ping asks whether the TARGET answers, so a leftover answer to something else must not
+                // count as one. The state used to accept anything that arrived.
+                if (_ftcRespProp != _ftcSentProp) { _ftcRespPending = false; return; }
                 openknx.logger.logWithPrefixAndValues("FTC", "Response obj=%u prop=%u len=%u", _ftcRespObj, _ftcRespProp, _ftcRespLen);
                 if (_ftcRespLen > 0)
                     openknx.logger.logWithPrefixAndValues("FTC", "  result=0x%02X", _ftcResp[0]);
@@ -6837,6 +7097,7 @@ void FileTransferClient::loop(bool configured)
             if (_ftcRespPending)
             {
                 _ftcRespPending = false;
+                if (_ftcRespProp != _ftcSentProp) return; // not the answer to what we sent
 
                 // Answers arrive duplicated (measured, cause unexplained -- not the bus repeating). Filter
                 // stale echoes here. A 1-byte NON-zero answer is a REAL target failure (e.g. FS full), not
@@ -6972,7 +7233,7 @@ void FileTransferClient::loop(bool configured)
                 // resets _ftcTransferRetries (fresh-request semantics), so save+restore the auto-retry count
                 // across it -- exactly the counter must survive, only a real user request resets it. ALWAYS
                 // resumes (noResume=false), never a fresh truncate, even if the original was no-resume.
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_CLIENT
                 if (_ftcDownload)
                 {
                     const uint8_t savedRetries = _ftcTransferRetries;
@@ -6993,14 +7254,14 @@ void FileTransferClient::loop(bool configured)
             return;
         }
 
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
         case FtcScan:
         case FtcScanCo:
         case FtcScanPost:
             loopScan();
             return;
 #endif
-#if OPENKNX_FTC_DEVICEINFO
+#ifdef OPENKNX_FTC_DEVICEINFO
         case FtcDevDescr:
         case FtcDevCoConn:
         case FtcDevCoDescr:
@@ -7019,7 +7280,7 @@ void FileTransferClient::loop(bool configured)
             loopDeviceInfo();
             return;
 #endif
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_CLIENT
         case FtcDownloadOpen:
         case FtcDownloadCrcPrefix:
         case FtcDownloadChunk:

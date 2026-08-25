@@ -6,9 +6,10 @@
  * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
  *              Licensed under GNU GPL v3.0
  */
+#include "FileTransferConfig.h" // FIRST: the switch below is decided there, not on the command line
 #include "OpenKNX.h"
 
-#ifdef OPENKNX_FTC
+#ifdef OPENKNX_FTC_CLIENT
 
 // The "ftc" console: parsing, validation and the colored help, split from the transfer logic in
 // FileTransferClient (as DdcConsole/DeviceDisplay). Only ever calls the client's public request* API.

@@ -5,9 +5,10 @@
  * @copyright   Copyright (c) 2026, Erkan Çolak (erkan@colak.de)
  *              Licensed under GNU GPL v3.0
  */
+#include "FileTransferConfig.h" // switches first -- every guard below depends on it
 #include "FileTransferClientConsole.h"
 
-#ifdef OPENKNX_FTC
+#ifdef OPENKNX_FTC_CLIENT
     #include "FileTransferClient.h"
     #include "FtcXferOptions.h"
     #include <ctype.h>
@@ -51,7 +52,7 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Presence & info");
     c.ftcOut(0, "  %-33s  %s", "ping", "Is the target there? (module-version round trip)");
-#if OPENKNX_FTC_DEVICEINFO
+#ifdef OPENKNX_FTC_DEVICEINFO
     c.ftcOut(0, "  %-33s  %s", "info | i", "Device fingerprint: mask/class, FTM version, features");
     c.ftcOut(0, "  %-33s  %s", "info ga", "Group communication: GA table + com-object links (not on BCU1 / mask 0x0012)");
 #endif
@@ -78,7 +79,7 @@ void FileTransferClientConsole::showUsage()
 
     c.ftcOut(H, "Transfer");
     c.ftcOut(0, "  %-33s  %s", "send | upload <src> [pkg] [mode] [flags]", "Upload - auto-resume a partial; mode safe|fast, fast w<N> pins the window; flags below");
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_CLIENT
     c.ftcOut(0, "  %-33s  %s", "get | receive | download <rem> [local]", "Download a file (always fresh)");
 #endif
     c.ftcOut(0, "  %-33s  %s", "perf [kb] [pkg] [mode] [sd|efc] [w<N>]", "Speed test: push a pattern, report B/s (sd|efc = target drive; fast w<N> = fixed window; keep = leave file)");
@@ -93,7 +94,7 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "");
 
     c.ftcOut(H, "Global:  ftc <cmd>");
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
     c.ftcOut(0, "  %-42s  %s", "scan [a.l | a b] [deep] [ets] [pace ms]", "Discover devices (ets = connection-oriented, finds more)");
 #endif
     c.ftcOut(0, "  %-33s  %s", "     [openknx | info] [save <path>]", "openknx=flag OpenKNX (mfr 0x00FA)  info=full per-device info  save=write CSV to /|sd/|efc/");
@@ -123,7 +124,7 @@ void FileTransferClientConsole::showUsage()
 #ifdef OPENKNX_FTC_CONSOLE
     c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 console", "Interactive console tunnel over KNX");
 #endif
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
     c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets openknx", "Scan and discover OpenKNX devices on line 1.1 (connection-oriented)");
     c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets save /scan.csv", "Discover devices on line 1.1 and write CSV to LittleFS");
 #endif
@@ -157,7 +158,7 @@ void FileTransferClientConsole::showStatus()
  * Forms: bare (own line), <a.l>, <a.l.d>, <from> <to> range, `full yes` (gated once),
  * `area <a> yes ...` (gated twice).
  */
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
 void FileTransferClientConsole::showScan(const std::string &cmd)
 {
     if (_client.isBusy())
@@ -318,7 +319,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         return true;
     }
     // "ftc scan ..." -- no PA first; sweeps a range of addresses. Own gates for the wide sweeps.
-#if OPENKNX_FTC_SCAN
+#ifdef OPENKNX_FTC_SCAN
     if (argc >= 1 && strcmp(paStr, "scan") == 0)
     {
         showScan(cmd);
@@ -448,7 +449,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
     if (strcmp(sub, "info") == 0 || strcmp(sub, "i") == 0)
     {
-#if OPENKNX_FTC_DEVICEINFO
+#ifdef OPENKNX_FTC_DEVICEINFO
         if (argc >= 3 && strcmp(arg, "ga") == 0) // group communication: GA table + com-object links
         {
             _client.requestGroupComm(pa);
@@ -471,7 +472,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestDelete(pa, arg);
         return true;
     }
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_CLIENT
     if (strcmp(sub, "receive") == 0 || strcmp(sub, "download") == 0 || strcmp(sub, "get") == 0)
     {
         // ftc <pa> receive|download|get <remote> [local] [pkg] [verbose]  -- pull a file onto the local sink (SD).
@@ -564,6 +565,23 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         _client.requestFwUpdate(pa, arg);
         return true;
     }
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // `ftc <pa> delta <local patch> [remote name]` -- send a prepared patch to another device and have it
+    // applied. The patch may sit anywhere this device can read from, an SD card included.
+    if (strcmp(sub, "delta") == 0)
+    {
+        if (argc < 3)
+        {
+            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> delta <patch> [remote]   e.g. ftc 5.0.3 delta sd/fw/1.1.0.okd");
+            return true;
+        }
+        char remote[80] = {0};
+        sscanf(cmd.c_str(), "ftc %*s %*s %*s %79s", remote); // optional: where it is staged on the target
+        _client.requestDeltaSend(pa, arg, remote);
+        return true;
+    }
+#endif
 
     if (strcmp(sub, "perf") == 0)
     {

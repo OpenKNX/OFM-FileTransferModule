@@ -7,7 +7,7 @@
 Add this module to make your OpenKNX device an FTC **target**: upload/download files, manage the flash and
 run a firmware update — plus, optionally, an **interactive remote console** — all **over the KNX / KNXnet-IP
 tunnel**. Drive it **device → device** (the on-device `ftc` console on any OpenKNX device built with
-`-D OPENKNX_FTC`) **or from a PC** with the native cross-platform `ftc` CLI — **no PC is required in the chain**.
+`-D OPENKNX_FTC_CLIENT`) **or from a PC** with the native cross-platform `ftc` CLI — **no PC is required in the chain**.
 
 ## Step 1 — check the firmware fits for FW-update-over-KNX
 The build prints a fit check: the compressed firmware image must fit in the device's filesystem (that is
@@ -47,7 +47,7 @@ void setup()
 ```
 
 ## Step 3 — drive it (device → device or from a PC)
-**Device → device** — build any OpenKNX device with `-D OPENKNX_FTC` and it gains the on-device `ftc`
+**Device → device** — build any OpenKNX device with `-D OPENKNX_FTC_CLIENT` and it gains the on-device `ftc`
 console client (PA → PA, over the bus, no PC):
 ```
 ftc <pa> ll                # list files on another device
@@ -70,7 +70,7 @@ KNXnet/IP tunnel on the host) differs.
   device is a target out of the box.
 - **Interactive console** — add **`-D OPENKNX_FTC_CONSOLE`** on the target; it opens the console tunnel and
   implies the log ring / web-console (and pulls in the access-control gate, see the switch table above).
-- **`fast` / windowed upload** works out of the box (`OPENKNX_FTC_FASTUPLOAD`, on by default). Over a
+- **`fast` / windowed upload** works out of the box (`OPENKNX_FTC_FASTUPLOAD`, part of every profile). Over a
   third-party (non-OpenKNX) interface it transparently degrades to the classic path; the biggest gains are
   over an OpenKNX interface / router.
 
@@ -85,38 +85,48 @@ KNXnet/IP tunnel on the host) differs.
 
 ## Build switches (feature gates)
 
-**Why:** to **save flash**. The module runs on **any OpenKNX device** — including flash-tight ones like a
-2 MB RP2040 — so every optional feature can be compiled out to reclaim space you'd rather give to your own
-application. Concretely: `OPENKNX_FTC_MINIMAL` frees **~4.4 KB** of server code, and dropping the client
-extras (`_SCAN` / `_DEVICEINFO`) frees **~28 KB** on a 2 MB RP2040. Nothing is lost in transfer correctness
-— only features you don't use.
+**Why:** to **save flash**. The module runs on any OpenKNX device, including flash-tight ones like a 2 MB
+RP2040, so every optional feature can be compiled out and given back to your own application.
 
-Every optional feature is **on by default (opt-out)**, so adding the module changes nothing until you strip
-it down: a minimal device drops everything except the core with `-D OPENKNX_FTC_MINIMAL`, or you pin a
-single gate with `-D OPENKNX_FTC_…=0`. All defaults and couplings live in
-[`FileTransferConfig.h`](src/FileTransferConfig.h).
+**A switch is on when it is set and off when it is not** -- no values, no `=0`, nothing to take away.
+Set nothing and you still get the server core.
 
-**Core — always compiled, no switch:** FwUpdate, classic File Upload, File Info (+ cooperative CRC),
-Filesystem Info, Format / Exists / Rename / Delete, Module Version, Check Features, Cancel.
+**Core -- always compiled, no switch:** FwUpdate, classic (safe) File Upload, File Info (+ cooperative
+CRC), Filesystem Info, Format / Exists / Rename / Delete, Module Version, Check Features, Cancel. This
+core answers **without access control** -- `SECURITY`, and with it every profile, is what turns writes
+into an authenticated operation.
 
-| Switch | Default | Enables | Off → |
-|---|---|---|---|
-| `OPENKNX_FTC` | off | the on-device **`ftc`** console client (PA → PA); shares its core with the desktop `ftc-cli` | device is an FTC **target** only, no client |
-| `OPENKNX_FTC_CONSOLE` | off | interactive console tunnel (obj 160) — **implies `OPENKNX_FTC_SECURITY`** | no console |
-| `OPENKNX_FTC_SECURITY` | off | password access control (login / logout, ETS-gated) | writes open (unless a console pulls it in) |
-| `OPENKNX_FTC_DOWNLOAD` | **on** | File Download (41) | no reading files off the device |
-| `OPENKNX_FTC_FASTUPLOAD` | **on** | fast / windowed upload (44 / 45) + the CheckFeatures FAST bit | classic upload only (the client auto-falls-back) |
-| `OPENKNX_FTC_DIROPS` | **on** | Dir List / Create / Delete (80 / 81 / 82) | no directory browsing |
-| `OPENKNX_FTC_SCAN` | **on** (client) | on-device bus scan | — |
-| `OPENKNX_FTC_DEVICEINFO` | **on** (client) | `ftc <pa> info` device fingerprint + GA report | — |
-| `OPENKNX_SDCARD` / `OPENKNX_EXTFLASH` | off | `sd/` / `efc/` drive backends (+ their File Info CRC) | LittleFS only |
-| `OPENKNX_WEBSERVER` | (from OFM-Network) | the render-agnostic **Info-API** struct mirror a web / panel frontend draws from | mirror not compiled |
+### Pick a profile
 
-- `OPENKNX_FTC_MINIMAL` flips every **on-by-default** extra to off → the bare FW-update + console core.
-- `OPENKNX_FTC_CONSOLE` pulls in `OPENKNX_FTC_SECURITY` so a console take-over is never unauthenticated; opt
-  out deliberately with `-D OPENKNX_FTC_CONSOLE_INSECURE` (dev / trusted bus).
-- The client sub-gates (`_SCAN` / `_DEVICEINFO`) only apply when `OPENKNX_FTC` is set — a device without the
-  client compiles none of it anyway.
+```ini
+; a normal end device
+-D OPENKNX_FTC_PROFILE_DEVICE
+-D OPENKNX_FTC_CONSOLE
+
+; interface, router, ftc-cli host
+-D OPENKNX_FTC_PROFILE_MANAGER
+-D OPENKNX_FTC_CLIENT
+-D OPENKNX_FTC_CONSOLE
+```
+
+`DEVICE` adds `SECURITY`, `DOWNLOAD`, `DIROPS`, `FASTUPLOAD` (and `GZIP_UPDATE` on ESP32).
+`MANAGER` adds `DELTA_UPDATE`, `SCAN` and `DEVICEINFO` on top.
+Setting no profile at all is the CUSTOM route: pick the individual switches yourself.
+
+**`CLIENT` and `CONSOLE` must be written out even under a profile.** They are read outside this module
+-- `CLIENT` in `lib/knx` (9 files), `CONSOLE` in `lib/OGM-Common` (`Console.h`, where it gates a data
+member) -- and neither library includes this module's header. A macro defined there would never reach
+them. Forgetting a line is caught at build time, not left as a silent half-configuration.
+
+`DELTA_UPDATE` is in no end-device profile on purpose: it depends on the board's free filesystem, which
+no profile can know. The build prints a knxOTA report telling you whether it fits.
+
+**The full table** -- what every switch does, what it costs on RP2040 and ESP32, and the ten
+misconfigurations the build refuses -- is in **[`doc/FLAGS.md`](doc/FLAGS.md)**; the reasoning behind it
+in [`doc/CONCEPT-defines.md`](doc/CONCEPT-defines.md).
+
+Two more, from other modules: `OPENKNX_SDCARD` / `OPENKNX_EXTFLASH` add the `sd/` and `efc/` drive
+backends, `OPENKNX_WEBSERVER` (OFM-Network) the struct mirror a web frontend draws from.
 
 ## Good to know
 The FileTransferModule (FTC) server uses the following FunctionProperties.  

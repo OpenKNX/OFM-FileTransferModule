@@ -5,7 +5,13 @@
  *              Licensed under GNU GPL v3.0
  */
 #if defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_ESP32)
+#include "FileTransferConfig.h" // switches first -- every guard below depends on it
 #include "FileTransferModule.h"
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+extern "C" {
+    #include "third_party/uzlib/uzlib.h"
+}
+#endif
 #include "versions.h"
 #ifdef OPENKNX_SDCARD
     #include "SdFileStore.h" // sd::fileStore for the server-side `ll sd/…` listing (SdFat-free header)
@@ -79,6 +85,10 @@ void FileTransferModule::loop(bool configured)
 #ifdef OPENKNX_FTC_CONSOLE
     conLoop();
 #endif
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    deltaLoop(); // advance a running delta apply by one slice (non-blocking)
+    probeLoop(); // advance the source checksum a client is asking about (non-blocking)
+#endif
     crcLoop(); // advance a cooperative file-CRC job (LittleFS/SD/EFC), if one is running (non-blocking)
 }
 
@@ -103,7 +113,12 @@ enum class FtmCommands
     CheckFeatures,
     AuthChallenge = 103, // FTC access control: request a nonce (OPENKNX_FTC_SECURITY)
     AuthResponse = 104,  // FTC access control: submit the MAC over the nonce
-    AuthLogout = 105     // FTC access control: close the authorized window immediately
+    AuthLogout = 105, // FTC access control: close the authorized window immediately
+    // 106 is taken: FwProbe (delta update). Kept out of the list unless that feature is compiled in,
+    // because merely naming it here shifts this switch's jump table -- but do not reuse the number.
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    FwProbe = 106 // delta update: does the running image match (len, crc)? also carries job status
+#endif
 };
 
 // --- Drive routing: a path targets LittleFS (default), the SD card ("sd/…") or ext-flash ("efc/…"). Each op
@@ -199,7 +214,11 @@ bool ftmRename(const char *oldPath, const char *newPath)
 {
     const char *ro, *rn;
     const uint8_t d = ftmDrive(oldPath, &ro);
-    ftmDrive(newPath, &rn); // same drive assumed; use the stripped new-path
+    const uint8_t dn = ftmDrive(newPath, &rn);
+    // A rename never crosses a drive. When the new path names one explicitly and it is not the old path's,
+    // refuse: assuming "same drive" renames on the SOURCE drive under the stripped name, hitting a file the
+    // caller never asked for. A new path WITHOUT a prefix keeps its old meaning: the same drive.
+    if (dn != FD_INT && dn != d) return false;
     switch (d)
     {
 #ifdef OPENKNX_SDCARD
@@ -514,6 +533,13 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         // Password stage -> tell the client to authenticate; otherwise writes are simply off (Off handled above).
         resultData[0] = (secStage() == FTM_SEC_PW) ? ST_AUTH_REQUIRED : ST_WRITES_DISABLED;
         resultLength = 1;
+        // Which command was turned away, and on what grounds. Without this the console shows nothing at
+        // all while the other end reports a refusal, and neither side can tell a closed window from a
+        // wrong password or from writes being switched off entirely.
+        logInfoP("write refused (cmd %u): %s", (unsigned)propertyId,
+                 (secStage() == FTM_SEC_PW) ? "not signed in / session expired"
+                                            : (secStage() == FTM_SEC_PROG ? "programming button not pressed"
+                                                                          : "writes are switched off"));
         return true;
     }
     if (secIsWriteCommand(propertyId)) secRefreshWindow(); // accepted write extends the idle window
@@ -523,6 +549,41 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
     // the client moved on -> drop it, so a format/upload/delete can never run against an open handle (UAF /
     // concurrent second handle). FileInfo manages its own job (re-poll same path / switch path).
     if ((FtmCommands)propertyId != FtmCommands::FileInfo) crcCancel();
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // A running delta apply owns the single open file and, on ESP32, an open OTA slot. Anything that
+    // would touch either is refused while it runs -- except Cancel, which is how it is stopped, and the
+    // two commands a client needs to watch it.
+    if (deltaBusy())
+    {
+        switch ((FtmCommands)propertyId)
+        {
+            case FtmCommands::Cancel:
+                // Release everything, then clear the record: a cancel is not a failure, and a later probe
+                // asking about a base must not be answered with "the last update failed".
+                deltaStop(FirmwarePatch::ERR_READ);
+                _deltaPhase = DELTA_IDLE;
+                _deltaError = FirmwarePatch::ERR_NONE;
+                logInfoP("delta update cancelled by the client");
+                resultData[0] = 0x00;
+                resultLength = 1;
+                return true;
+            case FtmCommands::FwUpdate:
+                // Keep this command's contract: it answers nothing, ever. A status byte here would be a
+                // new answer to a command no client waits on.
+                logErrorP("an update is already running -- ignored");
+                return false;
+            case FtmCommands::FwProbe:
+            case FtmCommands::CheckFeatures:
+            case FtmCommands::ModuleVersion:
+                break; // read-only, safe to answer while the job runs
+            default:
+                resultData[0] = 0x4C; // busy: an update is being applied
+                resultLength = 1;
+                return true;
+        }
+    }
+#endif
 
     switch ((FtmCommands)propertyId)
     {
@@ -544,7 +605,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_DOWNLOAD
         case FtmCommands::FileDownload:
         {
             cmdFileDownload(length, data, resultData, resultLength);
@@ -564,7 +625,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
-#if OPENKNX_FTC_DIROPS
+#ifdef OPENKNX_FTC_DIROPS
         case FtmCommands::DirCreate:
         {
             cmdDirCreate(length, data, resultData, resultLength);
@@ -596,7 +657,7 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
             return true;
         }
 
-#if OPENKNX_FTC_FASTUPLOAD
+#ifdef OPENKNX_FTC_FASTUPLOAD
         case FtmCommands::FileUploadFast:
         {
             // Return is the "handled" flag: open/close true (answered), a DATA frame false so no L7
@@ -633,6 +694,13 @@ bool FileTransferModule::processFunctionProperty(uint8_t objectIndex, uint8_t pr
         {
             cmdFwUpdate(length, data, resultData, resultLength);
             return false; // never answers: it sets no result, and on success the device restarts
+        }
+#endif
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+        case FtmCommands::FwProbe:
+        {
+            cmdFwProbe(length, data, resultData, resultLength);
+            return true;
         }
 #endif
     }
@@ -882,35 +950,48 @@ void FileTransferModule::cmdCancel(uint8_t length, uint8_t *data, uint8_t *resul
 
 void FileTransferModule::cmdRename(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
-    uint8_t offset = 0;
     resultLength = 1;
 
-    for (int i = 0; i < length; i++)
-    {
+    // The payload is "old\0new\0". BOTH names must be terminated inside the frame. A separator alone is not
+    // enough: a frame that ends ON the separator leaves the second name starting one past the payload, and
+    // strlen() then walks whatever follows it in the buffer -- and that walked-together path is what gets
+    // renamed to. Same for a second name without a terminator of its own.
+    uint8_t sep = 0;
+    bool haveSep = false;
+    for (uint8_t i = 0; i < length; i++)
         if (data[i] == 0)
         {
-            offset = i + 1;
+            sep = i;
+            haveSep = true;
             break;
         }
-    }
+    bool haveEnd = false;
+    if (haveSep)
+        for (uint8_t i = (uint8_t)(sep + 1); i < length; i++)
+            if (data[i] == 0)
+            {
+                haveEnd = true;
+                break;
+            }
 
-    // No NUL separator within the frame -> the two names aren't delimited (a self-rename + a %s read past the
-    // frame). Reject rather than act on unterminated data.
-    if (offset == 0)
+    if (!haveSep || !haveEnd || data[sep + 1] == 0)
     {
         pushByte(0x45, resultData);
-        logErrorP("Rename frame has no name separator");
+        logErrorP("Rename frame is not two terminated names");
         return;
     }
 
-    if (!ftmRename((char *)data, (char *)(data + offset)))
+    const char *oldPath = (const char *)data;
+    const char *newPath = (const char *)(data + sep + 1);
+
+    if (!ftmRename(oldPath, newPath))
     {
-        logErrorP("Renaming of the file \"%s\" to \"%s\" failed", data, data + offset);
+        logErrorP("Renaming of the file \"%s\" to \"%s\" failed", oldPath, newPath);
         pushByte(0x45, resultData);
         return;
     }
 
-    logInfoP("Renaming of the file \"%s\" to \"%s\" was successful", data, data + offset);
+    logInfoP("Renaming of the file \"%s\" to \"%s\" was successful", oldPath, newPath);
     pushByte(0x0, resultData);
 }
 
@@ -943,16 +1024,35 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
 {
     logInfoP("Update initiated");
     logIndentUp();
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    if (deltaIsPatchFile((const char *)data))
+    {
+        deltaArm((const char *)data); // logs its own reason; the work then happens in loop()
+        logIndentDown();
+        return;
+    }
+    // Anything else is about to be copied into the application area unchanged, so it has to look like an
+    // image first. Without this a patch handed to the plain update path would be flashed as firmware.
+    if (!fwImagePlausible((const char *)data))
+    {
+        logErrorP("staged file is not a bootable image -- not written: %s", (const char *)data);
+        applyFailed(APPLY_NOT_IMAGE);
+        logIndentDown();
+        return;
+    }
+#endif
     picoOTA.begin();
     if (!picoOTA.addFile((char *)data)) // false = staged image missing / unreadable
     {
         logErrorP("staged image not found or unreadable: %s", (const char *)data);
+        applyFailed(APPLY_NOT_FOUND);
         logIndentDown();
         return;
     }
     if (!picoOTA.commit()) // false = OTA command page not written -> do NOT reboot
     {
         logErrorP("PicoOTA commit failed -- apply aborted");
+        applyFailed(APPLY_WRITE);
         logIndentDown();
         return;
     }
@@ -962,7 +1062,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
 }
 #elif defined(ARDUINO_ARCH_ESP32)
 
-    #if OPENKNX_FTC_GZIP_UPDATE
+    #ifdef OPENKNX_FTC_GZIP_UPDATE
         #include <miniz.h> // tinfl lives in the chip's mask ROM (esp_rom): streaming inflate at zero flash cost
 
 /**
@@ -1018,6 +1118,7 @@ size_t FileTransferModule::inflateToOta(File &img, size_t dataStart, size_t outS
                 uint16_t imgChip = 0, runChip = 0;
                 if (!espImageFitsThisChip(dict, imgChip, runChip))
                 {
+                    applyFailed(APPLY_WRONG_CHIP);
                     logErrorP("this firmware is for chip 0x%04X, this device is 0x%04X -- not written",
                               (unsigned)imgChip, (unsigned)runChip);
                     free(inf); free(dict); free(in);
@@ -1084,6 +1185,14 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     logInfoP("Update initiated");
     logIndentUp();
     const char *path = (const char *)data; // NUL-terminated staged remote path from the client
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    if (deltaIsPatchFile(path))
+    {
+        deltaArm(path); // logs its own reason; the work then happens in loop()
+        logIndentDown();
+        return;
+    }
+#endif
     if (_fileOpen)                          // release any open transfer file before re-opening it read-only
     {
         ftmXferClose();
@@ -1093,6 +1202,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     if (!img)
     {
         logErrorP("staged image not found: %s", path);
+        applyFailed(APPLY_NOT_FOUND);
         logIndentDown();
         return;
     }
@@ -1101,7 +1211,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     // gzip? The magic is the only thing that decides — the file name is cosmetic.
     bool gz = false;
     size_t outSize = sz, dataStart = 0;
-#if OPENKNX_FTC_GZIP_UPDATE
+#ifdef OPENKNX_FTC_GZIP_UPDATE
     uint8_t hdr[10];
     if (sz > 18 && img.read(hdr, 10) == 10 && hdr[0] == 0x1F && hdr[1] == 0x8B && hdr[2] == 0x08)
     {
@@ -1111,7 +1221,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         {
             uint8_t xl[2];
             img.seek(dataStart);
-            if (img.read(xl, 2) != 2) { img.close(); logErrorP("damaged gzip header"); logIndentDown(); return; }
+            if (img.read(xl, 2) != 2) { img.close(); logErrorP("damaged gzip header"); applyFailed(APPLY_GZIP); logIndentDown(); return; }
             dataStart += 2 + ((size_t)xl[0] | ((size_t)xl[1] << 8));
         }
         if (flg & 0x08) { img.seek(dataStart); while (img.available() && img.read() != 0) {} dataStart = img.position(); } // FNAME
@@ -1119,9 +1229,9 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         if (flg & 0x02) dataStart += 2;                                                                                    // FHCRC
         uint8_t isize[4];
         img.seek(sz - 4);
-        if (img.read(isize, 4) != 4) { img.close(); logErrorP("damaged gzip trailer"); logIndentDown(); return; }
+        if (img.read(isize, 4) != 4) { img.close(); logErrorP("damaged gzip trailer"); applyFailed(APPLY_GZIP); logIndentDown(); return; }
         outSize = (size_t)isize[0] | ((size_t)isize[1] << 8) | ((size_t)isize[2] << 16) | ((size_t)isize[3] << 24);
-        if (outSize == 0 || dataStart >= sz - 8) { img.close(); logErrorP("implausible compressed firmware"); logIndentDown(); return; }
+        if (outSize == 0 || dataStart >= sz - 8) { img.close(); logErrorP("implausible compressed firmware"); applyFailed(APPLY_GZIP); logIndentDown(); return; }
         gz = true;
         logInfoP("compressed image: %u -> %u bytes", (unsigned)sz, (unsigned)outSize);
     }
@@ -1135,6 +1245,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         uint16_t imgChip = 0, runChip = 0;
         if (img.read(hdr24, sizeof(hdr24)) == (int)sizeof(hdr24) && !espImageFitsThisChip(hdr24, imgChip, runChip))
         {
+            applyFailed(APPLY_WRONG_CHIP);
             logErrorP("this firmware is for chip 0x%04X, this device is 0x%04X -- not written",
                       (unsigned)imgChip, (unsigned)runChip);
             img.close();
@@ -1149,19 +1260,21 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     if (!otaSlotAvailable())
     {
         logErrorP("no second OTA slot in this partition layout -- update over the bus not possible, use USB");
+        applyFailed(APPLY_NO_SLOT);
         img.close();
         logIndentDown();
         return;
     }
     if (!Update.begin(outSize))
     {
+        applyFailed(APPLY_BEGIN);
         logErrorP("Update.begin(%u) failed: %s", (unsigned)outSize, Update.errorString());
         img.close();
         logIndentDown();
         return;
     }
     size_t w;
-#if OPENKNX_FTC_GZIP_UPDATE
+#ifdef OPENKNX_FTC_GZIP_UPDATE
     if (gz) w = inflateToOta(img, dataStart, outSize);
     else
 #endif
@@ -1169,6 +1282,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     img.close();
     if (w != outSize || !Update.end(true) || !Update.isFinished())
     {
+        applyFailed(APPLY_WRITE);
         logErrorP("Update failed: %s", Update.errorString());
         Update.abort(); // frees the sector buffer and re-arms begin(); idempotent
         logIndentDown();
@@ -1179,6 +1293,825 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
     logIndentDown();
 }
 #endif
+
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+/**
+ * @brief Is the staged file a patch rather than an image?
+ * @details Decided by the file's own first bytes, exactly like a gzipped image: the name says nothing
+ *          about the content, and a client that guessed wrong would otherwise flash a patch as firmware.
+ */
+bool FileTransferModule::deltaIsPatchFile(const char *path)
+{
+    File probe = LittleFS.open(path, "r");
+    if (!probe) return false;
+    uint8_t magic[4] = {0};
+    const bool isPatch = probe.read(magic, sizeof(magic)) == (int)sizeof(magic) &&
+                         memcmp(magic, FirmwarePatch::MAGIC, sizeof(magic)) == 0;
+    probe.close();
+    return isPatch;
+}
+
+// --- Unpacking a packed patch -------------------------------------------------------------------
+// Only one job runs at a time, so the decompressor's read callback finds its module through a file
+// static. uzlib's C interface carries no user pointer, and inventing one would mean patching a
+// vendored library for nothing.
+static FileTransferModule *_deltaUnzipOwner = nullptr;
+static uint8_t *_deltaUnzipIn = nullptr;
+static constexpr uint32_t DELTA_UNZIP_IN = 1024;   // bytes pulled from the file per refill
+static constexpr uint32_t DELTA_UNZIP_DICT = 32768; // the window the format is compressed with
+
+static int deltaUnzipRead(struct uzlib_uncomp *m)
+{
+    if (_deltaUnzipOwner == nullptr) return -1;
+    const int got = _deltaUnzipOwner->deltaUnzipRefill(_deltaUnzipIn, DELTA_UNZIP_IN);
+    if (got <= 0) return -1;
+    m->source = _deltaUnzipIn;
+    m->source_limit = _deltaUnzipIn + got;
+    return *(m->source++);
+}
+
+/** @brief Hand the decompressor the next slice of the packed file. */
+int FileTransferModule::deltaUnzipRefill(uint8_t *dst, uint32_t len)
+{
+    const uint32_t left = _deltaPatchSize - _deltaPackedRead;
+    if (left == 0) return 0;
+    const uint32_t want = (left < len) ? left : len;
+    if (!deltaPatchRead(this, dst, _deltaPackedRead, want)) return -1;
+    _deltaPackedRead += want;
+    return (int)want;
+}
+
+/**
+ * @brief Prepare unpacking: header out, decompressor up, plain file open.
+ * @details The plain patch is rebuilt exactly as an unpacked one would have arrived -- same header with
+ *          the flag cleared, then the two streams -- so the interpreter afterwards cannot tell the
+ *          difference and needs to know nothing about compression.
+ */
+bool FileTransferModule::deltaUnzipBegin()
+{
+    _deltaUnzipErr = FirmwarePatch::ERR_READ; // replaced below by whatever actually happens
+    uint8_t hdr[FirmwarePatch::HDR_SIZE];
+    if (!deltaPatchRead(this, hdr, 0, sizeof(hdr))) return false;
+    hdr[5] &= (uint8_t)~FirmwarePatch::FLAG_PACKED; // the plain form is not packed
+    // The header checksum covers the flag byte, so it has to be restamped.
+    const uint32_t crc = FirmwarePatch::crcFinal(FirmwarePatch::crcUpdate(FirmwarePatch::CRC_INIT, hdr, FirmwarePatch::HDR_SIZE - 4));
+    hdr[32] = (uint8_t)(crc & 0xFF);
+    hdr[33] = (uint8_t)((crc >> 8) & 0xFF);
+    hdr[34] = (uint8_t)((crc >> 16) & 0xFF);
+    hdr[35] = (uint8_t)((crc >> 24) & 0xFF);
+
+    const uint32_t opsLen = (uint32_t)hdr[24] | ((uint32_t)hdr[25] << 8) | ((uint32_t)hdr[26] << 16) |
+                            ((uint32_t)hdr[27] << 24);
+    const uint32_t litLen = (uint32_t)hdr[28] | ((uint32_t)hdr[29] << 8) | ((uint32_t)hdr[30] << 16) |
+                            ((uint32_t)hdr[31] << 24);
+    _deltaPlainExpect = opsLen + litLen;
+    // These are the UNPACKED lengths, so nothing else in the file bounds them: a damaged header can
+    // claim any size at all. The sum catches its own overflow (a wrapped sum is smaller than opsLen),
+    // and the room check below is done by subtraction so the header size cannot wrap it either.
+    if (_deltaPlainExpect == 0 || opsLen > _deltaPlainExpect) { _deltaUnzipErr = FirmwarePatch::ERR_SIZE; return false; }
+    if (_deltaPlainExpect > 0xFFFFFFFFu - FirmwarePatch::HDR_SIZE) { _deltaUnzipErr = FirmwarePatch::ERR_SIZE; return false; }
+
+    LittleFS.remove(DELTA_PLAIN_PATH);
+    if (deltaStagingRoom() < _deltaPlainExpect + FirmwarePatch::HDR_SIZE)
+    {
+        logErrorP("not enough space to unpack %u bytes of patch", (unsigned)_deltaPlainExpect);
+        _deltaUnzipErr = FirmwarePatch::ERR_WRITE;
+        return false;
+    }
+    _deltaPlain = LittleFS.open(DELTA_PLAIN_PATH, "w");
+    if (!_deltaPlain) { _deltaUnzipErr = FirmwarePatch::ERR_WRITE; return false; }
+    if (_deltaPlain.write(hdr, sizeof(hdr)) != sizeof(hdr)) { _deltaUnzipErr = FirmwarePatch::ERR_WRITE; return false; }
+
+    _deltaDict = (uint8_t *)malloc(DELTA_UNZIP_DICT);
+    _deltaUnzipIn = (uint8_t *)malloc(DELTA_UNZIP_IN);
+    struct uzlib_uncomp *d = (struct uzlib_uncomp *)malloc(sizeof(struct uzlib_uncomp));
+    if (_deltaDict == nullptr || _deltaUnzipIn == nullptr || d == nullptr)
+    {
+        free(d);
+        // Distinct from a full filesystem: making room does not help here, and sending the patch
+        // unpacked does -- so the client has to be able to tell the two apart.
+        logErrorP("not enough memory to unpack the patch");
+        _deltaUnzipErr = FirmwarePatch::ERR_SIZE;
+        return false;
+    }
+    memset(d, 0, sizeof(*d));
+    _deltaInflate = d;
+    _deltaUnzipOwner = this;
+    _deltaPackedRead = FirmwarePatch::HDR_SIZE; // the compressed stream starts right after the header
+    _deltaPlainWritten = 0;
+
+    uzlib_init();
+    d->source = nullptr;
+    d->source_limit = nullptr;
+    d->source_read_cb = deltaUnzipRead;
+    uzlib_uncompress_init(d, _deltaDict, DELTA_UNZIP_DICT);
+    if (uzlib_zlib_parse_header(d) < 0)
+    {
+        logErrorP("the packed patch has a damaged header");
+        _deltaUnzipErr = FirmwarePatch::ERR_HEADER_CRC;
+        return false;
+    }
+    return true;
+}
+
+/** @brief Unpack one slice into the plain patch file. */
+bool FileTransferModule::deltaUnzipStep()
+{
+    struct uzlib_uncomp *d = (struct uzlib_uncomp *)_deltaInflate;
+    _deltaUnzipErr = FirmwarePatch::ERR_TRUNCATED; // replaced below by whatever actually happens
+    const uint32_t left = _deltaPlainExpect - _deltaPlainWritten;
+    const uint32_t want = (left < FTM_DELTA_SLICE) ? left : FTM_DELTA_SLICE;
+
+    d->dest_start = _deltaBuf;
+    d->dest = _deltaBuf;
+    d->dest_limit = _deltaBuf + want;
+    const int res = uzlib_uncompress(d);
+    if (res != TINF_OK && res != TINF_DONE)
+    {
+        logErrorP("the packed patch is damaged (%d)", res);
+        _deltaUnzipErr = FirmwarePatch::ERR_READ;
+        return false;
+    }
+    const uint32_t produced = (uint32_t)(d->dest - _deltaBuf);
+    if (produced == 0 && res != TINF_DONE)
+    {
+        logErrorP("the packed patch ended early");
+        return false;
+    }
+    if (produced > 0 && _deltaPlain.write(_deltaBuf, produced) != produced)
+    {
+        // A full filesystem and a corrupt patch are not the same problem, and the client acts on the
+        // difference: one is retried after making room, the other never succeeds.
+        logErrorP("cannot write the unpacked patch -- the filesystem is full");
+        _deltaUnzipErr = FirmwarePatch::ERR_WRITE;
+        return false;
+    }
+    _deltaPlainWritten += produced;
+
+    if (_deltaPlainWritten < _deltaPlainExpect)
+    {
+        // A finished stream that has not produced everything the header promised describes a different
+        // patch than the one announced.
+        if (res == TINF_DONE)
+        {
+            logErrorP("the packed patch ended early");
+            return false;
+        }
+        return true;
+    }
+    return true;
+}
+
+/** @brief Give back everything the unpacking held. Safe to call twice. */
+void FileTransferModule::deltaUnzipEnd()
+{
+    if (_deltaInflate != nullptr)
+    {
+        free(_deltaInflate);
+        _deltaInflate = nullptr;
+    }
+    if (_deltaDict != nullptr)
+    {
+        free(_deltaDict);
+        _deltaDict = nullptr;
+    }
+    if (_deltaUnzipIn != nullptr)
+    {
+        free(_deltaUnzipIn);
+        _deltaUnzipIn = nullptr;
+    }
+    _deltaUnzipOwner = nullptr;
+    if (_deltaPlain) _deltaPlain.close();
+}
+
+#ifdef ARDUINO_ARCH_RP2040
+/**
+ * @brief Does a staged file look like something this chip could boot?
+ * @details The bootloader copies whatever it is pointed at straight into the application area, so a file
+ *          that is not an image bricks the device until someone connects USB. Both current layouts are
+ *          accepted: an RP2040 image carries a checksum over its first 252 bytes, an RP2350 image a block
+ *          marker near the start. A gzipped image is passed through unchecked -- the bootloader unpacks
+ *          it, and unpacking it here to look inside would cost more than the check is worth.
+ */
+bool FileTransferModule::fwImagePlausible(const char *path)
+{
+    File img = LittleFS.open(path, "r");
+    if (!img) return false;
+
+    uint8_t buf[260];
+    const int first = img.read(buf, sizeof(buf));
+    if (first < 4)
+    {
+        img.close();
+        return false;
+    }
+    if (buf[0] == 0x1F && buf[1] == 0x8B) // gzip: the bootloader unpacks it
+    {
+        img.close();
+        return true;
+    }
+
+    if (first >= 256)
+    {
+        // CRC-32/MPEG-2 over the first 252 bytes, stored little-endian right behind them.
+        uint32_t crc = 0xFFFFFFFFu;
+        for (uint16_t i = 0; i < 252; i++)
+        {
+            crc ^= (uint32_t)buf[i] << 24;
+            for (uint8_t bit = 0; bit < 8; bit++)
+                crc = (crc & 0x80000000u) ? (crc << 1) ^ 0x04C11DB7u : (crc << 1);
+        }
+        const uint32_t stored = (uint32_t)buf[252] | ((uint32_t)buf[253] << 8) | ((uint32_t)buf[254] << 16) |
+                                ((uint32_t)buf[255] << 24);
+        if (crc == stored)
+        {
+            img.close();
+            return true;
+        }
+    }
+
+    // RP2350 has no such checksum; its bootrom looks for a block marker in the first pages instead.
+    static const uint8_t MARKER[4] = {0xD3, 0xDE, 0xFF, 0xFF};
+    uint32_t scanned = 0;
+    int have = first;
+    while (have >= 4 && scanned < 4096)
+    {
+        for (int i = 0; i + 4 <= have; i++)
+            if (memcmp(buf + i, MARKER, sizeof(MARKER)) == 0)
+            {
+                img.close();
+                return true;
+            }
+        // Carry the last three bytes so a marker straddling two reads is still found.
+        memmove(buf, buf + have - 3, 3);
+        scanned += (uint32_t)have;
+        const int got = img.read(buf + 3, sizeof(buf) - 3);
+        have = (got > 0) ? got + 3 : 0;
+    }
+
+    img.close();
+    return false;
+}
+#endif
+
+/**
+ * @brief Highest offset a patch may read from the running image.
+ * @details On RP2040/RP2350 the KNX and OpenKNX data areas live INSIDE the sketch region. A patch that
+ *          reached into them would depend on the parameters of the individual device, so the source is
+ *          capped below them. On ESP32 the application owns its whole partition.
+ */
+uint32_t FileTransferModule::deltaSourceLimit()
+{
+#ifdef ARDUINO_ARCH_RP2040
+    return (uint32_t)KNX_FLASH_OFFSET;
+#else
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    return running != nullptr ? (uint32_t)running->size : 0;
+#endif
+}
+
+bool FileTransferModule::deltaSrcRead(void *ctx, uint8_t *dst, uint32_t ofs, uint32_t len)
+{
+    FileTransferModule *self = (FileTransferModule *)ctx;
+    if (len == 0) return true;
+    const uint32_t limit = self->deltaSourceLimit();
+    if (ofs > limit || len > limit - ofs) return false;
+#ifdef ARDUINO_ARCH_RP2040
+    // The running image is memory mapped; copying out of it costs nothing and needs no driver.
+    memcpy(dst, (const uint8_t *)(XIP_BASE + ofs), len);
+    return true;
+#else
+    // Read through the partition API rather than a mapped pointer: this runs while the OTHER slot is
+    // being written, and the API is what serialises that.
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    return running != nullptr && esp_partition_read(running, ofs, dst, len) == ESP_OK;
+#endif
+}
+
+bool FileTransferModule::deltaPatchRead(void *ctx, uint8_t *dst, uint32_t ofs, uint32_t len)
+{
+    FileTransferModule *self = (FileTransferModule *)ctx;
+    if (len == 0) return true;
+    if (!self->_deltaPatchFile) return false;
+    if (ofs > self->_deltaPatchSize || len > self->_deltaPatchSize - ofs) return false;
+    if (!self->_deltaPatchFile.seek(ofs)) return false;
+    return self->_deltaPatchFile.read(dst, len) == (int)len;
+}
+
+bool FileTransferModule::deltaSinkWrite(void *ctx, const uint8_t *buf, uint32_t len)
+{
+    FileTransferModule *self = (FileTransferModule *)ctx;
+    if (len == 0) return true;
+#ifdef ARDUINO_ARCH_RP2040
+    return self->_deltaStage && self->_deltaStage.write(buf, len) == len;
+#else
+    (void)self;
+    return Update.write((uint8_t *)buf, len) == len;
+#endif
+}
+
+/**
+ * @brief Release everything a job holds and remember why it ended.
+ * @details Called on success, on failure and by the reaper alike, so exactly one place knows what has to
+ *          be given back. A failed job never leaves a half-written target armed.
+ */
+void FileTransferModule::deltaStop(uint8_t err)
+{
+    deltaUnzipEnd(); // idempotent; the unpack phase may or may not have run
+    if (_deltaBuf != nullptr)
+    {
+        free(_deltaBuf);
+        _deltaBuf = nullptr;
+    }
+    // Close BEFORE deleting. After unpacking, the patch being interpreted IS the unpacked file, so
+    // removing it while the handle is open leaves it on the filesystem -- which is how a finished update
+    // was found still holding 78 KB.
+    if (_deltaPatchFile) _deltaPatchFile.close();
+    LittleFS.remove(DELTA_PLAIN_PATH);
+#ifdef ARDUINO_ARCH_RP2040
+    if (_deltaStage) _deltaStage.close();
+    if (err != FirmwarePatch::ERR_NONE) LittleFS.remove(DELTA_STAGE_PATH);
+#else
+    if (err != FirmwarePatch::ERR_NONE) Update.abort(); // frees the sector buffer and re-arms begin()
+#endif
+    // A patch that was applied has done its job; leaving it behind costs space on exactly the devices
+    // that have least of it. A FAILED one stays, so a retry does not need the whole transfer again.
+    if (err == FirmwarePatch::ERR_NONE && _deltaPackedPath[0] != 0) LittleFS.remove(_deltaPackedPath);
+    _deltaPackedPath[0] = 0;
+
+    _deltaError = err;
+    _deltaPhase = (err == FirmwarePatch::ERR_NONE) ? DELTA_IDLE : DELTA_FAILED;
+    _deltaPatchSize = 0;
+}
+
+#ifdef ARDUINO_ARCH_RP2040
+/**
+ * @brief Give back the staged image once the bootloader has really used it.
+ * @details The bootloader copies a file into the application area and clears only its own command page;
+ *          the image file itself stays behind and can be most of the filesystem. It must not be deleted
+ *          blindly, though: if the copy did NOT happen the bootloader will retry at the next boot, and
+ *          deleting the file would turn a retry into a brick.
+ *
+ *          So the file is only released once the flash it was meant to produce actually contains it.
+ *          Head and tail are enough to tell: the copy is all-or-nothing, and two matching 4 KB windows
+ *          of a 800 KB image do not happen by accident.
+ */
+void FileTransferModule::deltaReclaim()
+{
+    File img = LittleFS.open(DELTA_STAGE_PATH, "r");
+    if (!img) return;
+    const uint32_t size = (uint32_t)img.size();
+    if (size == 0 || size > deltaSourceLimit())
+    {
+        img.close();
+        return;
+    }
+
+    uint8_t *buf = (uint8_t *)malloc(FTM_DELTA_SLICE);
+    if (buf == nullptr)
+    {
+        img.close();
+        return;
+    }
+
+    bool applied = true;
+    const uint32_t window = (size < FTM_DELTA_SLICE) ? size : FTM_DELTA_SLICE;
+    const uint32_t spots[2] = {0, size - window};
+    for (uint8_t i = 0; i < 2 && applied; i++)
+    {
+        if (!img.seek(spots[i]) || img.read(buf, window) != (int)window) applied = false;
+        else if (memcmp(buf, (const uint8_t *)(XIP_BASE + spots[i]), window) != 0) applied = false;
+    }
+    free(buf);
+    img.close();
+
+    if (!applied) return; // the bootloader still has work to do -- leave everything alone
+    LittleFS.remove(DELTA_STAGE_PATH);
+    LittleFS.remove("/otacommand.bin"); // consumed; the bootloader only erases its data block
+    logInfoP("Reclaimed %u bytes: the staged image is already running", (unsigned)size);
+}
+#endif
+
+/** @brief Once per start: release what a finished update left behind. */
+void FileTransferModule::processAfterStartupDelay()
+{
+#ifdef ARDUINO_ARCH_RP2040
+    deltaReclaim();
+#endif
+}
+
+/**
+ * @brief Arm a delta apply. Returns immediately; the work happens in loop().
+ * @details Everything that can be refused cheaply is refused here, before a slot is opened or a byte is
+ *          written: no second job, a slot to write into, a sound patch header, and enough room to stage
+ *          the rebuilt image where the platform needs it.
+ */
+bool FileTransferModule::deltaArm(const char *patchPath)
+{
+    if (deltaBusy())
+    {
+        logErrorP("an update is already running");
+        return false;
+    }
+    deltaStop(FirmwarePatch::ERR_NONE); // clear a previous failure before taking anything
+
+    if (_fileOpen) // a transfer handle would fight the job over the single open file
+    {
+        ftmXferClose();
+        _fileOpen = false;
+    }
+
+    _deltaPatchFile = LittleFS.open(patchPath, "r");
+    if (!_deltaPatchFile)
+    {
+        logErrorP("staged patch not found: %s", patchPath);
+        return false;
+    }
+    _deltaPatchSize = (uint32_t)_deltaPatchFile.size();
+    // Remembered only so a packed patch can be released once it is unpacked. Too long a path simply
+    // means it stays -- the update still works, it just needs the room.
+    _deltaPackedPath[0] = 0;
+    if (strlen(patchPath) < sizeof(_deltaPackedPath)) strcpy(_deltaPackedPath, patchPath);
+
+#ifdef ARDUINO_ARCH_RP2040
+    // A rebuild interrupted by a power cut leaves a part-written image behind. deltaReclaim() will not
+    // touch it -- it cannot tell one apart from an image still waiting to be flashed -- so it survives
+    // every restart and eats about a megabyte. Without /otacommand.bin the bootloader has no instruction
+    // to copy anything, which makes the file provably dead. Removed HERE, before the room checks, because
+    // otherwise the next attempt is refused for lack of space by a file that is already rubbish.
+    if (!LittleFS.exists("/otacommand.bin") && LittleFS.exists(DELTA_STAGE_PATH))
+    {
+        File stale = LittleFS.open(DELTA_STAGE_PATH, "r");
+        const uint32_t staleSize = stale ? (uint32_t)stale.size() : 0;
+        if (stale) stale.close();
+        LittleFS.remove(DELTA_STAGE_PATH);
+        logInfoP("Removed %u bytes left by an interrupted update", (unsigned)staleSize);
+    }
+#endif
+
+
+    if (!otaSlotAvailable())
+    {
+        logErrorP("no second OTA slot in this partition layout -- update over the bus not possible, use USB");
+        deltaStop(FirmwarePatch::ERR_WRITE);
+        return false;
+    }
+
+    _deltaBuf = (uint8_t *)malloc(FTM_DELTA_SLICE);
+    if (_deltaBuf == nullptr)
+    {
+        logErrorP("not enough memory to apply the patch");
+        deltaStop(FirmwarePatch::ERR_WRITE);
+        return false;
+    }
+
+    // The header is always readable, packed or not -- that is what the flag bit is for. Read it here to
+    // decide which of the two ways in to take.
+    uint8_t head[8] = {0};
+    if (!deltaPatchRead(this, head, 0, sizeof(head)) || memcmp(head, FirmwarePatch::MAGIC, 4) != 0)
+    {
+        logErrorP("not a patch file");
+        deltaStop(FirmwarePatch::ERR_MAGIC);
+        return false;
+    }
+    if (head[4] != FirmwarePatch::VERSION)
+    {
+        logErrorP("patch format version %u is newer than this firmware understands", (unsigned)head[4]);
+        deltaStop(FirmwarePatch::ERR_VERSION);
+        return false;
+    }
+    _deltaPacked = (head[5] & FirmwarePatch::FLAG_PACKED) != 0;
+    if ((head[5] & ~FirmwarePatch::FLAG_PACKED) != 0)
+    {
+        logErrorP("patch uses a feature this firmware does not know");
+        deltaStop(FirmwarePatch::ERR_FLAGS);
+        return false;
+    }
+
+    if (_deltaPacked)
+    {
+        if (!deltaUnzipBegin())
+        {
+            deltaStop(_deltaUnzipErr);
+            return false;
+        }
+        _deltaPhase = DELTA_UNZIP;
+        _deltaError = FirmwarePatch::ERR_NONE;
+        logInfoP("Delta update armed: unpacking %u bytes of patch", (unsigned)_deltaPatchSize);
+        return true;
+    }
+
+    if (!deltaStartJob()) return false;
+    logInfoP("Delta update armed: %u -> %u bytes", (unsigned)_deltaJob.sourceLen(),
+             (unsigned)_deltaJob.targetLen());
+    return true;
+}
+
+/**
+ * @brief Wire the interpreter to the running image and the platform's sink, and check there is room.
+ * @details Reached with a PLAIN patch in `_deltaPatchFile`, whether it arrived that way or was just
+ *          unpacked. Everything platform-specific about where the result goes lives here.
+ */
+bool FileTransferModule::deltaStartJob()
+{
+    FirmwarePatch::Io io;
+    io.src = deltaSrcRead;
+    io.patch = deltaPatchRead;
+    io.sink = deltaSinkWrite;
+    io.ctx = this;
+    if (!_deltaJob.begin(io, _deltaPatchSize, deltaSourceLimit()))
+    {
+        logErrorP("patch refused, reason %u", (unsigned)_deltaJob.error());
+        deltaStop(_deltaJob.error());
+        return false;
+    }
+
+    const uint32_t target = _deltaJob.targetLen();
+#ifdef ARDUINO_ARCH_RP2040
+    // The bootloader copies a FILE to flash, so the rebuilt image has to fit next to the patch. Checked
+    // here rather than half way through, where the only answer left would be to throw the work away.
+    LittleFS.remove(DELTA_STAGE_PATH);
+    if (deltaStagingRoom() < target)
+    {
+        logErrorP("not enough space to stage %u bytes -- update over the bus not possible on this device",
+                  (unsigned)target);
+        deltaStop(FirmwarePatch::ERR_WRITE);
+        return false;
+    }
+    _deltaStage = LittleFS.open(DELTA_STAGE_PATH, "w");
+    if (!_deltaStage)
+    {
+        logErrorP("cannot create the staging file");
+        deltaStop(FirmwarePatch::ERR_WRITE);
+        return false;
+    }
+    _deltaVerifyPos = 0;
+    _deltaVerifyCrc = FirmwarePatch::CRC_INIT;
+#else
+    if (!Update.begin(target))
+    {
+        logErrorP("Update.begin(%u) failed: %s", (unsigned)target, Update.errorString());
+        deltaStop(FirmwarePatch::ERR_WRITE);
+        return false;
+    }
+#endif
+
+    _deltaPhase = DELTA_RUN;
+    _deltaError = FirmwarePatch::ERR_NONE;
+    return true;
+}
+
+/**
+ * @brief One slice of the running job.
+ * @details Bounded by the scratch buffer, which is one flash sector -- the largest step the hardware
+ *          cannot interrupt anyway. The KNX stack keeps running between slices, so nothing on the bus is
+ *          lost while an update is being applied.
+ */
+void FileTransferModule::deltaLoop()
+{
+    if (!deltaBusy()) return;
+    if (!openknx.common.freeLoopTime()) return;
+
+    // No stall timer here on purpose. Once armed the job waits for nothing external -- every slice either
+    // advances or fails -- so a wall clock could only ever abort a healthy job that was starved of loop
+    // time by something else. The client cannot hang it either; it is not part of the loop.
+
+    switch (_deltaPhase)
+    {
+        case DELTA_UNZIP:
+        {
+            if (!deltaUnzipStep())
+            {
+                deltaStop(_deltaUnzipErr);
+                return;
+            }
+            if (_deltaPlainWritten < _deltaPlainExpect) return;
+
+            // Unpacked. Hand the interpreter the plain file and give the window back before the rebuild
+            // starts, so the two allocations never exist at the same time.
+            _deltaPlain.flush();
+            deltaUnzipEnd();
+            _deltaPatchFile.close();
+            // The packed original is no longer needed, and on a device whose filesystem barely holds the
+            // rebuilt image it is the difference between fitting and not. A retry costs a fresh upload,
+            // which is the cheaper of the two prices.
+            if (_deltaPackedPath[0] != 0) LittleFS.remove(_deltaPackedPath);
+            _deltaPatchFile = LittleFS.open(DELTA_PLAIN_PATH, "r");
+            if (!_deltaPatchFile)
+            {
+                deltaStop(FirmwarePatch::ERR_READ);
+                return;
+            }
+            _deltaPatchSize = (uint32_t)_deltaPatchFile.size();
+            if (!deltaStartJob()) return; // logs and stops on its own
+            logInfoP("Patch unpacked: %u -> %u bytes", (unsigned)_deltaJob.sourceLen(),
+                     (unsigned)_deltaJob.targetLen());
+            return;
+        }
+
+        case DELTA_RUN:
+        {
+            if (!_deltaJob.step(_deltaBuf, FTM_DELTA_SLICE))
+            {
+                logErrorP("patch refused, reason %u", (unsigned)_deltaJob.error());
+                deltaStop(_deltaJob.error());
+                return;
+            }
+                    if (!_deltaJob.done()) return;
+#ifdef ARDUINO_ARCH_RP2040
+            _deltaStage.flush();
+            _deltaStage.close();
+            _deltaStage = LittleFS.open(DELTA_STAGE_PATH, "r");
+            if (!_deltaStage)
+            {
+                deltaStop(FirmwarePatch::ERR_WRITE);
+                return;
+            }
+            _deltaPhase = DELTA_VERIFY;
+#else
+            _deltaPhase = DELTA_ARM;
+#endif
+            return;
+        }
+
+#ifdef ARDUINO_ARCH_RP2040
+        case DELTA_VERIFY:
+        {
+            // The interpreter checked what it PRODUCED. This checks what the filesystem actually kept --
+            // the last chance to notice a bad write before the bootloader is pointed at the file.
+            const uint32_t left = _deltaJob.targetLen() - _deltaVerifyPos;
+            const uint32_t want = (left < FTM_DELTA_SLICE) ? left : FTM_DELTA_SLICE;
+            if (_deltaStage.read(_deltaBuf, want) != (int)want)
+            {
+                logErrorP("staged image could not be read back");
+                deltaStop(FirmwarePatch::ERR_READ);
+                return;
+            }
+            _deltaVerifyCrc = FirmwarePatch::crcUpdate(_deltaVerifyCrc, _deltaBuf, want);
+            _deltaVerifyPos += want;
+                    if (_deltaVerifyPos < _deltaJob.targetLen()) return;
+            if (FirmwarePatch::crcFinal(_deltaVerifyCrc) != _deltaJob.targetCrc())
+            {
+                logErrorP("staged image does not match the expected checksum");
+                deltaStop(FirmwarePatch::ERR_DST_CRC);
+                return;
+            }
+            _deltaStage.close();
+            _deltaPhase = DELTA_ARM;
+            return;
+        }
+#endif
+
+        case DELTA_ARM:
+        {
+#ifdef ARDUINO_ARCH_RP2040
+            picoOTA.begin();
+            if (!picoOTA.addFile(DELTA_STAGE_PATH))
+            {
+                logErrorP("staged image not readable by the bootloader");
+                deltaStop(FirmwarePatch::ERR_WRITE);
+                return;
+            }
+            if (!picoOTA.commit())
+            {
+                logErrorP("PicoOTA commit failed -- apply aborted");
+                deltaStop(FirmwarePatch::ERR_WRITE);
+                return;
+            }
+#else
+            if (!Update.end(true) || !Update.isFinished())
+            {
+                logErrorP("Update failed: %s", Update.errorString());
+                deltaStop(FirmwarePatch::ERR_WRITE);
+                return;
+            }
+#endif
+            deltaStop(FirmwarePatch::ERR_NONE);
+            _rebootRequested = millis(); // reuse loop()'s deferred flash.save() + restart()
+            logInfoP("Firmware rebuilt and armed; device will restart in ~2s to apply");
+            return;
+        }
+
+        default:
+            return;
+    }
+}
+
+/**
+ * @brief cmd 106: is the running image the one a patch was built against, and what is the job doing?
+ * @details Request is (u32 length, u32 checksum) of a candidate base. The checksum runs over the whole
+ *          image, which is far too much for one dispatch, so the answer is 0x02 "still computing" until
+ *          the cooperative job finishes -- the client asks again. The same command carries the status of
+ *          a running or failed apply, because cmd 101 answers nothing at all by contract.
+ */
+void FileTransferModule::cmdFwProbe(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
+{
+    auto answer = [&](uint8_t status, uint32_t arg) {
+        resultData[0] = status;
+        resultData[1] = (uint8_t)(arg & 0xFF);
+        resultData[2] = (uint8_t)((arg >> 8) & 0xFF);
+        resultData[3] = (uint8_t)((arg >> 16) & 0xFF);
+        resultData[4] = (uint8_t)((arg >> 24) & 0xFF);
+        resultLength = 5;
+    };
+
+    if (_deltaPhase == DELTA_FAILED)
+    {
+        // Reported once. Leaving it set would answer every later base check with "the last update
+        // failed", and the client would never get to ask what it actually came to ask.
+        answer(0x05, _deltaError);
+        _deltaPhase = DELTA_IDLE;
+        return;
+    }
+    if (deltaBusy())
+    {
+        answer(0x03, _deltaJob.produced());
+        return;
+    }
+    if (length < 8)
+    {
+        answer(0x4B, 0);
+        return;
+    }
+
+    const uint32_t wantLen = (uint32_t)data[0] | ((uint32_t)data[1] << 8) | ((uint32_t)data[2] << 16) |
+                             ((uint32_t)data[3] << 24);
+    const uint32_t wantCrc = (uint32_t)data[4] | ((uint32_t)data[5] << 8) | ((uint32_t)data[6] << 16) |
+                             ((uint32_t)data[7] << 24);
+    const uint32_t limit = deltaSourceLimit();
+    if (wantLen == 0 || wantLen > limit)
+    {
+        answer(0x4B, limit);
+        return;
+    }
+
+    // A different candidate than the one being computed restarts the job; the client walks its archive
+    // newest first and must not be answered about the previous candidate.
+    if (!_probeActive || _probeLen != wantLen)
+    {
+        _probeActive = true;
+        _probeLen = wantLen;
+        _probeOff = 0;
+        _probeCrc = FirmwarePatch::CRC_INIT;
+    }
+    _probeLastAccess = millis();
+    if (_probeOff < _probeLen)
+    {
+        answer(0x02, _probeOff);
+        return;
+    }
+
+    const uint32_t have = FirmwarePatch::crcFinal(_probeCrc);
+    answer(have == wantCrc ? 0x00 : 0x42, deltaStagingRoom());
+}
+
+/** @brief Advance the source checksum by one slice; the client polls cmd 106 until it is done. */
+void FileTransferModule::probeLoop()
+{
+    if (!_probeActive || _probeOff >= _probeLen) return;
+    if (delayCheck(_probeLastAccess, HEARTBEAT_INTERVAL)) // client stopped asking
+    {
+        _probeActive = false;
+        return;
+    }
+    // 64 bytes meant deltaSrcRead -- and with it esp_ota_get_running_partition() and a partition read --
+    // ran 16k times for a one-megabyte image, on the one operation a person sits and waits for. 256 costs
+    // 192 more bytes of stack and a quarter of the calls.
+    uint8_t buf[256];
+    while (_probeOff < _probeLen && openknx.common.freeLoopTime())
+    {
+        const uint32_t left = _probeLen - _probeOff;
+        const uint32_t want = (left < sizeof(buf)) ? left : sizeof(buf);
+        if (!deltaSrcRead(this, buf, _probeOff, want))
+        {
+            _probeActive = false;
+            return;
+        }
+        _probeCrc = FirmwarePatch::crcUpdate(_probeCrc, buf, want);
+        _probeOff += want;
+    }
+}
+
+/** @brief Bytes available to stage a rebuilt image, or all-ones where none is needed (ESP32). */
+uint32_t FileTransferModule::deltaStagingRoom()
+{
+    // What the FILESYSTEM has left, on every platform. It used to answer "unlimited" on an ESP32 on the
+    // grounds that no image is staged there -- but the unpacked patch is written to the filesystem just
+    // the same, so the one check that guards it was switched off exactly where it still applied. Whether
+    // the rebuilt image also needs room is the caller's question, and only the RP path asks it.
+    uint32_t total = 0, used = 0;
+#ifdef ARDUINO_ARCH_RP2040
+    FSInfo fsinfo = {0};
+    LittleFS.info(fsinfo);
+    total = (uint32_t)fsinfo.totalBytes;
+    used = (uint32_t)fsinfo.usedBytes;
+#else
+    total = (uint32_t)LittleFS.totalBytes();
+    used = (uint32_t)LittleFS.usedBytes();
+#endif
+    return total > used ? total - used : 0;
+}
+#endif // OPENKNX_FTC_DELTA_UPDATE
 
 void FileTransferModule::cmdFileInfo(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
@@ -1376,7 +2309,7 @@ void FileTransferModule::cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_
     logInfoP("Filesystem: total %u, used %u, free %u (%s)", (unsigned)total, (unsigned)used, (unsigned)(total >= used ? total - used : 0), status ? "KB" : "B");
 }
 
-#if OPENKNX_FTC_DIROPS
+#ifdef OPENKNX_FTC_DIROPS
 void FileTransferModule::cmdDirList(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
@@ -1608,7 +2541,7 @@ void FileTransferModule::cmdFileUpload(uint8_t length, uint8_t *data, uint8_t *r
  * bitmap. Deviates from 03_03_07 3.4.7.1 (every command must be answered), so fast needs this server.
  * Flow control is the client window + that bitmap, NOT the L2 ack (not evaluated on the TP send path).
  */
-#if OPENKNX_FTC_FASTUPLOAD
+#ifdef OPENKNX_FTC_FASTUPLOAD
 bool FileTransferModule::cmdFileUploadFast(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     // Refresh on EVERY frame: silent DATA never hits the classic dispatch that touches _heartbeat, so
@@ -1766,7 +2699,7 @@ void FileTransferModule::cmdFileReport(uint8_t length, uint8_t *data, uint8_t *r
 }
 #endif
 
-#if OPENKNX_FTC_DOWNLOAD
+#ifdef OPENKNX_FTC_DOWNLOAD
 void FileTransferModule::cmdFileDownload(uint8_t length, uint8_t *data, uint8_t *resultData, uint8_t &resultLength)
 {
     _heartbeat = millis();
@@ -1825,12 +2758,17 @@ void FileTransferModule::cmdCheckFeatures(uint8_t length, uint8_t *data, uint8_t
     // layout would send a client through a ~50 min transfer that only fails at the end.
     if (otaSlotAvailable()) result |= 0x2; // Update
 #endif
-#if OPENKNX_FTC_FASTUPLOAD
+#ifdef OPENKNX_FTC_FASTUPLOAD
     result |= 0x4; // FAST: server understands cmd44/cmd45 (windowed fast upload).
 #endif
-#if defined(ARDUINO_ARCH_ESP32) && OPENKNX_FTC_GZIP_UPDATE
+#if defined(ARDUINO_ARCH_ESP32) && defined(OPENKNX_FTC_GZIP_UPDATE)
     // Only meaningful together with Update -- unpacking is a property of the apply step.
     if (otaSlotAvailable()) result |= 0x40; // GZIP_UPDATE: staged firmware may be sent compressed
+#endif
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // Only together with Update: a patch without a slot to apply it to is useless, and a client that saw
+    // the bit without one would transfer for minutes only to be refused at the end.
+    if (otaSlotAvailable()) result |= 0x80; // DELTA: server understands cmd 106 and the OKD1 format
 #endif
 #ifdef OPENKNX_FTC_CONSOLE
     result |= 0x8; // Console: obj-160 console tunnel available (ftc <pa> console)
@@ -1876,6 +2814,9 @@ bool FileTransferModule::secWriteAllowed()
             if (!_authorized) return false;
             if ((millis() - _authLastMs) > secWindowMs()) // idle -> auto-logout (close the window)
             {
+                // Said out loud, once. A window that closes silently is indistinguishable from a wrong
+                // password at the other end, and that is exactly the guess people were left making.
+                logInfoP("FTC session expired after %u s idle -- log in again", (unsigned)(secWindowMs() / 1000));
                 _authorized = false;
                 return false;
             }

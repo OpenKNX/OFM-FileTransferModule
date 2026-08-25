@@ -9,7 +9,7 @@
 #include "OpenKNX.h"
 #include "FileTransferConfig.h"
 
-#ifdef OPENKNX_FTC
+#ifdef OPENKNX_FTC_CLIENT
     #include "FileTransferClientConsole.h"
 
     // Every local/remote path buffer sizes off this. All writes are snprintf/strncpy-bounded, so a longer
@@ -25,6 +25,10 @@ static constexpr size_t FTC_PATH_MAX = 512; // host: absolute paths, no RAM cons
 // Longest path that may go on the wire: the worst frame (fast-open = 6-B header + path + NUL + 4-B size)
 // has to fit both the 247-B APDU payload and the 256-B _ftcTx buffer.
 static constexpr size_t FTC_REMOTE_PATH_MAX = 235;
+// What one command frame may carry: the APDU minus its 7-byte header. The wire limit, not a buffer size --
+// _ftcTx is 256 B and therefore WIDER than the link, so sizing a check off the buffer lets a frame out that
+// the link cannot carry.
+static constexpr size_t FTC_WIRE_PAYLOAD_MAX = 247;
 // Whichever is smaller, the local buffer or the wire limit.
 static constexpr size_t FTC_REMOTE_PATH_LIMIT =
     (FTC_PATH_MAX - 1 < FTC_REMOTE_PATH_MAX) ? (FTC_PATH_MAX - 1) : FTC_REMOTE_PATH_MAX;
@@ -299,6 +303,11 @@ class FileTransferClient : public OpenKNX::Module
     // `ftc <pa> fwupdate <remote>`: trigger the target to apply an already-uploaded firmware (reboots it).
     // FileInfo existence pre-check first, so a mistyped path cannot reboot a live coupler.
     void requestFwUpdate(uint16_t pa, const char *remotePath);
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // Send a prepared patch to another device and have it applied. No encoder is involved: the patch was
+    // built on a host and only travels from here.
+    void requestDeltaSend(uint16_t pa, const char *localPatch, const char *remoteName = "");
+#endif
 
     /** @brief Ask whether a path is present on the target. One round trip, no transfer. */
     void requestExists(uint16_t pa, const char *remotePath);
@@ -425,6 +434,10 @@ class FileTransferClient : public OpenKNX::Module
         FtcPerfCleanup,
         FtcApplyCheck,
         FtcApplyProbe,       // apply: CheckFeatures(102) sent, short gate to learn if the target can self-apply
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+        FtcDeltaFeat,        // delta: CheckFeatures(102) sent -- does the target understand patches at all?
+        FtcDeltaProbe,       // delta: FwProbe(106) sent -- is the target running the image this patch expects?
+#endif
         FtcScanPost,         // post-sweep OpenKNX/info probe + cooperative CSV write (Feature B/C); NOT the FtcScanCo SM
     #ifdef OPENKNX_FTC_SECURITY
         FtcAuthProbe,     // login: CheckFeatures(102) sent -> is the target password-protected at all?
@@ -533,6 +546,19 @@ class FileTransferClient : public OpenKNX::Module
     bool _ftcFeatValid = false;
     uint16_t _ftcFeatPa = 0;    // PA the cached feature byte belongs to
     uint8_t _ftcFeatBits = 0;   // CheckFeatures(102) result byte for _ftcFeatPa
+#ifdef OPENKNX_FTC_DELTA_UPDATE
+    // --- Delta send. The patch names the image it was built against in its own header, so a client can
+    // confirm the base without owning a single firmware binary -- which is what lets a device with the
+    // patches on its card update another device on the bus. ---
+    bool _ftcDeltaSend = false;   // this transfer carries a patch, not an image
+    uint32_t _ftcDeltaSrcLen = 0; // from the patch header: length of the image it expects to find
+    uint32_t _ftcDeltaSrcCrc = 0; // from the patch header: checksum of that image
+    uint32_t _ftcDeltaDeadline = 0; // bound for the probe re-polls; NOT re-armed, or a stuck target loops forever
+    char _ftcDeltaLocal[FTC_PATH_MAX] = {};  // the patch on this machine / card
+    char _ftcDeltaRemote[FTC_PATH_MAX] = {}; // where it is staged on the target
+    bool ftcReadPatchHeader(const char *path); // pulls srcLen/srcCrc out of the local patch
+    void ftcDeltaProbeSend();                  // FwProbe(106) with the header's (len, crc)
+#endif
     bool _ftcExistsQuery = false; // the pending simple command is an `exists` -> report the answer byte
     // Same single-slot per-PA caching for the target's max APDU. 0 = target did not report one.
     bool _tgtApduValid = false;
@@ -640,6 +666,11 @@ class FileTransferClient : public OpenKNX::Module
     bool _ftcRereadChunk = false;    // the source read failed -> read it again instead of resending stale data
     bool _ftcChunkFolded = false;    // this chunk is already in _ftcSrcCrc -- fold once, even across a resend
     uint8_t _ftcTxLen = 0;
+    // Which command the last ftcSend() carried. An answer that does not belong to it is somebody else's
+    // -- a late mirror, or a command that answers although nothing waits for it. Five states used to take
+    // whatever arrived; one field checked in one place is cheaper than five separate guards.
+    uint8_t _ftcSentProp = 0;
+    bool _ftcApplyRetried = false; // fwupdate existence check: one repeat before giving up
     uint8_t _ftcTx[256] = {0}; // holds [seq:2][len:1][payload:<=247] and the longer open frame
 
     // --- response handoff (written in stack context, read in loop) ---

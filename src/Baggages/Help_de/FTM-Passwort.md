@@ -1,6 +1,6 @@
 # Passwort für den Wartungszugriff
 
-Passwort für die Anmeldung am Wartungskanal (Dateien, Konsole, Firmware), max. 16 Zeichen.
+Passwort für die Anmeldung am Wartungskanal (Dateien, Konsole, Firmware, knxOTA), max. 16 Zeichen.
 
 Die Prüfung erfolgt per Challenge-Response – **das Passwort wird nie im Klartext über den Bus übertragen**.
 

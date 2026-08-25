@@ -20,7 +20,7 @@
                   <Enumeration Text="Immer erlaubt" Value="2" Id="%ENID%" />
                   <Enumeration Text="Mit Passwort"  Value="3" Id="%ENID%" />
                   <Enumeration Text="Im Prog-Modus" Value="1" Id="%ENID%" />
-                  <Enumeration Text="Ausgeschaltet" Value="0" Id="%ENID%" />
+                  <Enumeration Text="Blockiert"     Value="0" Id="%ENID%" />
                 </TypeRestriction>
               </ParameterType>
               <!-- Access password, max 16 characters == the 16-byte AES key directly (no KDF). Only shown in
