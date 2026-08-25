@@ -27,6 +27,7 @@
 
 #include "I18n.h"
 #include "Term.h"
+#include <functional>
 #include "Theme.h"
 
 namespace ftc
@@ -40,6 +41,23 @@ class Tpl
 {
   public:
     Tpl(Term& term, Theme& theme, I18n* i18n = nullptr) : _t(term), _c(theme), _i(i18n) {}
+
+    /** @brief Where a rendered line goes. */
+    using LineSink = std::function<void(const std::string&)>;
+
+    /**
+     * @brief Send rendered lines to @p s instead of stdout.
+     * @details A full-screen view builds its frame and places every line itself, so it cannot let the
+     *          templates write straight out. With no sink the output is unchanged, byte for byte: every
+     *          drawing method funnels through emit(), and emit() without a sink IS the printf it replaced.
+     *          The in-place forms (waitTick, progress) hand their line over as a line -- where it lands is
+     *          the frame's business, not theirs.
+     */
+    void setSink(LineSink s) { _sink = std::move(s); }
+    bool hasSink() const { return (bool)_sink; }
+
+    /** @brief Route one already-built line through the same path as every template. */
+    void line(const std::string& s) const { emit(s); }
 
     /** @brief Translate a template's own words. Falls back to English when no I18n was handed in. */
     const char* tr(const char* en, const char* de) const { return _i ? _i->tr(en, de) : en; }
@@ -103,10 +121,10 @@ class Tpl
      */
     void status(Stat s, const std::string& label, std::initializer_list<std::string> segs = {}) const
     {
-        std::printf("  %s %s", dot(s).c_str(), labelColor(s, label).c_str());
+        std::string line = "  " + dot(s) + " " + labelColor(s, label);
         for (const auto& seg : segs)
-            if (!seg.empty()) std::printf("  %s", _c.dim(seg).c_str());
-        std::printf("\n");
+            if (!seg.empty()) line += "  " + _c.dim(seg);
+        emit(line);
     }
 
     /**
@@ -127,7 +145,8 @@ class Tpl
         std::string out = _c.dim(_t.glyph("┌─ ", "+- ")) + _c.amber(title);
         if (!subtitle.empty()) out += _c.dim(" · " + subtitle);
         out += " " + _c.dim(rule);
-        std::printf("\n  %s\n", out.c_str());
+        emit("");
+        emit("  " + out);
     }
 
     /**
@@ -140,7 +159,7 @@ class Tpl
         std::string lbl = label;
         for (int n = dispw(label); n < 14; ++n)
             lbl += ' ';
-        std::printf("    %s%s\n", _c.dim(lbl).c_str(), value.c_str());
+        emit("    " + _c.dim(lbl) + value);
     }
 
     /**
@@ -154,9 +173,9 @@ class Tpl
         std::string lbl = label;
         for (int n = dispw(label); n < 14; ++n)
             lbl += ' ';
-        std::printf("  %s %s%s", _c.amber("?").c_str(), _c.dim(lbl).c_str(), value.c_str());
-        if (!hint.empty()) std::printf("   %s", _c.mut(hint).c_str());
-        std::printf("\n");
+        std::string line = "  " + _c.amber("?") + " " + _c.dim(lbl) + value;
+        if (!hint.empty()) line += "   " + _c.mut(hint);
+        emit(line);
     }
 
     /**
@@ -174,9 +193,10 @@ class Tpl
         const std::string mark = lit ? _c.amber(_t.glyph("◉", "*")) : _c.mut(_t.glyph("○", "o"));
         std::string line = "  " + mark + " " + _c.txt(label) + "   " + _c.bold(clock);
         if (!detail.empty()) line += "   " + _c.dim(detail);
+        if (_sink) { emit(line); return; } // a frame places the line; an in-place update would land nowhere
         if (_t.isTty()) std::printf("\r%s\x1b[K", line.c_str());
         else
-            std::printf("%s\n", line.c_str());
+            emit(line);
         std::fflush(stdout);
     }
 
@@ -189,7 +209,7 @@ class Tpl
         std::string rule = _t.glyph("└", "+");
         for (int i = 1; i < w; ++i)
             rule += _t.glyph("─", "-");
-        std::printf("  %s\n", _c.dim(rule).c_str());
+        emit("  " + _c.dim(rule));
     }
 
     /**
@@ -209,7 +229,8 @@ class Tpl
         std::string rule;
         for (int i = 0; i < (pad > 0 ? pad : 0); ++i)
             rule += _t.glyph("─", "-");
-        std::printf("\n  %s\n", _c.green(head + rule).c_str());
+        emit("");
+        emit("  " + _c.green(head + rule));
     }
 
     /*********************************************************************
@@ -291,7 +312,9 @@ class Tpl
     void progress(double frac, bool done, char dir, const std::string& label, const std::string& detail = "",
                   const std::string& spark = "", char color = 'g', char barStyle = 'b') const
     {
-        if (!_t.isTty() && !done) return; // a pipe / log gets only the final line, not every frame
+        // A pipe / log gets only the final line, not every frame -- but a SINK is a frame renderer that
+        // places every line itself, so it always wants the line.
+        if (!_sink && !_t.isTty() && !done) return;
         double f = frac < 0 ? 0 : (frac > 1 ? 1 : frac);
         const int W = 14;
         const int fill = done ? W : (int)(f * W);
@@ -319,6 +342,7 @@ class Tpl
         std::string line = "  " + head + " " + arrow + label + "  " + b + "  " + _c.bold(pct(f, done));
         if (!detail.empty()) line += _c.dim("  · " + detail);
         if (!spark.empty()) line += "  " + spark;
+        if (_sink) { emit(line); return; } // a frame places the line; an in-place update would land nowhere
         if (_t.isTty()) std::printf("\r%s\x1b[K", line.c_str()); // in-place: carriage-return + erase to EOL
         else
             std::printf("%s", line.c_str()); // pipe: plain final line (colours already off)
@@ -473,7 +497,7 @@ class Tpl
         const double avg = sum / (double)v.size();
         char note[64];
         std::snprintf(note, sizeof(note), "avg %.0f · peak %.0f %s", avg, peak, unit);
-        std::printf("    %s %s  %s\n", _c.dim(label).c_str(), spark(v, peak, width, style).c_str(), _c.dim(note).c_str());
+        emit("    " + _c.dim(label) + " " + spark(v, peak, width, style) + "  " + _c.dim(note));
     }
 
     /*********************************************************************
@@ -634,7 +658,7 @@ class Tpl
             const int wl = (int)word.size();
             if (anyOnLine && col + 1 + wl > width)
             {
-                std::printf("%s%s\n", pad.c_str(), _c.dim(cur.substr(indent)).c_str());
+                emit(pad + _c.dim(cur.substr(indent)));
                 cur = pad;
                 col = indent;
                 anyOnLine = false;
@@ -650,7 +674,7 @@ class Tpl
             if (j == std::string::npos) break;
             i = j + 1;
         }
-        if (anyOnLine) std::printf("%s%s\n", pad.c_str(), _c.dim(cur.substr(indent)).c_str());
+        if (anyOnLine) emit(pad + _c.dim(cur.substr(indent)));
     }
 
     /*********************************************************************
@@ -670,7 +694,7 @@ class Tpl
             first = false;
             line += _c.bold(_c.cyan(k.first)) + " " + _c.dim(k.second);
         }
-        std::printf("%s\n", line.c_str());
+        emit(line);
     }
 
     /** @brief One stat tile: a value in its hue over a dimmed caption. color 'd' = dim value (neutral). */
@@ -692,7 +716,7 @@ class Tpl
             first = false;
             line += (c.color == 'd' ? _c.dim(c.value) : _c.bold(paint(c.color, c.value))) + " " + _c.dim(c.caption);
         }
-        std::printf("%s\n", line.c_str());
+        emit(line);
     }
 
     /**
@@ -729,7 +753,7 @@ class Tpl
                 line += _c.mut(std::to_string(i + 1) + " " + s);
             ++i;
         }
-        std::printf("%s\n", line.c_str());
+        emit(line);
     }
 
     /**
@@ -747,7 +771,7 @@ class Tpl
             line += (i == active) ? _c.chip(o, 'g') : (" " + _c.mut(o) + " ");
             ++i;
         }
-        std::printf("%s\n", line.c_str());
+        emit(line);
     }
 
     /**
@@ -787,7 +811,7 @@ class Tpl
             first = false;
             line += _c.green(it.first) + " " + _c.dim(it.second);
         }
-        std::printf("%s\n", line.c_str());
+        emit(line);
     }
 
     /*********************************************************************
@@ -821,13 +845,13 @@ class Tpl
         for (int i = 0; i < N; ++i)
             bus += (anim && i == p) ? _c.bright(_t.glyph("●", "*")) : _c.dim(_t.glyph("─", "-"));
         const std::string tee = _c.dim(_t.glyph("┬", "+")), toe = _c.dim(_t.glyph("┴", "+"));
-        if (showText) std::printf("  %s %s\n", _c.txt("Open").c_str(), n1.c_str()); // "Open"/"KNX" in white (txt)
+        if (showText) emit("  " + _c.txt("Open") + " " + n1); // "Open"/"KNX" in white (txt)
         else
-            std::printf("  %s\n", n1.c_str());
-        std::printf("  %s%s%s\n", tee.c_str(), bus.c_str(), toe.c_str());
-        if (showText) std::printf("  %s %s\n", n2.c_str(), _c.txt("KNX").c_str());
+            emit("  " + n1);
+        emit("  " + tee + bus + toe);
+        if (showText) emit("  " + n2 + " " + _c.txt("KNX"));
         else
-            std::printf("  %s\n", n2.c_str());
+            emit("  " + n2);
     }
 
     /**
@@ -838,10 +862,10 @@ class Tpl
     void brandCard() const
     {
         oknxLogo('m'); // the static mark (both nodes filled)
-        std::printf("\n  %s   %s\n", _c.bold(_c.green("ftc")).c_str(),
-                    _c.dim("OpenKNX FileTransferClient · KNXnet/IP").c_str());
-        std::printf("  %s\n", _c.dim("© 2026 OpenKNX · Erkan Çolak · GPL-3.0-or-later").c_str());
-        std::printf("  %s\n", _c.dim("https://openknx.de · https://wiki.openknx.de · https://forum.openknx.de").c_str());
+        emit("");
+        emit("  " + _c.bold(_c.green("ftc")) + "   " + _c.dim("OpenKNX FileTransferClient · KNXnet/IP"));
+        emit("  " + _c.dim("© 2026 OpenKNX · Erkan Çolak · GPL-3.0-or-later"));
+        emit("  " + _c.dim("https://openknx.de · https://wiki.openknx.de · https://forum.openknx.de"));
     }
 
     /*********************************************************************
@@ -853,7 +877,7 @@ class Tpl
      */
     void note(const std::string& text) const
     {
-        std::printf("    %s %s\n", _c.green(_t.glyph("→", "->")).c_str(), _c.dim(text).c_str());
+        emit("    " + _c.green(_t.glyph("→", "->")) + " " + _c.dim(text));
     }
 
     /**
@@ -879,7 +903,7 @@ class Tpl
                 line += cell + sp;
             if (i + 1 < cells.size()) line += "  ";
         }
-        std::printf("%s\n", line.c_str());
+        emit(line);
     }
 
     Theme& theme() const { return _c; }
@@ -1018,6 +1042,15 @@ class Tpl
         return o;
     }
 
+    /** @brief One finished line: to the sink when there is one, else to stdout exactly as before. */
+    void emit(const std::string& s) const
+    {
+        if (_sink) _sink(s);
+        else std::printf("%s\n", s.c_str());
+    }
+
+    LineSink _sink;
+
     Term& _t;
     Theme& _c;
     I18n* _i;
@@ -1095,7 +1128,8 @@ class Panel
         std::string rule;
         for (int i = titleVis; i < W; ++i)
             rule += T.glyph("─", "-");
-        std::printf("\n  %s%s\n", top.c_str(), c.dim(rule).c_str());
+        _p.line("");
+        _p.line("  " + top + c.dim(rule));
 
         // rows (content indented 2 past the frame opener = 4 overall)
         for (const auto& r : _rows)
@@ -1105,22 +1139,22 @@ class Panel
                 std::string s;
                 for (int i = 0; i < W - 2; ++i)
                     s += T.glyph("┈", "-");
-                std::printf("    %s\n", c.mut(s).c_str());
+                _p.line("    " + c.mut(s));
             }
             else if (r.type == Row::KV)
             {
                 std::string pad(std::max(0, labelW - Tpl::vis(r.a)), ' ');
-                std::printf("    %s%s  %s\n", c.dim(r.a).c_str(), pad.c_str(), r.b.c_str());
+                _p.line("    " + c.dim(r.a) + pad + "  " + r.b);
             }
             else
-                std::printf("    %s\n", r.b.c_str());
+                _p.line("    " + r.b);
         }
 
         // bottom rule
         std::string brule = T.glyph("└", "+");
         for (int i = 1; i < W; ++i)
             brule += T.glyph("─", "-");
-        std::printf("  %s\n", c.dim(brule).c_str());
+        _p.line("  " + c.dim(brule));
     }
 
   private:

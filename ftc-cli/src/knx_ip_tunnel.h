@@ -14,7 +14,7 @@
 #include <string>
 
 // Callback prototypes — must match the ftc* callback prototypes in knx/src/knx/bau_systemB.h
-// (under #ifdef OPENKNX_FTC) exactly (shim contract §3).
+// (under #ifdef OPENKNX_FTC_CLIENT) exactly (shim contract §3).
 using FtcResponseCb = void (*)(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, uint8_t* data, uint8_t length);
 using FtcDdCb = void (*)(uint16_t pa, uint8_t descriptorType, const uint8_t* data);
 using FtcPropCb = void (*)(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, const uint8_t* data, uint8_t length);

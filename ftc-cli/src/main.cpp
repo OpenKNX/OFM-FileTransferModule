@@ -24,6 +24,7 @@
 #include <system_error>
 #include <thread>
 #include <mutex>
+#include <map>
 #include <memory>
 #include <atomic>
 #include <algorithm>
@@ -75,6 +76,10 @@ typedef int sock_t;
 #include "cli/Ui.h"
 #include "cli/Watch.h"
 #include "cli/WebConsole.h"
+#include "core/Delta.h"
+#include "core/DeltaProbe.h"
+#include "cli/Browser.h"
+#include "core/DeltaBase.h"
 #include "core/Describe.h"
 #include "core/DeviceMgmt.h"
 #include "core/Discovery.h"
@@ -169,11 +174,14 @@ static bool socketStartup()
     return true;
 #endif
 }
+static void forgetSessionPasswords(); // defined with the session password store, below
+
 static void socketCleanup()
 {
 #ifdef _WIN32
     WSACleanup();
 #endif
+    forgetSessionPasswords(); // every exit path goes through here
 }
 
 /**
@@ -1032,7 +1040,22 @@ static bool ftcLineHook(const std::string& in, uint8_t color)
     // Detail lines go to the log only: the live block repaints by counting its rows, so one stray line
     // between repaints shifts the region and it stacks. Their content is in the control block anyway.
     if (in.find("[dbg]") != std::string::npos) return true;
-    if (g_ftcSuppress) return true; // a structured renderer owns this command's output -> swallow the raw line
+    // A structured renderer owns this command's output -> swallow the raw line. But NOT a refusal: the
+    // apply decision happens inside the transfer state machine, so its "fwupdate NOT triggered" landed
+    // here and was swallowed. The transfer then reported success for an update that never ran.
+    if (g_ftcSuppress)
+    {
+        std::string low = in;
+        for (char& ch : low) ch = (char)std::tolower((unsigned char)ch);
+        const bool mustSee = low.find("not triggered") != std::string::npos ||
+                             low.find("not triggering") != std::string::npos ||
+                             low.find("existence check") != std::string::npos ||
+                             low.find("session expired") != std::string::npos ||
+                             low.find("apply skipped") != std::string::npos ||
+                             low.find("apply aborted") != std::string::npos ||
+                             low.find("refuses writes") != std::string::npos;
+        if (!mustSee) return true;
+    }
     if (!g_term.useColor())
     {
         emitLine(in); // plain voice (pipe / quiet / NO_COLOR) — no glyphs/colour, stays scriptable
@@ -1460,6 +1483,12 @@ static void usage()
                                             "address it asks for interface and device",
                                             "ein Gerät aus einer Firmware-Datei auf DIESEM Rechner aktualisieren; ohne "
                                             "--ip und Adresse fragt es Interface und Gerät ab"));
+    U.cmdRow("knxota ... --from <folder|.app.bin>",
+             L.tr("send only the difference to that release; without it knxota offers what it finds",
+                  "nur die Differenz zu diesem Release senden; ohne die Angabe bietet knxota an, was es findet"));
+    U.cmdRow("knxota ... --no-delta",
+             L.tr("always send the whole image, even where a difference would do",
+                  "immer das Voll-Image senden, auch wo eine Differenz genügen würde"));
     U.cmdRow("--check", L.tr("only compare and report — writes nothing (try this first)",
                              "nur prüfen und berichten — schreibt nichts (damit zuerst testen)"));
     U.cmdRow("--force", L.tr("allow a downgrade, or a file that states no identity",
@@ -1545,6 +1574,9 @@ static void usage()
         {"ftc -i 11.11.0.126 5.0.3 g /log.txt ./log.txt", "fetch a file from the device", "eine Datei vom Gerät holen"},
         {"ftc knxota firmware.uf2 --check", "compare a firmware file against the device, write nothing",
          "Firmware-Datei mit dem Gerät vergleichen, nichts schreiben"},
+        {"ftc knxota firmware.uf2 --from ../MyProduct-0.7.0",
+         "send only what changed since 0.7.0 - minutes instead of half an hour",
+         "nur senden, was sich seit 0.7.0 geändert hat - Minuten statt einer halben Stunde"},
         {"", "", ""},
         {"ftc -i 11.11.0.126 5.0.3 con", "open the device's console over the bus", "die Konsole des Geräts über den Bus öffnen"},
         {"ftc -i 11.11.0.126 bm", "watch the raw bus", "den Bus roh mitlesen"},
@@ -1629,12 +1661,12 @@ static std::string openSessionLog(const std::string& pa, const std::string& expl
  * @brief Path to the persistent console command history (<config-dir>/history, shared across sessions).
  * @details Ensures the directory exists so the first-ever session can append; empty on failure (history off).
  */
-/** @brief Where the unfinished-knxOTA record lives (<config-dir>/knxota_last). */
-static std::string otaSessionPath()
+/** @brief A file next to the config; the directory is made if it is missing. */
+static std::string configSidecar(const char* name)
 {
     const std::string cfg = g_cfg.path();
     const size_t sl = cfg.find_last_of("/\\");
-    if (sl == std::string::npos) return std::string("knxota_last");
+    if (sl == std::string::npos) return std::string(name);
     const std::string dir = cfg.substr(0, sl);
 #ifdef _WIN32
     const char sep = '\\';
@@ -1643,7 +1675,30 @@ static std::string otaSessionPath()
 #endif
     std::string mkErr;
     ftc::makeDirs(dir, mkErr); // best-effort: no record is not worth failing an update over
-    return dir + sep + "knxota_last";
+    return dir + sep + name;
+}
+
+/** @brief Where the list of unfinished knxOTA runs lives. */
+static std::string otaResumePath() { return configSidecar("knxota_resume"); }
+
+/** @brief The single record this used to be. Read once, taken over into the list, then removed. */
+static std::string otaLegacyPath() { return configSidecar("knxota_last"); }
+
+/** @brief Where the "what this computer installed last" list lives (<config-dir>/knxota_bases). */
+static std::string knxotaBaseCachePath()
+{
+    const std::string cfg = g_cfg.path();
+    const size_t sl = cfg.find_last_of("/\\");
+    if (sl == std::string::npos) return std::string("knxota_bases");
+    const std::string dir = cfg.substr(0, sl);
+#ifdef _WIN32
+    const char sep = '\\';
+#else
+    const char sep = '/';
+#endif
+    std::string mkErr;
+    ftc::makeDirs(dir, mkErr); // best-effort: no list is not worth failing an update over
+    return dir + sep + "knxota_bases";
 }
 
 static std::string consoleHistoryPath()
@@ -2853,6 +2908,15 @@ static void printXferFacts(const FtcStatus& st, const FtcTransferSetup& setup, u
  * @details Read-chain commands (info/df/scan) never set isBusy() or a terminal phase, so "finished" = no TX frame,
  *          no phase/progress change, not busy for QUIET_MS. Shared by the one-shot path and the --verbose probe.
  */
+/**
+ * @brief Watch a firmware install to its end and say what happened.
+ * @details FwUpdate itself answers nothing -- by design, the device restarts. FwProbe with an empty
+ *          payload is the status form: busy, failed-with-a-reason, or nothing. It is the SAME question
+ *          for a patch and for a whole image, so this is the same code for both.
+ * @return false when the device reported a failure (and said why).
+ */
+static bool watchFirmwareInstall(uint16_t pa, uint32_t patienceMs = 180000);
+
 static int runOneShotToQuiescence()
 {
     const uint64_t QUIET_MS = 1500;
@@ -2906,6 +2970,44 @@ static int runOneShotToQuiescence()
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 }
+
+static bool watchFirmwareInstall(uint16_t pa, uint32_t patienceMs)
+{
+    ftc::I18n& L = g_i18n;
+    const uint64_t t0 = nowMs();
+    auto pump = []() { g_knxTunnel.pump(); openknxFileTransferClient.loop(true);
+                       std::this_thread::sleep_for(std::chrono::milliseconds(2)); };
+    bool sawWork = false;
+    while (nowMs() - t0 < patienceMs && !g_abort)
+    {
+        uint32_t arg = 0;
+        const ftc::JobState st = ftc::probeDeltaJob(g_knxTunnel, pa, arg, pump, []() { return nowMs(); });
+        if (st == ftc::JobState::Running)
+        {
+            sawWork = true;
+            char d[80];
+            std::snprintf(d, sizeof(d), "%u %s", (unsigned)arg, L.tr("bytes written", "Bytes geschrieben"));
+            g_tpl.waitTick(L.tr("the device is installing the firmware", "das Gerät spielt die Firmware ein"),
+                           (uint32_t)((nowMs() - t0) / 1000), d);
+            continue;
+        }
+        if (st == ftc::JobState::Failed)
+        {
+            std::printf("\r\x1b[K");
+            g_ui.errorBlock(false,
+                            L.tr("the device could not install the firmware",
+                                 "das Gerät konnte die Firmware nicht einspielen"),
+                            {ftc::deltaErrorText(L, arg),
+                             L.tr("the old firmware keeps running - nothing was destroyed",
+                                  "die alte Firmware läuft weiter - es wurde nichts zerstört")});
+            return false;
+        }
+        break; // no job: either done and about to restart, or this device does not report one
+    }
+    if (sawWork) std::printf("\r\x1b[K");
+    return true;
+}
+
 
 /**
  * @brief `ftc --ip <ip> info` — the full interface report (no PA, no tunnel); -q emits a plain key<TAB>value dump.
@@ -3314,6 +3416,155 @@ static std::string paToStr(uint16_t pa)
     return b;
 }
 
+/** @brief "a.l.d" -> the 16-bit address; 0 when it is not one (0.0.0 is not a device address). */
+static uint16_t paFromText(const std::string& t)
+{
+    unsigned a = 0, l = 0, d = 0;
+    if (std::sscanf(t.c_str(), "%u.%u.%u", &a, &l, &d) != 3) return 0;
+    if (a > 15 || l > 15 || d > 255) return 0;
+    return (uint16_t)((a << 12) | (l << 8) | d);
+}
+
+/**
+ * @brief The list of unfinished runs, with a cursor: continue one, or throw entries away.
+ * @details Continuing means running `ftc knxota <file>` again with the answers this entry already
+ *          holds -- so it is printed rather than executed from in here, where the assistant, the
+ *          access check and the transfer presenter are all out of reach. The point of this view is
+ *          the other half: getting rid of entries, which was not possible at all before.
+ * @return 0 -- it changes nothing on any bus.
+ */
+static std::string agoText(uint64_t when, ftc::I18n& L); // defined below, next to paToStr
+
+static int runResumeManager(std::vector<ftc::OtaSession>& all, ftc::Theme& c, ftc::I18n& L)
+{
+    if (all.empty())
+    {
+        g_tpl.status(ftc::Tpl::Stat::Idle, L.tr("no unfinished runs", "keine angefangenen Läufe"), {});
+        return 0;
+    }
+
+    ftc::Keys keys;
+    const bool interactive = g_term.isTty() && keys.active();
+    size_t sel = 0;
+    int drawn = 0;
+
+    auto draw = [&]() {
+        if (interactive && drawn > 0) std::printf("\x1b[%dA\x1b[J", drawn);
+        drawn = 0;
+        auto line = [&](const std::string& t) { std::printf("%s\n", t.c_str()); ++drawn; };
+
+        line("");
+        line("  " + c.amber(L.tr("Unfinished runs", "Angefangene Läufe")));
+        line("  " + c.dim(std::string("   #  ") +
+                          L.tr("TARGET    INTERFACE      FIRMWARE                        GOT     WHEN",
+                               "ZIEL      INTERFACE      FIRMWARE                        STAND   WANN")));
+        for (size_t i = 0; i < all.size(); ++i)
+        {
+            const ftc::OtaSession& e = all[i];
+            std::error_code ec;
+            const bool gone = !std::filesystem::is_regular_file(e.file, ec);
+            char pct[24];
+            std::snprintf(pct, sizeof(pct), "%5.1f %%", e.total ? e.done * 100.0 / e.total : 0.0);
+            const std::string name = std::filesystem::path(e.file).filename().string();
+            // clip() only shortens; a column also needs the short ones padded, or the table drifts.
+            auto col = [&](const std::string& v, int w) {
+                std::string t = g_tpl.clip(v, w);
+                for (int n = ftc::Tpl::dispw(t); n < w; ++n) t += ' ';
+                return t;
+            };
+            std::string row = std::string(interactive && i == sel ? " > " : "   ") +
+                              std::to_string(i + 1) + "  " + col(paToStr(e.pa), 9) + " " +
+                              col(e.ip, 14) + " " + col(name, 30) + " " + pct + "  " +
+                              col(agoText(e.when, L), 12);
+            if (gone) row += L.tr("file missing", "Datei fehlt");
+            if (interactive && i == sel) line("  " + c.sel(row));
+            else
+                line("  " + (gone ? c.dim(row) : c.txt(row)));
+        }
+        line("");
+        if (interactive)
+            line("   " + c.bold(g_term.glyph("↑↓", "up/dn")) + " " + c.dim(L.tr("move", "wählen")) +
+                 "   " + c.bold(g_term.glyph("↵", "enter")) + " " + c.dim(L.tr("how to continue", "wie fortsetzen")) +
+                 "   " + c.bold("x") + " " + c.dim(L.tr("remove", "entfernen")) +
+                 "   " + c.bold("a") + " " + c.dim(L.tr("remove all", "alle entfernen")) +
+                 "   " + c.bold("q") + " " + c.dim(L.tr("back", "zurück")));
+        else
+            line("   " + c.dim(L.tr("no keyboard here - use `ftc knxota resume clear <pa>|all`",
+                                    "keine Tastatur hier - `ftc knxota resume clear <pa>|all` benutzen")));
+        std::fflush(stdout);
+    };
+
+    if (!interactive) { draw(); return 0; }
+
+    for (;;)
+    {
+        draw();
+        const int k = keys.waitKey();
+        if (k == 'q' || k == 'Q' || k == ftc::K_ESC) { std::printf("\n"); return 0; }
+        if (k == ftc::K_UP) { if (sel > 0) --sel; continue; }
+        if (k == ftc::K_DOWN) { if (sel + 1 < all.size()) ++sel; continue; }
+        if (k == ftc::K_HOME) { sel = 0; continue; }
+        if (k == ftc::K_END) { sel = all.size() - 1; continue; }
+        if (k == 'x' || k == 'X')
+        {
+            const ftc::OtaSession victim = all[sel];
+            ftc::otaResumeErase(otaResumePath(), victim);
+            all.erase(all.begin() + (long)sel);
+            if (all.empty()) { std::printf("\n"); g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("all removed", "alle entfernt"), {}); return 0; }
+            if (sel >= all.size()) sel = all.size() - 1;
+            continue;
+        }
+        if (k == 'a' || k == 'A')
+        {
+            keys.restore();
+            std::printf("\n");
+            drawn = 0;
+            if (ftc::confirm(g_term, c, L, L.tr("Remove every entry?", "Alle Einträge entfernen?")))
+            {
+                ftc::otaResumeEraseWhere(otaResumePath(), 0);
+                all.clear();
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("all removed", "alle entfernt"), {});
+                return 0;
+            }
+            return 0; // the raw mode is gone; leaving beats a half-live view
+        }
+        if (k == ftc::K_ENTER)
+        {
+            const ftc::OtaSession& e = all[sel];
+            keys.restore();
+            std::printf("\n");
+            g_tpl.panelTop(L.tr("Continue this run", "Diesen Lauf fortsetzen"), paToStr(e.pa));
+            g_tpl.kv(L.tr("Firmware", "Firmware"), c.txt(e.file));
+            g_tpl.kv(L.tr("Interface", "Interface"), c.txt(e.ip + ":" + std::to_string((unsigned)e.port)));
+            g_tpl.panelEnd();
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(e.file, ec))
+                g_tpl.status(ftc::Tpl::Stat::Warn,
+                             L.tr("that file is not there any more", "diese Datei gibt es nicht mehr"),
+                             {L.tr("point at the same release again, or remove the entry",
+                                   "auf dasselbe Release erneut zeigen, oder den Eintrag entfernen")});
+            else
+                g_tpl.note(std::string("ftc --ip ") + e.ip + " " + paToStr(e.pa) + " knxota " + e.file);
+            return 0;
+        }
+    }
+}
+
+/** @brief "vor 2 Std" / "gestern" -- an age a human reads without doing arithmetic. */
+static std::string agoText(uint64_t when, ftc::I18n& L)
+{
+    if (when == 0) return "—";
+    const uint64_t now = (uint64_t)std::time(nullptr);
+    if (now <= when) return L.tr("just now", "gerade eben");
+    const uint64_t s = now - when;
+    char b[64];
+    if (s < 3600) { std::snprintf(b, sizeof(b), "%s %u %s", L.tr("", "vor"), (unsigned)(s / 60), L.tr("min ago", "Min")); return b; }
+    if (s < 86400) { std::snprintf(b, sizeof(b), "%s %u %s", L.tr("", "vor"), (unsigned)(s / 3600), L.tr("h ago", "Std")); return b; }
+    if (s < 172800) return L.tr("yesterday", "gestern");
+    std::snprintf(b, sizeof(b), "%s %u %s", L.tr("", "vor"), (unsigned)(s / 86400), L.tr("days ago", "Tagen"));
+    return b;
+}
+
 /**
  * @brief Parse the `scan` target tokens into an inclusive PA range [start,end]; false = fall back to serial scan.
  * @details Supports "a.l" (whole line) and "a.l.d [a.l.d]" (single / from-to). Returns false for area/full/unparseable.
@@ -3681,6 +3932,32 @@ static void renderScanSummary(const std::vector<FtcEntry>& devices)
  * @param quiet   drop the explanatory chrome; a refusal still says one line, because silence is not an answer
  * @return the reading the target ended up at — stage Open means writes are allowed now
  */
+/**
+ * @brief Passwords typed during THIS run, per target. In memory only -- never written anywhere.
+ * @details The device closes its write window after an idle timeout the ETS parameter sets, clamped to a
+ *          minimum of 30 seconds. Between signing in and the transfer actually starting, knxOTA shows the
+ *          difference panel and asks two questions -- easily longer than that. The window then closes and
+ *          the upload is refused, which looked to the user like the firmware being rejected.
+ *          Asking for the same password again would be theatre: it was typed a minute ago.
+ */
+static std::map<uint16_t, std::string> g_sessionPw;
+
+/** @brief Wipe every remembered password. Called on the way out, however that happens. */
+static void forgetSessionPasswords()
+{
+    for (auto& kv : g_sessionPw)
+        kv.second.assign(kv.second.size(), '\0');
+    g_sessionPw.clear();
+}
+
+/**
+ * @brief Re-open the target's write window with the password already typed this run.
+ * @details Silent on purpose: the user answered this question once, and a device that simply timed out is
+ *          not a reason to ask again. False means there is nothing remembered, or it no longer works --
+ *          then the caller falls back to asking.
+ */
+static bool refreshWriteWindow(uint16_t pa);
+
 static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, bool quiet, bool askOnly = false)
 {
     ftc::I18n& L = g_i18n;
@@ -3720,8 +3997,9 @@ static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, 
             std::string pw;
             if (!ftc::readSecret(g_term, c, L.tr("password", "Passwort"), pw)) break;
             ad.login(pw.c_str());
-            pw.assign(pw.size(), '\0'); // do not leave it lying around once it is on its way
             acc = ftc::readAccess(g_knxTunnel, pa, ad);
+            if (acc.stage == ftc::Access::Open) g_sessionPw[pa] = pw; // only a password that WORKED
+            pw.assign(pw.size(), '\0'); // do not leave the local copy lying around
             if (acc.stage == ftc::Access::Open)
                 g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
                              {L.tr("writes stay allowed until the device goes idle",
@@ -3763,6 +4041,29 @@ static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, 
     }
     return acc;
 }
+
+static bool refreshWriteWindow(uint16_t pa)
+{
+    const auto it = g_sessionPw.find(pa);
+    if (it == g_sessionPw.end() || it->second.empty()) return false;
+
+    ftc::AccessDeps ad;
+    ad.pump = []() {
+        g_knxTunnel.pump();
+        openknxFileTransferClient.loop(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    };
+    ad.nowMs = []() { return nowMs(); };
+    ad.aborted = []() { return g_abort != 0; };
+    ad.clientBusy = []() { return openknxFileTransferClient.isBusy(); };
+
+    g_ftcSuppress = true;
+    openknxFileTransferClient.requestLogin(pa, it->second.c_str());
+    runOneShotToQuiescence();
+    g_ftcSuppress = false;
+    return ftc::readAccess(g_knxTunnel, pa, ad).stage == ftc::Access::Open;
+}
+
 
 /**
  * @brief Classify + render a <pa> read/status command from structured getters; true if it handled the command.
@@ -3894,10 +4195,14 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             rc = d.valid ? 0 : 1;
             const unsigned maj = (d.ftmVersion >> 8) & 0xFF, min = (d.ftmVersion >> 4) & 0x0F, rev = d.ftmVersion & 0x0F;
             std::string feat;
-            if (d.features & 0x1) feat += "Resume ";
-            if (d.features & 0x2) feat += "Update ";
-            if (d.features & 0x4) feat += "Fast ";
-            if (d.features & 0x8) feat += "Console ";
+            if (d.features & ftc::FEAT_RESUME) feat += "Resume ";
+            if (d.features & ftc::FEAT_UPDATE) feat += "Update ";
+            if (d.features & ftc::FEAT_FAST) feat += "Fast ";
+            if (d.features & ftc::FEAT_CONSOLE) feat += "Console ";
+            if (d.features & ftc::FEAT_GZIP_UPDATE) feat += "Gzip ";
+            if (d.features & ftc::FEAT_DELTA) feat += "Delta ";
+            if (d.features & ftc::FEAT_AUTH_REQUIRED) feat += "Password ";
+            if (d.features & ftc::FEAT_WRITES_DISABLED) feat += "Locked ";
             if (feat.empty()) feat = "(none)";
             else
                 feat.pop_back();
@@ -4423,7 +4728,10 @@ int main(int argc, char** argv)
     bool knxotaForce = false;     // --force: knxOTA may downgrade, or accept a file that states no identity
     bool knxotaCheck = false;     // --check / --dry-run: compare and report, never write
     bool knxotaNoCompress = false; // --no-compress: transfer the image as it is
+    std::string knxotaFrom;        // --from: the release the device is running now (base for a difference)
+    bool knxotaNoDelta = false;    // --no-delta: send the whole image even when a difference would do
     bool knxotaKeepTemp = false;   // --keep-temp: do not delete the prepared payload
+    bool fileBrowser = false;      // --file-browser: open the file chooser and print what was picked
     bool knxotaScan = false;       // the assistant will search the bus for a target once connected
     bool knxotaScanAsk = false;    // ...and lets the user name the line first (c instead of s)
     std::string knxotaLine;        // the line last searched: searching again must not fall back to another one
@@ -4556,8 +4864,14 @@ int main(int argc, char** argv)
             knxotaCheck = true; // knxOTA: read-only — compare and report, write nothing
         else if (a == "--no-compress")
             knxotaNoCompress = true; // send the firmware as it is, even to a device that could unpack one
+        else if (a == "--from" && i + 1 < argc)
+            knxotaFrom = argv[++i]; // knxOTA: the release the device runs now -> send only the difference
+        else if (a == "--no-delta")
+            knxotaNoDelta = true; // always send the whole image, even when a difference would do
         else if (a == "--keep-temp")
             knxotaKeepTemp = true; // leave the prepared payload on disk for inspection
+        else if (a == "--file-browser" || a == "--browse")
+            fileBrowser = true; // open the chooser on its own, no bus involved
         else if (a == "--dir" && i + 1 < argc)
             installDirArg = argv[++i]; // explicit install/uninstall directory
         else if (a == "--lang" && i + 1 < argc)
@@ -4748,6 +5062,148 @@ int main(int argc, char** argv)
         return ok ? 0 : 1;
     }
 
+    // `ftc delta make|show|apply` — build, inspect and replay an OKD1 difference file. All three run
+    // locally: no tunnel, no device. `apply` drives the interpreter the firmware compiles, so a round
+    // trip here exercises the device path rather than a host-only lookalike.
+    if (pos[0] == "delta")
+    {
+        ftc::I18n& L = g_i18n;
+        auto slurp = [](const std::string& path, std::vector<uint8_t>& out) {
+            std::FILE* f = std::fopen(path.c_str(), "rb");
+            if (f == nullptr) return false;
+            std::fseek(f, 0, SEEK_END);
+            const long n = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (n < 0) { std::fclose(f); return false; }
+            out.resize((size_t)n);
+            const bool ok = n == 0 || std::fread(out.data(), 1, (size_t)n, f) == (size_t)n;
+            std::fclose(f);
+            return ok;
+        };
+        auto spill = [](const std::string& path, const std::vector<uint8_t>& in) {
+            std::FILE* f = std::fopen(path.c_str(), "wb");
+            if (f == nullptr) return false;
+            const bool ok = in.empty() || std::fwrite(in.data(), 1, in.size(), f) == in.size();
+            std::fclose(f);
+            return ok;
+        };
+        const std::string verb = pos.size() > 1 ? pos[1] : "";
+
+        if (verb == "make" && pos.size() >= 5)
+        {
+            std::vector<uint8_t> oldImg, newImg, patch;
+            if (!slurp(pos[2], oldImg)) { std::fprintf(stderr, "%s: %s\n", L.tr("cannot read", "nicht lesbar"), pos[2].c_str()); socketCleanup(); return 1; }
+            if (!slurp(pos[3], newImg)) { std::fprintf(stderr, "%s: %s\n", L.tr("cannot read", "nicht lesbar"), pos[3].c_str()); socketCleanup(); return 1; }
+            bool wantPack = false;
+            for (size_t i = 5; i < pos.size(); ++i)
+                if (pos[i] == "--pack") wantPack = true;
+            ftc::delta::Stats st;
+            if (!ftc::delta::make(oldImg, newImg, patch, &st))
+            {
+                std::fprintf(stderr, "%s\n", L.tr("building the patch failed", "Patch konnte nicht gebaut werden"));
+                socketCleanup();
+                return 1;
+            }
+            if (wantPack)
+            {
+                std::vector<uint8_t> packed;
+                if (!ftc::delta::pack(patch, packed))
+                {
+                    std::fprintf(stderr, "%s\n", L.tr("packing the patch failed", "Patch konnte nicht gepackt werden"));
+                    socketCleanup();
+                    return 1;
+                }
+                st.patchBytes = (uint32_t)packed.size();
+                patch.swap(packed);
+            }
+            if (!spill(pos[4], patch))
+            {
+                std::fprintf(stderr, "%s\n", L.tr("building the patch failed", "Patch konnte nicht gebaut werden"));
+                socketCleanup();
+                return 1;
+            }
+            std::printf("  %s %s %s %s  %u B (%.2f %% %s)\n", g_theme.green(g_term.glyph("●", "*")).c_str(),
+                        g_theme.txt(pos[3]).c_str(), g_theme.dim(g_term.glyph("→", "->")).c_str(),
+                        g_theme.green(pos[4]).c_str(), (unsigned)st.patchBytes,
+                        newImg.empty() ? 0.0 : 100.0 * (double)st.patchBytes / (double)newImg.size(),
+                        L.tr("of the image", "des Images"));
+            std::printf("    %s  copy %u/%u B  add %u/%u B  ops %u B\n", g_theme.dim(L.tr("detail", "Detail")).c_str(),
+                        (unsigned)st.copyOps, (unsigned)st.copyBytes, (unsigned)st.addOps,
+                        (unsigned)st.literalBytes, (unsigned)st.opsBytes);
+            socketCleanup();
+            return 0;
+        }
+
+        if (verb == "show" && pos.size() >= 3)
+        {
+            std::vector<uint8_t> patch;
+            ftc::delta::Info info;
+            if (!slurp(pos[2], patch) || !ftc::delta::describe(patch, info))
+            {
+                std::fprintf(stderr, "%s\n", L.tr("not a patch file", "keine Patch-Datei"));
+                socketCleanup();
+                return 1;
+            }
+            std::printf("  version %u  flags 0x%02X  header %s\n", info.version, info.flags,
+                        info.headerOk ? "ok" : g_theme.red("damaged").c_str());
+            std::printf("  source  %u B  crc %08X\n", (unsigned)info.srcLen, (unsigned)info.srcCrc);
+            std::printf("  target  %u B  crc %08X\n", (unsigned)info.dstLen, (unsigned)info.dstCrc);
+            std::printf("  streams ops %u B  literals %u B  file %u B\n", (unsigned)info.opsLen,
+                        (unsigned)info.litLen, (unsigned)patch.size());
+            socketCleanup();
+            return info.headerOk ? 0 : 1;
+        }
+
+        if (verb == "apply" && pos.size() >= 5)
+        {
+            std::vector<uint8_t> oldImg, patch, rebuilt;
+            if (!slurp(pos[2], oldImg) || !slurp(pos[3], patch))
+            {
+                std::fprintf(stderr, "%s\n", L.tr("cannot read the inputs", "Eingaben nicht lesbar"));
+                socketCleanup();
+                return 1;
+            }
+            // Optional source limit: on a device the patch may never read past the region that holds the
+            // image, so the self-test needs a way to exercise that refusal here.
+            uint32_t limit = 0xFFFFFFFFu;
+            for (size_t i = 5; i + 1 < pos.size(); ++i)
+                if (pos[i] == "--limit") limit = (uint32_t)strtoul(pos[i + 1].c_str(), nullptr, 0);
+            uint8_t err = 0;
+            if (!ftc::delta::apply(oldImg, patch, rebuilt, err, limit))
+            {
+                std::fprintf(stderr, "%s %u\n", L.tr("apply refused, reason", "Anwenden verweigert, Grund"), err);
+                socketCleanup();
+                return 10 + err; // distinct exit code per reason, for the self-test
+            }
+            if (!spill(pos[4], rebuilt))
+            {
+                std::fprintf(stderr, "%s: %s\n", L.tr("cannot write", "nicht schreibbar"), pos[4].c_str());
+                socketCleanup();
+                return 1;
+            }
+            std::printf("  %s %s  %u B\n", g_theme.green(g_term.glyph("●", "*")).c_str(),
+                        g_theme.green(pos[4]).c_str(), (unsigned)rebuilt.size());
+            socketCleanup();
+            return 0;
+        }
+
+        std::fprintf(stderr, "%s\n", L.tr("usage: ftc delta make <old.bin> <new.bin> <out.okd>",
+                                          "Aufruf: ftc delta make <alt.bin> <neu.bin> <aus.okd>"));
+        std::fprintf(stderr, "%s\n", L.tr("       ftc delta show <patch.okd>", "       ftc delta show <patch.okd>"));
+        std::fprintf(stderr, "%s\n", L.tr("       ftc delta apply <old.bin> <patch.okd> <rebuilt.bin>",
+                                          "       ftc delta apply <alt.bin> <patch.okd> <neu.bin>"));
+        socketCleanup();
+        return 1;
+    }
+
+    // knxOTA exit codes, and the difference matters to whoever calls it:
+    //   0   installed, or there was nothing to install
+    //   1   refused -- this firmware does not belong to this device
+    //   2   the command line or the file was unusable
+    //   3   the device is not accepting writes (also: it refused the transfer)
+    //   4   the transfer did not complete -- the reason is in the result panel
+    //   6   the device did not come back after the restart
+    //   130 the user stopped it: quit at a chooser, or answered no. NOTHING was written.
     // --- knxOTA: `ftc [--ip <ip>] [<pa>] knxota <local firmware file>` ------------------------------
     // `knxota` takes a firmware file from THIS machine and walks the whole update; `<pa> fwupdate <remote>`
     // only flashes something already uploaded. The file is read/checked/prepared BEFORE a tunnel slot is taken.
@@ -4789,6 +5245,61 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+    // `ftc knxota resume [list|clear <pa>|clear all]` -- the unfinished runs, without touching a bus.
+    // Caught before readFirmware, because "resume" is a word, not a firmware file.
+    if (knxotaActive && pos[knxotaVerb + 1] == "resume")
+    {
+        ftc::I18n& L = g_i18n;
+        ftc::Theme& c = g_theme;
+        const std::string sub = (knxotaVerb + 2 < pos.size()) ? pos[knxotaVerb + 2] : std::string();
+
+        if (sub == "clear")
+        {
+            const std::string what = (knxotaVerb + 3 < pos.size()) ? pos[knxotaVerb + 3] : std::string();
+            if (what.empty())
+            {
+                std::fprintf(stderr, "usage: ftc knxota resume clear <pa>|all\n");
+                socketCleanup();
+                return 2;
+            }
+            const uint16_t pa = (what == "all") ? (uint16_t)0 : paFromText(what);
+            if (what != "all" && pa == 0)
+            {
+                std::fprintf(stderr, "%s: %s\n", L.tr("not an individual address", "keine physikalische Adresse"),
+                             what.c_str());
+                socketCleanup();
+                return 2;
+            }
+            const size_t gone = ftc::otaResumeEraseWhere(otaResumePath(), pa);
+            char b[96];
+            std::snprintf(b, sizeof(b), "%u", (unsigned)gone);
+            if (!quiet)
+                g_tpl.status(gone ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Idle,
+                             std::string(b) + L.tr(" entr(y/ies) removed", " Eintrag/Einträge entfernt"), {});
+            socketCleanup();
+            return 0;
+        }
+
+        std::vector<ftc::OtaSession> all = ftc::otaResumeLoad(otaResumePath(), otaLegacyPath());
+        ftc::otaResumeAge(all, (uint64_t)std::time(nullptr));
+
+        if (sub == "list" || quiet || !g_term.isTty())
+        {
+            // One line per entry, tab separated -- for a script, not for reading.
+            for (const ftc::OtaSession& e : all)
+                std::printf("%s\t%s\t%s\t%u\t%u\t%llu\n", paToStr(e.pa).c_str(), e.ip.c_str(),
+                            e.file.c_str(), (unsigned)e.done, (unsigned)e.total,
+                            (unsigned long long)e.when);
+            socketCleanup();
+            return all.empty() ? 1 : 0;
+        }
+
+        if (!quiet) g_ui.banner();
+        const int rc = runResumeManager(all, c, L);
+        socketCleanup();
+        return rc;
+    }
+
     if (knxotaActive)
     {
         ftc::I18n& L = g_i18n;
@@ -4824,9 +5335,45 @@ int main(int argc, char** argv)
         // An unfinished run for THIS firmware: everything it asked is already answered, so offer to carry on.
         // Everything that would be reused is shown -- resuming blind would be worse than asking again.
         {
-            const ftc::OtaSession prev = ftc::otaSessionLoad(otaSessionPath());
+            std::vector<ftc::OtaSession> runs = ftc::otaResumeLoad(otaResumePath(), otaLegacyPath());
+            ftc::otaResumeAge(runs, (uint64_t)std::time(nullptr));
             const uint32_t crc = ftc::otaCrc32(knxotaFw.payload.data(), knxotaFw.payload.size());
-            if (prev.valid && prev.crc == crc && g_term.isTty() && !quiet && !knxotaForce)
+            // A named target narrows it further. Without one, every entry for this firmware is a
+            // candidate -- that is exactly the case the old single record could not represent, and it
+            // used to offer a run for a DIFFERENT device just because the image matched.
+            const uint16_t wantPa = (knxotaVerb > 0) ? paFromText(pos[0]) : (uint16_t)0;
+            std::vector<ftc::OtaSession> hits;
+            for (const ftc::OtaSession& e : runs)
+                if (e.crc == crc && (wantPa == 0 || e.pa == wantPa)) hits.push_back(e);
+
+            size_t pickIdx = 0;
+            bool offer = !hits.empty() && g_term.isTty() && !quiet && !knxotaForce;
+            if (offer && hits.size() > 1)
+            {
+                // Several devices were left half-updated with this firmware. Pick before answering.
+                g_tpl.section(L.tr("Unfinished runs with this firmware",
+                                   "Angefangene Läufe mit dieser Firmware"));
+                for (size_t i = 0; i < hits.size(); ++i)
+                {
+                    char pr[48];
+                    std::snprintf(pr, sizeof(pr), "%5.1f %%", hits[i].total ? hits[i].done * 100.0 / hits[i].total : 0.0);
+                    g_tpl.kv(std::to_string(i + 1) + "  " + paToStr(hits[i].pa),
+                             c.txt(hits[i].ip) + c.dim("   " + std::string(pr) + "   " + agoText(hits[i].when, L)));
+                }
+                std::printf("  %s %s ", c.amber("?").c_str(),
+                            c.bold(L.tr("Which one? [1-9, Enter = none]", "Welchen? [1-9, Enter = keinen]")).c_str());
+                std::fflush(stdout);
+                char buf[16] = {0};
+                if (std::fgets(buf, sizeof(buf), stdin) == nullptr) offer = false;
+                else
+                {
+                    const long n = std::strtol(buf, nullptr, 10);
+                    if (n >= 1 && (size_t)n <= hits.size()) pickIdx = (size_t)(n - 1);
+                    else offer = false;
+                }
+            }
+            const ftc::OtaSession prev = offer ? hits[pickIdx] : ftc::OtaSession();
+            if (offer)
             {
                 char pa[16];
                 std::snprintf(pa, sizeof(pa), "%u.%u.%u", (prev.pa >> 12) & 0x0F, (prev.pa >> 8) & 0x0F, prev.pa & 0xFF);
@@ -4846,13 +5393,28 @@ int main(int argc, char** argv)
                 g_tpl.panelEnd();
                 g_tpl.note(L.tr("the same firmware -- the transfer continues where it stopped",
                                 "dieselbe Firmware -- die Übertragung setzt dort an, wo sie aufhörte"));
-                if (ftc::confirm(g_term, c, L, L.tr("Continue this run?", "Diesen Lauf fortsetzen?"), true))
+                const ftc::Answer3 a = ftc::confirm3(g_term, c, L,
+                                                     L.tr("Continue this run?", "Diesen Lauf fortsetzen?"),
+                                                     L.tr("no, and stop asking - remove the entry",
+                                                          "nein, nicht mehr fragen - Eintrag entfernen"));
+                if (a == ftc::Answer3::Yes)
                 {
                     if (ip.empty()) ip = prev.ip;
                     port = prev.port;
                     knxotaResumePa = prev.pa;
                     knxotaResume = true;
                     knxotaScan = false; // the target is known; nothing left to search for
+                }
+                else if (a == ftc::Answer3::Forget)
+                {
+                    // "No" and "throw it away" are different answers. Only this one removes it, and it
+                    // says so -- a silent removal would look like the question simply stopped working.
+                    ftc::otaResumeErase(otaResumePath(), prev);
+                    g_tpl.status(ftc::Tpl::Stat::Ok,
+                                 L.tr("entry removed - it will not be offered again",
+                                      "Eintrag entfernt - er wird nicht mehr angeboten"),
+                                 {L.tr("`ftc knxota resume` shows what is left",
+                                       "`ftc knxota resume` zeigt, was übrig ist")});
                 }
             }
         }
@@ -4875,13 +5437,8 @@ int main(int argc, char** argv)
                                 c.dim(L.tr("looking for KNXnet/IP interfaces …", "suche KNXnet/IP-Interfaces …")).c_str());
                     found = ftc::discoverInterfaces(port, 3000);
                 }
-                // OpenKNX interfaces first: an unsorted list invites the top row, and the top row is
-                // whatever answered fastest — which is how a foreign router on another line gets picked.
-                std::stable_sort(found.begin(), found.end(), [](const ftc::DiscoveredIface& a, const ftc::DiscoveredIface& b) {
-                    const bool ao = a.name.find("OpenKNX") != std::string::npos || a.name.find("OpenKnx") != std::string::npos;
-                    const bool bo = b.name.find("OpenKNX") != std::string::npos || b.name.find("OpenKnx") != std::string::npos;
-                    return ao && !bo;
-                });
+                // Order comes from discoverInterfaces(): OpenKNX first, then by address. Not repeated
+                // here -- one place decides it, so every list in ftc shows the same one.
                 if (found.size() == 1)
                 {
                     ip = found[0].ip;
@@ -4943,7 +5500,7 @@ int main(int argc, char** argv)
         // needs the tunnel, so it happens in the online phase once we are connected.
         if (knxotaVerb == 0) // no address in front of the verb
         {
-            g_tpl.section(L.tr("Device", "Gerät"));
+            g_tpl.section(L.tr("OpenKNX device", "OpenKNX Gerät"));
             g_tpl.keybar({{L.tr("address", "Adresse"), L.tr("e.g. 5.0.3", "z. B. 5.0.3")},
                           {"L", L.tr("search this interface's line", "die Linie dieses Interfaces absuchen")},
                           {"c", L.tr("search another line", "eine andere Linie absuchen")},
@@ -4967,6 +5524,29 @@ int main(int argc, char** argv)
                 knxotaScanAsk = (t == "c" || t == "C");  // c: let the user name the line first
             }
         }
+    }
+
+    // `ftc --file-browser [<start>]` -- open the file chooser on its own. No bus, no device: it is the
+    // same screen knxOTA opens, reachable for a look or a quick check without an update in progress.
+    if (fileBrowser || (!pos.empty() && pos[0] == "browse"))
+    {
+        ftc::BrowseSpec spec;
+        spec.title = "ftc";
+        spec.allowDirPick = true;
+        spec.allowFilePick = true;
+        spec.roots = ftc::driveRoots(); // so "d" works here too, exactly as it does inside knxOTA
+        const size_t at = (!pos.empty() && pos[0] == "browse") ? 1 : 0;
+        if (at < pos.size()) spec.start = pos[at];
+        std::string picked;
+        if (!ftc::browse(g_term, g_theme, g_i18n, spec, picked))
+        {
+            std::fprintf(stderr, "  %s\n", g_theme.dim(g_i18n.tr("nothing picked", "nichts gewählt")).c_str());
+            socketCleanup();
+            return 1;
+        }
+        std::printf("%s\n", picked.c_str());
+        socketCleanup();
+        return 0;
     }
 
     // `ftc install|uninstall [--system] [--dir <path>]` — the running binary copies/removes itself onto PATH.
@@ -5818,7 +6398,15 @@ int main(int argc, char** argv)
                 const bool isOk = e.isOpenKnx || (it != det.end() && it->second.mfr == ftc::MFR_OPENKNX);
                 pick.emplace_back(e.name, isOk);
             }
-            std::stable_sort(pick.begin(), pick.end(), [](const auto& x, const auto& y) { return x.second && !y.second; });
+            // Same rule for the devices: OpenKNX first, then by address -- and by address means
+            // numerically, or 5.0.11 would sort between 5.0.1 and 5.0.2.
+            std::sort(pick.begin(), pick.end(), [](const auto& x, const auto& y) {
+                if (x.second != y.second) return x.second;
+                unsigned xa = 0, xl = 0, xd = 0, ya = 0, yl = 0, yd = 0;
+                std::sscanf(x.first.c_str(), "%u.%u.%u", &xa, &xl, &xd);
+                std::sscanf(y.first.c_str(), "%u.%u.%u", &ya, &yl, &yd);
+                return ((xa << 12) | (xl << 8) | xd) < ((ya << 12) | (yl << 8) | yd);
+            });
 
             if (!pick.empty())
             {
@@ -5901,7 +6489,7 @@ int main(int argc, char** argv)
         const ftc::DevVersion dv = ftc::devVersionFrom(di.hardware, di.haveHw, di.version, di.haveVersion);
         const ftc::Verdict verdict = ftc::compareVersions(knxotaFw.id, dv);
 
-        g_tpl.section(L.tr("Device", "Gerät") + std::string(" · ") + paText);
+        g_tpl.section(L.tr("OpenKNX device", "OpenKNX Gerät") + std::string(" · ") + paText);
         if (!di.valid)
         {
             unsigned ta = 0, tl = 0, td = 0;
@@ -5911,11 +6499,24 @@ int main(int argc, char** argv)
             return 6;
         }
         g_tpl.panelTop(L.tr("Version comparison", "Versionsvergleich"), paText);
+        // The application id is shown on BOTH lines, always: it is what the verdict is decided on, and a
+        // verdict whose grounds are off screen reads as an opinion. "0.7.0 vs 0.8.0 -> different device"
+        // is baffling until the two numbers behind it are visible.
         g_tpl.kv(L.tr("Device", "Gerät"), c.txt(di.haveOrder ? di.order : "OpenKNX") +
-                 c.dim(std::string("   ") + ftc::devVersionText(dv)));
+                 c.dim(std::string("   ") + ftc::devVersionText(dv)) +
+                 (dv.valid ? c.dim(std::string("   ") + L.tr("application ", "Anwendung ") +
+                                   ftc::appIdText(dv.openKnxId, dv.appNumber))
+                           : std::string()));
         g_tpl.kv(L.tr("File", "Datei"), c.txt(knxotaFw.hardware) +
-                 c.dim(std::string("   ") + ftc::fwVersionText(knxotaFw.id)));
+                 c.dim(std::string("   ") + ftc::fwVersionText(knxotaFw.id)) +
+                 (knxotaFw.id.valid ? c.dim(std::string("   ") + L.tr("application ", "Anwendung ") +
+                                            ftc::appIdText(knxotaFw.id.openKnxId, knxotaFw.id.appNumber))
+                                    : std::string()));
         g_tpl.kv(L.tr("Result", "Ergebnis"), ftc::verdictChip(g_tpl, L, verdict));
+        // The chip names the outcome; these lines say what it costs. Without them "NEW APPLICATION" is a
+        // label the reader has no way to weigh, and weighing it is exactly what they are here to do.
+        for (const auto& e : ftc::verdictExplain(L, verdict))
+            g_tpl.kv("", c.dim(e));
         g_tpl.panelEnd();
 
         // The Update bit is the device's own statement that it can install a firmware. Absent, we do not
@@ -5970,6 +6571,177 @@ int main(int argc, char** argv)
                 break;
         }
 
+        // --- full image or only the difference -------------------------------------------------------
+        // Decided here, for the same reason the compression is: only now is it known what the device can
+        // take. A patch needs three things to be worth it -- the device understands one, the raw image of
+        // this release is at hand, and a previous release is known to compare against. Any of them
+        // missing simply means the full image goes, which is what would have happened anyway.
+        std::string deltaNote;
+        // What to hand the NEXT run as its base: the file the user named. Not a .app.bin beside it --
+        // loadBaseImage() unwraps a package again next time, and a release ships the package, not
+        // necessarily the raw image.
+        std::string deltaNewApp;
+        std::vector<uint8_t> newImg; // the raw application image of THIS release
+        if (!knxotaCheck && (acc.bits & ftc::FEAT_DELTA) != 0 && !knxotaNoDelta)
+        {
+            // Unwrap this release the same way the base is unwrapped -- .uf2 and .factory.bin both
+            // CARRY the image. Looking only for a sibling .app.bin made the difference depend on a file
+            // the release does not have to ship, so a normal release quietly took the slow route.
+            std::string newUsed, newWhy;
+            if (!ftc::loadBaseImage(pos[knxotaVerb + 1], newImg, newUsed, newWhy))
+            {
+                g_tpl.status(ftc::Tpl::Stat::Idle,
+                             L.tr("no raw image can be read from this file - sending the full one",
+                                  "aus dieser Datei ist kein rohes Image zu lesen - es geht das Voll-Image"),
+                             {newWhy});
+            }
+            else
+            {
+                std::string baseApp = knxotaFrom;
+                // Nothing named on the command line: offer what this computer already knows before
+                // anyone is asked to type a path. Not asking at all is how the slow route stayed
+                // invisible -- the user never learned the update could have taken two minutes.
+                if (baseApp.empty() && g_term.isTty() && !quiet)
+                {
+                    const std::vector<ftc::BaseCandidate> cands =
+                        ftc::collectBaseCandidates(knxotaBaseCachePath(), targetPaEarly,
+                                                   pos[knxotaVerb + 1],
+                                                   L.tr("last installed from here", "zuletzt von hier eingespielt"));
+                    // What it is worth, without promising a number that only building the patch can know.
+                    char saving[160];
+                    std::snprintf(saving, sizeof(saving),
+                                  L.tr("%u KB go over the bus otherwise - a difference is usually under a tenth of that",
+                                       "sonst gehen %u KB über den Bus - eine Differenz ist meist unter einem Zehntel davon"),
+                                  (unsigned)(knxotaFw.payload.size() / 1024));
+                    std::string picked;
+                    const ftc::BasePick pick = ftc::pickBase(g_term, c, L, g_tpl, cands, saving, picked);
+                    if (pick == ftc::BasePick::Quit)
+                    {
+                        std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled - nothing was changed",
+                                                                  "abgebrochen - es wurde nichts verändert")).c_str());
+                        socketCleanup();
+                        return 130;
+                    }
+                    // Handed over unresolved: loadBaseImage() knows how to unwrap a .uf2, which a
+                    // path-only lookup cannot, and it says WHY when it cannot.
+                    if (pick == ftc::BasePick::Chosen) baseApp = picked;
+                }
+
+                std::vector<uint8_t> baseImg, patch;
+                std::string baseUsed, baseWhy;
+                const bool haveBase = !baseApp.empty() &&
+                                      ftc::loadBaseImage(baseApp, baseImg, baseUsed, baseWhy);
+                if (!baseApp.empty() && !haveBase)
+                    g_tpl.status(ftc::Tpl::Stat::Warn,
+                                 L.tr("that is not a release image - sending the full one",
+                                      "das ist kein Release-Image - es geht das Voll-Image"),
+                                 {baseWhy});
+                // The exact length is what a base check turns on, and only the facts file states it for
+                // a padded .uf2. Say so rather than let a rejected base look like the device's fault.
+                if (haveBase && !newWhy.empty())
+                    g_tpl.status(ftc::Tpl::Stat::Warn,
+                                 L.tr("the exact image length of this release is not stated",
+                                      "die genaue Image-Länge dieses Release ist nicht angegeben"),
+                                 {newWhy});
+                if (haveBase && !newImg.empty())
+                {
+                    // Remembered only once a difference was actually attempted from this file.
+                    deltaNewApp = pos[knxotaVerb + 1];
+                    const uint32_t bLen = (uint32_t)baseImg.size();
+                    const uint32_t bCrc = ftc::delta::crc(baseImg.data(), baseImg.size());
+                    ftc::BaseAnswer ans = ftc::BaseAnswer::NoMatch;
+                    uint32_t arg = 0;
+                    g_tpl.status(ftc::Tpl::Stat::Idle,
+                                 L.tr("asking the device whether it runs the release you named",
+                                      "das Gerät wird gefragt, ob es das genannte Release fährt"),
+                                 {});
+                    if (ftc::probeBase(g_knxTunnel, targetPaEarly, bLen, bCrc, ans, arg,
+                                       []() { g_knxTunnel.pump(); openknxFileTransferClient.loop(true);
+                                              std::this_thread::sleep_for(std::chrono::milliseconds(2)); },
+                                       []() { return nowMs(); }) &&
+                        ans == ftc::BaseAnswer::Match && ftc::delta::make(baseImg, newImg, patch))
+                    {
+                        std::vector<uint8_t> packed;
+                        bool patchPacked = false;
+                        if (ftc::delta::pack(patch, packed) && packed.size() < patch.size())
+                        {
+                            patch.swap(packed);
+                            patchPacked = true; // recorded at the swap; deducing it from the sizes afterwards
+                        }                       // is wrong whenever pack() succeeded but did not help
+                        // Only if it really is smaller. A difference that saves nothing costs a second
+                        // mechanism for no gain, and the full image is the better-tested path.
+                        if (patch.size() < knxotaFw.payload.size())
+                        {
+                            const size_t fullBytes = knxotaFw.payload.size();
+                            const size_t diffBytes = patch.size();
+                            char b[96];
+                            std::snprintf(b, sizeof(b), "%u -> %u B", (unsigned)fullBytes, (unsigned)diffBytes);
+                            knxotaFw.payload.swap(patch);
+                            knxotaFw.compressed = true; // a patch carries its own packing; never gzip it again
+                            deltaNote = b;
+
+                            // A block, not a line. What is worth knowing here is what the difference was
+                            // computed AGAINST, whether the device confirmed it, and what it buys -- three
+                            // facts that a single status line had no room for.
+                            const size_t saved = fullBytes - diffBytes;
+                            const unsigned pctOf = (unsigned)((diffBytes * 100 + fullBytes / 2) / fullBytes);
+                            const std::string baseName = std::filesystem::path(baseUsed).filename().string();
+                            const std::string baseDir = std::filesystem::path(baseUsed).parent_path().string();
+                            char crcTxt[24], line[160];
+
+                            g_tpl.panelTop(L.tr("Difference update (knxOTA delta)",
+                                                "Differenz-Update (knxOTA Delta)"));
+                            g_tpl.kv(L.tr("Base", "Basis"),
+                                     c.txt(baseName) + (dv.valid ? c.dim("   ·   " + ftc::devVersionText(dv)) : std::string()));
+                            if (!baseDir.empty()) g_tpl.kv("", c.dim(g_tpl.clip(baseDir, 64)));
+                            std::snprintf(crcTxt, sizeof(crcTxt), "%08X", (unsigned)bCrc);
+                            g_tpl.kv(L.tr("Confirmed", "Bestätigt"),
+                                     c.green(g_term.glyph("●", "*")) + " " +
+                                         c.txt(L.tr("the device runs exactly this image",
+                                                    "das Gerät fährt genau dieses Image")) +
+                                         c.dim(std::string("      CRC ") + crcTxt));
+                            std::snprintf(line, sizeof(line), "%u B", (unsigned)fullBytes);
+                            g_tpl.kv(L.tr("Full image", "Voll-Image"),
+                                     c.txt(line) + c.dim("   ·   " + ftc::transferEta(L, fullBytes)));
+                            std::snprintf(line, sizeof(line), "%u B", (unsigned)diffBytes);
+                            g_tpl.kv(L.tr("Difference", "Differenz"),
+                                     c.green(line) + c.dim("   ·   " + ftc::transferEta(L, diffBytes)) +
+                                         c.dim("      " + std::to_string(pctOf) + " %" +
+                                               L.tr(" of it", " davon")));
+                            std::snprintf(line, sizeof(line), "%u B", (unsigned)saved);
+                            g_tpl.kv(L.tr("Saved", "Ersparnis"),
+                                     c.txt(line) + c.dim("   ·   " + ftc::transferEta(L, saved) +
+                                                         L.tr(" less", " weniger")));
+                            g_tpl.kv(L.tr("Method", "Verfahren"),
+                                     c.dim(std::string("OKD1") + (patchPacked ? L.tr(", packed", ", gepackt") : "") +
+                                           L.tr(" - the device rebuilds the rest from the image it is running",
+                                                " - das Gerät setzt den Rest aus dem laufenden Image zusammen")));
+                            g_tpl.kv(L.tr("Falls back", "Fällt zurück"),
+                                     c.dim(L.tr("if the checksum fails, the old firmware starts again",
+                                                "schlägt die Prüfsumme fehl, startet die alte Firmware wieder")));
+                            g_tpl.panelEnd();
+                        }
+                        else
+                            g_tpl.status(ftc::Tpl::Stat::Idle,
+                                         L.tr("the difference saves nothing here - sending the full image",
+                                              "die Differenz spart hier nichts - es geht das Voll-Image"),
+                                         {});
+                    }
+                    else if (ans == ftc::BaseAnswer::NoMatch)
+                        g_tpl.status(ftc::Tpl::Stat::Idle,
+                                     L.tr("the device runs a different release than the one named - sending the full image",
+                                          "das Gerät fährt ein anderes Release als das genannte - es geht das Voll-Image"),
+                                     {});
+                }
+            }
+        }
+        else if (!knxotaCheck && !knxotaNoDelta)
+        {
+            // Remembered even when this device cannot take a difference: it may be able to after its
+            // next update, and then the base has to have been recorded on the run before.
+            deltaNewApp = pos[knxotaVerb + 1];
+        }
+
         // An ESP image is read raw, because only the device knows whether it can unpack one. Now that it
         // has answered, compress it if it said yes — this is where ~88 minutes on the bus become ~54.
         if (!knxotaFw.compressed && !knxotaNoCompress && (acc.bits & ftc::FEAT_GZIP_UPDATE) != 0)
@@ -6008,12 +6780,60 @@ int main(int argc, char** argv)
             return verdict == ftc::Verdict::Upgrade ? 0 : 1;
         }
 
-        // Guards. A different application is refused outright: it would wipe the device's whole setup.
+        // A new application number on the SAME product is what a redesign looks like. It costs the whole
+        // ETS setup and the device comes back unprogrammed -- but someone who knows that may well want
+        // to go ahead, so they are told exactly what it costs and asked. A script gets the refusal it
+        // had before: nobody is there to weigh it up, and --force is the way to say it was meant.
+        if (verdict == ftc::Verdict::DifferentApplication && !knxotaForce)
+        {
+            g_tpl.status(ftc::Tpl::Stat::Warn,
+                         L.tr("this firmware carries a different application number",
+                              "diese Firmware trägt eine andere Anwendungsnummer"),
+                         {ftc::appIdText(dv.openKnxId, dv.appNumber) + L.tr(" on the device", " auf dem Gerät") +
+                          "  ->  " + ftc::appIdText(knxotaFw.id.openKnxId, knxotaFw.id.appNumber) +
+                          L.tr(" in the file", " in der Datei")});
+            for (const char* line : {
+                     L.tr("This happens when a release changes so much that it becomes a new ETS application.",
+                          "Das kommt vor, wenn ein Release so viel ändert, dass daraus eine neue ETS-Applikation wird."),
+                     L.tr("The transfer itself works. Afterwards the device is unprogrammed on 15.15.255 and",
+                          "Die Übertragung selbst funktioniert. Danach ist das Gerät unprogrammiert auf 15.15.255 und"),
+                     L.tr("has to be programmed again in ETS -- parameters, group addresses AND the address.",
+                          "muss in der ETS neu programmiert werden -- Parameter, Gruppenadressen UND die Adresse."),
+                     L.tr("Have the new ETS application to hand before you start.",
+                          "Halte die neue ETS-Applikation bereit, bevor du startest.")})
+                std::fprintf(stderr, "    %s\n", c.dim(line).c_str());
+            std::fprintf(stderr, "\n");
+            if (!g_term.isTty())
+            {
+                g_ui.errorBlock(false, L.tr("not decided -- nothing was transferred",
+                                            "nicht entschieden -- es wurde nichts übertragen"),
+                                {L.tr("a new application costs the device's whole setup",
+                                      "eine neue Anwendung kostet die komplette Einrichtung des Geräts")},
+                                L.tr("pass --force if that is what you meant",
+                                     "mit --force bestätigen, wenn es so gemeint war"));
+                socketCleanup();
+                return 1;
+            }
+            if (!ftc::confirm(g_term, c, L,
+                              L.tr("Install it and program the device again in ETS afterwards?",
+                                   "Einspielen und das Gerät danach in der ETS neu programmieren?"), false))
+            {
+                std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled -- nothing was changed",
+                                                          "abgebrochen -- es wurde nichts verändert")).c_str());
+                socketCleanup();
+                return 130;
+            }
+        }
+
+        // Guards. A file for another product is refused outright: it would wipe the device's whole setup.
         if (verdict == ftc::Verdict::DifferentDevice)
         {
-            g_ui.errorBlock(false, L.tr("this firmware is for a different device",
-                                        "diese Firmware ist für ein anderes Gerät"),
-                            {L.tr("it would wipe this device's entire setup",
+            g_ui.errorBlock(false, L.tr("this firmware is for a different product",
+                                        "diese Firmware gehört zu einem anderen Produkt"),
+                            {ftc::appIdText(dv.openKnxId, dv.appNumber) + L.tr(" on the device", " auf dem Gerät") +
+                             "  ->  " + ftc::appIdText(knxotaFw.id.openKnxId, knxotaFw.id.appNumber) +
+                             L.tr(" in the file", " in der Datei"),
+                             L.tr("it would wipe this device's entire setup",
                                   "damit ginge die komplette Einrichtung dieses Geräts verloren"),
                              L.tr("it would come back unprogrammed on 15.15.255",
                                   "es käme unprogrammiert auf 15.15.255 zurück")},
@@ -6059,7 +6879,7 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled — nothing was changed",
                                                           "abgebrochen — es wurde nichts verändert")).c_str());
                 socketCleanup();
-                return 1;
+                return 130;
             }
         }
 
@@ -6088,21 +6908,24 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled — this device needs one update over USB first",
                                                           "abgebrochen — dieses Gerät braucht einmalig ein Update über USB")).c_str());
                 socketCleanup();
-                return 1;
+                return 130;
             }
         }
 
         // The one stop before anything is written. Everything that makes this safe is stated here, because
         // this is the moment the user decides — not in the failure screen afterwards.
         {
-            const unsigned mins = (unsigned)((knxotaFw.payload.size() / 350) / 60);
-            char dur[64];
-            std::snprintf(dur, sizeof(dur), "~%u %s", mins, L.tr("min", "Min."));
+            // Said HERE and only here: by now the difference or the full image is decided, the
+            // compression is decided, and this is the payload that will really go. Still a range --
+            // the interface decides the rest, and we do not know which one until bytes move.
+            const std::string dur = ftc::transferEta(L, knxotaFw.payload.size());
             g_tpl.panelTop(L.tr("Ready", "Bereit"), paText);
             g_tpl.kv(L.tr("Device", "Gerät"), c.txt(di.haveOrder ? di.order : "OpenKNX") +
                      c.dim(std::string("  ·  ") + paText + L.tr("  ·  running ", "  ·  läuft mit ") + ftc::devVersionText(dv)));
             g_tpl.kv(L.tr("New", "Neu"), c.bold(ftc::fwVersionText(knxotaFw.id)));
             g_tpl.kv(L.tr("Duration", "Dauer"), c.txt(dur) +
+                     c.dim(L.tr("  ·  depending on the interface (350-650 B/s)",
+                                "  ·  je nach Interface (350-650 B/s)")) +
                      c.dim(L.tr("  ·  the device is away for about 30 s right at the end",
                                 "  ·  das Gerät ist ganz am Ende etwa 30 Sek. weg")));
             g_tpl.panelEnd();
@@ -6127,7 +6950,7 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled — nothing was changed",
                                                           "abgebrochen — es wurde nichts verändert")).c_str());
                 socketCleanup();
-                return 1;
+                return 130;
             }
         }
 
@@ -6168,13 +6991,17 @@ int main(int argc, char** argv)
         sess.pa = targetPa;
         sess.total = (uint32_t)knxotaFw.payload.size();
         sess.when = (uint64_t)std::time(nullptr);
-        ftc::otaSessionSave(otaSessionPath(), sess);
+        ftc::otaResumeUpsert(otaResumePath(), sess, otaLegacyPath());
 
         // A broken-off transfer resumes where it stopped, so the retry belongs HERE -- restarting the whole
         // assistant to re-answer questions nobody's answers changed is the thing worth avoiding.
         int xrc = 0;
         for (;;)
         {
+            // The write window is an IDLE timeout, 30 s at the shortest, and the panels plus two questions
+            // above easily take longer. Re-open it here, right before the first chunk -- reacting to the
+            // refusal afterwards works too, but this is the point where the clock actually starts.
+            refreshWriteWindow(targetPa);
             g_ftcSuppress = true; // arm BEFORE the request: requestUpload narrates its framing decision at once
             openknxFileTransferClient.requestUpload(targetPa, staged.path().c_str(), 0, false, 1,
                                                     canSelfApply, remoteName.c_str(), 0);
@@ -6184,9 +7011,45 @@ int main(int argc, char** argv)
 
             sess.done = openknxFileTransferClient.status().done;
             sess.when = (uint64_t)std::time(nullptr);
-            ftc::otaSessionSave(otaSessionPath(), sess); // keep the record, now with how far it got
+            ftc::otaResumeUpsert(otaResumePath(), sess); // keep the entry, now with how far it got
 
             std::string why;
+            // A refusal is not retried blind -- but it is almost always the write window, which closed
+            // while the user was answering the questions above. That is fixable right here: ask the
+            // device where it stands, let the user log in again, and go on. Sending them away to run
+            // `login` by hand and start the whole update over is the wrong answer to a timeout.
+            {
+                const char* msg = openknxFileTransferClient.status().message;
+                const bool refused = msg && (std::strstr(msg, "refused") || std::strstr(msg, "auth") ||
+                                             std::strstr(msg, "locked"));
+                if (refused && g_term.isTty() && !quiet && !g_abort)
+                {
+                    g_tpl.status(ftc::Tpl::Stat::Warn,
+                                 L.tr("the device refused the transfer", "das Gerät hat die Übertragung abgelehnt"),
+                                 {L.tr("its write window most likely closed while you were answering",
+                                       "sein Schreibfenster ist vermutlich zugefallen, während du geantwortet hast")});
+                    // The password was typed a minute ago. Use it before asking for it again.
+                    if (refreshWriteWindow(targetPa))
+                    {
+                        g_tpl.status(ftc::Tpl::Stat::Ok,
+                                     L.tr("signed in again", "erneut angemeldet"),
+                                     {L.tr("with the password from this run", "mit dem Passwort aus diesem Lauf")});
+                        g_tpl.section(L.tr("Transfer", "Übertragung"));
+                        continue; // the bytes already on the target stay; this resumes
+                    }
+                    const ftc::AccessState re = resolveAccessInteractively(targetPa, 120, quiet);
+                    if (re.stage == ftc::Access::Open || re.stage == ftc::Access::Unknown)
+                    {
+                        if (ftc::confirm(g_term, c, L,
+                                         L.tr("Send it again?", "Erneut senden?"), true))
+                        {
+                            g_tpl.section(L.tr("Transfer", "Übertragung"));
+                            continue; // the bytes already on the target stay; this resumes
+                        }
+                    }
+                    break;
+                }
+            }
             const bool again = knxotaRetryable(openknxFileTransferClient.status().message, why);
             if (!again || !g_term.isTty() || quiet || g_abort) break;
             char got[80];
@@ -6200,7 +7063,7 @@ int main(int argc, char** argv)
             g_tpl.section(L.tr("Transfer", "Übertragung"));
         }
 
-        if (xrc == 0 && !canSelfApply) ftc::otaSessionClear(otaSessionPath()); // nothing left for us to do
+        if (xrc == 0 && !canSelfApply) ftc::otaResumeErase(otaResumePath(), sess); // nothing left for us to do
 
         // The transfer being verified is not the same as the update having happened. The device now
         // reboots into the new firmware, and only reading its version back proves that it did.
@@ -6213,39 +7076,113 @@ int main(int argc, char** argv)
             // Wait out the restart, then poll until the version MATCHES (merely answering proves nothing).
             const uint64_t start = nowMs();
             const std::string want = ftc::fwVersionText(knxotaFw.id);
+            bool wentAway = false; // the device stopped answering -> it really restarted
             bool back = false;
-            while (nowMs() - start < 5000 && !g_abort)
-            {
-                g_tpl.waitTick(L.tr("the device is restarting", "das Gerät startet neu"),
-                               (uint32_t)((nowMs() - start) / 1000), L.tr("normally 15-40 s", "normal 15-40 s"));
-                g_knxTunnel.pump();
-                openknxFileTransferClient.loop(true);
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-            while (nowMs() - start < 90000 && !g_abort)
-            {
-                g_tpl.waitTick(L.tr("waiting for the device", "warte auf das Gerät"),
-                               (uint32_t)((nowMs() - start) / 1000),
-                               L.tr("normally 15-40 s", "normal 15-40 s"));
+            auto probeAlive = [&]() {
                 g_ftcSuppress = true;
                 std::vector<FtcEntry> vsnap;
                 openknxFileTransferClient.processCommand("ftc " + paText + " info", false);
                 ftcPumpStructured(vsnap, false, false);
                 g_ftcSuppress = false;
-                const FtcDeviceInfo& now = openknxFileTransferClient.deviceInfo();
-                if (now.valid)
+                return openknxFileTransferClient.deviceInfo().valid;
+            };
+
+            // FIRST it has to GO. Re-flashing the same version leaves the version unchanged, so a version
+            // comparison alone cannot tell an update from a device that never restarted -- and that is
+            // exactly what once reported "done" for an apply that was silently refused.
+            // A patch is not installed when the trigger arrives -- the device UNPACKS it first, and stays
+            // reachable while it does. Measured on an 815 KB image: 16 seconds. Waiting only for it to
+            // disappear therefore declares a running rebuild dead. FwProbe with an empty payload answers
+            // "busy / failed / nothing", so the rebuild can be watched instead of guessed at.
+            // The same watcher the standalone `fwupdate` uses -- one question, one implementation.
+            auto watchRebuild = [&]() { return watchFirmwareInstall(targetPa); };
+
+            auto observeRestart = [&]() {
+                const uint64_t t0 = nowMs();
+                wentAway = false;
+                back = false;
+                while (nowMs() - t0 < 25000 && !g_abort && !wentAway)
                 {
-                    back = true;
-                    const ftc::DevVersion seen = ftc::devVersionFrom(now.hardware, now.haveHw, now.version, now.haveVersion);
-                    if (seen.valid && ftc::devVersionText(seen) == want) break; // the new firmware is up
+                    g_tpl.waitTick(L.tr("the device is restarting", "das Gerät startet neu"),
+                                   (uint32_t)((nowMs() - start) / 1000), L.tr("normally 15-40 s", "normal 15-40 s"));
+                    if (!probeAlive()) wentAway = true;
+                    else
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
+                while (wentAway && nowMs() - t0 < 90000 && !g_abort)
+                {
+                    g_tpl.waitTick(L.tr("waiting for the device", "warte auf das Gerät"),
+                                   (uint32_t)((nowMs() - start) / 1000),
+                                   L.tr("normally 15-40 s", "normal 15-40 s"));
+                    if (probeAlive())
+                    {
+                        back = true;
+                        const FtcDeviceInfo& now = openknxFileTransferClient.deviceInfo();
+                        const ftc::DevVersion seen = ftc::devVersionFrom(now.hardware, now.haveHw, now.version, now.haveVersion);
+                        if (seen.valid && ftc::devVersionText(seen) == want) break; // the new firmware is up
+                    }
+                }
+                std::printf("\r\x1b[K");
+            };
+            const bool rebuilt = watchRebuild();
+            if (rebuilt) observeRestart();
+
+            // It did not restart -> the apply was refused. Everything needed to put that right is known
+            // here: the target, the file on it, and why it was refused. Printing a command for the user
+            // to retype would be handing back a job this already has in its hands.
+            if (!wentAway && g_term.isTty() && !quiet && !g_abort)
+            {
+                g_ui.errorBlock(false,
+                                L.tr("the device did not restart - the update was NOT applied",
+                                     "das Gerät hat nicht neu gestartet - das Update wurde NICHT eingespielt"),
+                                {L.tr("the transfer itself was fine: the file is on the device",
+                                      "die Übertragung selbst war in Ordnung: die Datei liegt auf dem Gerät"),
+                                 L.tr("a device that refuses writes accepts the file and declines to install it",
+                                      "ein Gerät, das Schreiben verweigert, nimmt die Datei an und lehnt das Einspielen ab")});
+                // Ask the device where it stands NOW -- and let the user log in again if that is the reason.
+                const bool reopened = refreshWriteWindow(targetPa); // the password from this run, silently
+                ftc::AccessState re;
+                if (reopened) { re.stage = ftc::Access::Open; re.answered = true; }
+                else
+                    re = resolveAccessInteractively(targetPa, 120, quiet);
+                if (re.stage == ftc::Access::Open || re.stage == ftc::Access::Unknown)
+                {
+                    g_tpl.panelTop(L.tr("Install now", "Jetzt einspielen"), paText);
+                    g_tpl.kv(L.tr("File", "Datei"), c.txt(remoteName) + c.dim("   " + kbStr((uint32_t)knxotaFw.payload.size()) + " KB"));
+                    g_tpl.kv(L.tr("Device", "Gerät"), c.txt(paText) + c.dim("   " + ip));
+                    g_tpl.panelEnd();
+                    if (ftc::confirm(g_term, c, L,
+                                     L.tr("Trigger the update now?", "Update jetzt auslösen?"), false))
+                    {
+                        g_ftcSuppress = false; // this one is the point of the exercise -- never swallow it
+                        openknxFileTransferClient.requestFwUpdate(targetPa, remoteName.c_str());
+                        runOneShotToQuiescence();
+                        observeRestart(); // same proof as before: it has to go, then come back
+                    }
+                }
+                else
+                    g_tpl.note(std::string("ftc --ip ") + ip + " " + paText + " login <pw>   &&   " +
+                               "ftc --ip " + ip + " " + paText + " fwupdate " + remoteName);
             }
-            std::printf("\r\x1b[K");
             const FtcDeviceInfo& after = openknxFileTransferClient.deviceInfo();
             const ftc::DevVersion nv = ftc::devVersionFrom(after.hardware, after.haveHw, after.version, after.haveVersion);
-            if (back && nv.valid && ftc::devVersionText(nv) == ftc::fwVersionText(knxotaFw.id))
+            if (!wentAway)
             {
-                ftc::otaSessionClear(otaSessionPath()); // proven done -> never offer to continue it again
+                // Still not restarted -- either the offer above was declined, or the second attempt was
+                // refused too. The entry stays, so the run can be picked up once the reason is gone.
+                g_tpl.status(ftc::Tpl::Stat::Err,
+                             L.tr("the firmware was not applied", "die Firmware wurde nicht eingespielt"),
+                             {L.tr("the file stays on the device - nothing has to be transferred again",
+                                   "die Datei bleibt auf dem Gerät - es muss nichts neu übertragen werden")});
+            }
+            else if (back && nv.valid && ftc::devVersionText(nv) == ftc::fwVersionText(knxotaFw.id))
+            {
+                ftc::otaResumeErase(otaResumePath(), sess); // proven done -> never offer this run again
+                // Recorded only here, where the device has confirmed the version it came back with: a
+                // base remembered after a transfer that never took effect would be offered as truth and
+                // then refused by the device on the next run.
+                if (!deltaNewApp.empty())
+                    ftc::baseCacheRemember(knxotaBaseCachePath(), targetPa, deltaNewApp);
                 g_tpl.status(ftc::Tpl::Stat::Ok,
                              std::string(L.tr("done — ", "fertig — ")) + paText +
                                  L.tr(" is now running ", " läuft jetzt mit ") + ftc::devVersionText(nv),
@@ -6272,7 +7209,18 @@ int main(int argc, char** argv)
             }
         }
         socketCleanup();
-        return xrc;
+        if (xrc == 0) return 0;
+        // Exit code 1 means "this firmware does not belong to this device" -- the wrappers print exactly
+        // that. Returning it for ANY failed transfer told a user whose write window had closed that their
+        // firmware was wrong. A refusal is 3 (not accepting writes), anything else 4 (did not complete).
+        {
+            const std::string why = openknxFileTransferClient.status().message;
+            if (why.find("refused") != std::string::npos ||
+                why.find("auth") != std::string::npos ||
+                why.find("locked") != std::string::npos)
+                return 3;
+        }
+        return 4;
     }
 
     // Host-side auto-gzip: `send <src> gzip` compresses the local file (in-process, miniz) BEFORE the upload
@@ -6520,10 +7468,11 @@ int main(int argc, char** argv)
             char fw[16] = "";
             if (d.haveVersion) std::snprintf(fw, sizeof(fw), "%u.%u", (d.version >> 6) & 0x1F, d.version & 0x3F);
             std::string feat;
-            if (d.features & 0x4) feat += "Fast ";
-            if (d.features & 0x8) feat += "Console ";
-            if (d.features & 0x1) feat += "Resume ";
-            if (d.features & 0x2) feat += "Update ";
+            if (d.features & ftc::FEAT_FAST) feat += "Fast ";
+            if (d.features & ftc::FEAT_CONSOLE) feat += "Console ";
+            if (d.features & ftc::FEAT_RESUME) feat += "Resume ";
+            if (d.features & ftc::FEAT_UPDATE) feat += "Update ";
+            if (d.features & ftc::FEAT_DELTA) feat += "Delta ";
             if (!feat.empty()) feat.pop_back();
             tgtOrder = d.haveOrder ? d.order : std::string();
             tgtMask = mb;
@@ -6892,6 +7841,13 @@ int main(int argc, char** argv)
     {
         // One-shot (info/df/scan/… or quiet transfer): cooperative loop to completion; SM text passes through.
         exitCode = runOneShotToQuiescence();
+        // `fwupdate` answers nothing on the wire, so the command used to end without a word about whether
+        // anything was installed. Ask -- the same way knxOTA does, patch or whole image alike.
+        if (exitCode == 0 && reachHasPa && pos.size() >= 2 && (pos[1] == "fwupdate" || pos[1] == "fw") && !quiet)
+        {
+            const uint16_t tgt = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
+            if (!watchFirmwareInstall(tgt)) exitCode = 4;
+        }
     }
 
     // --- clean shutdown ---------------------------------------------------------------------------

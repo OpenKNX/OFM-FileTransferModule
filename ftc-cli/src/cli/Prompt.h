@@ -162,4 +162,40 @@ inline bool confirm(Term& t, Theme& c, I18n& L, const std::string& question, boo
     return ch == 'y' || ch == 'j';
 }
 
+/** @brief What the three-way question came back with. */
+enum class Answer3
+{
+    Yes,
+    No,
+    Forget ///< no, and stop asking -- throw the thing away
+};
+
+/**
+ * @brief Yes / no / no-and-forget-it.
+ * @details "No" and "throw it away" are different answers, and a question that only offers the first
+ *          asks again next time. Keys: y or j for yes, n for no, e (entfernen / erase) for forget.
+ *          Defaults to no, like confirm(); on a non-tty it never blocks and answers No.
+ */
+inline Answer3 confirm3(Term& t, Theme& c, I18n& L, const std::string& question,
+                        const std::string& forgetLabel)
+{
+    std::printf("  %s %s\n", c.amber("?").c_str(), c.bold(question).c_str());
+    std::printf("      %s %s\n", c.bold("[j]").c_str(), c.dim(L.tr("yes", "ja")).c_str());
+    std::printf("      %s %s\n", c.bold("[N]").c_str(), c.dim(L.tr("no, start over", "nein, von vorn")).c_str());
+    std::printf("      %s %s\n", c.bold("[e]").c_str(), c.dim(forgetLabel).c_str());
+    std::printf("  %s ", c.amber("?").c_str());
+    std::fflush(stdout);
+    if (!t.isTty())
+    {
+        std::printf("no\n");
+        return Answer3::No;
+    }
+    char buf[16];
+    if (std::fgets(buf, sizeof(buf), stdin) == nullptr) return Answer3::No;
+    const char ch = (char)std::tolower((unsigned char)buf[0]);
+    if (ch == 'y' || ch == 'j') return Answer3::Yes;
+    if (ch == 'e') return Answer3::Forget;
+    return Answer3::No;
+}
+
 } // namespace ftc

@@ -34,6 +34,7 @@ enum : uint8_t
     FEAT_AUTH_REQUIRED = 0x10,   ///< access stage is Password
     FEAT_WRITES_DISABLED = 0x20, ///< writes are refused right now
     FEAT_GZIP_UPDATE = 0x40,     ///< a staged firmware may be sent compressed; the device unpacks it itself
+    FEAT_DELTA = 0x80,           ///< the device rebuilds firmware from a patch; without it never send one
 };
 
 namespace detail

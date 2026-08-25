@@ -163,4 +163,70 @@ inline bool parseEspImage(const std::string& path, EspImage& out)
     return true;
 }
 
+/**
+ * @brief The application image inside an esptool "factory" bundle.
+ * @details A .factory.bin is not a different format -- it is the bootloader, the partition table and the
+ *          application laid out at their flash offsets, padded with 0xFF. So the application is IN there;
+ *          it just does not start at byte 0, which is the only reason the plain parser refuses it.
+ *
+ *          The partition table at 0x8000 says where. Each 32-byte entry starts with 0xAA 0x50, and the
+ *          first entry of type 0 (app) is the one that runs -- factory if present, else ota_0. In a
+ *          merged file the flash offset IS the file offset, which is what makes this a slice rather
+ *          than a reconstruction.
+ *
+ *          Worth it because every ESP release built before .app.bin shipped still carries its image
+ *          here, and that makes those releases usable as a delta base instead of dead ends.
+ */
+inline bool espAppImageFromFactory(const std::string& path, std::vector<uint8_t>& out, std::string& why)
+{
+    out.clear(); why.clear();
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) { why = "cannot open the file"; return false; }
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (n <= 0x9000) { std::fclose(f); why = "too small to be a factory bundle"; return false; }
+    std::vector<uint8_t> d((size_t)n);
+    const size_t rd = std::fread(d.data(), 1, d.size(), f);
+    std::fclose(f);
+    if (rd != d.size()) { why = "the file could not be read completely"; return false; }
+
+    constexpr size_t PT = 0x8000;          // where esptool puts the partition table
+    constexpr size_t ENT = 32;             // bytes per entry
+    size_t appOff = 0;
+    for (size_t e = PT; e + ENT <= d.size() && e < PT + 0x1000; e += ENT)
+    {
+        if (d[e] != 0xAA || d[e + 1] != 0x50) break;          // end of table
+        const uint8_t type = d[e + 2], sub = d[e + 3];
+        if (type != 0x00) continue;                            // 0 = app
+        const uint32_t off = detail::le32(d.data() + e + 4);
+        if (sub == 0x00) { appOff = off; break; }              // factory wins
+        if (appOff == 0 && sub >= 0x10 && sub <= 0x1F) appOff = off; // else the first ota slot
+    }
+    if (appOff == 0 || appOff + detail::ESP_HDR_LEN >= d.size())
+    { why = "no application partition found in this bundle"; return false; }
+    if (d[appOff] != detail::ESP_IMAGE_MAGIC)
+    { why = "the application partition does not hold an image"; return false; }
+
+    // Same walk the plain parser does, only starting where the application actually begins.
+    const uint8_t segs = d[appOff + 1];
+    const bool hash = (d[appOff + 23] == 1);
+    uint64_t off = appOff + detail::ESP_HDR_LEN;
+    for (uint8_t i = 0; i < segs; ++i)
+    {
+        if (off + 8 > d.size()) { why = "the segment table runs past the end of the file"; return false; }
+        const uint32_t len = detail::le32(d.data() + off + 4);
+        off += 8;
+        if (len > d.size() || off + len > d.size())
+        { why = "a segment declares more data than the file holds"; return false; }
+        off += len;
+    }
+    uint64_t end = off + (15u - (off % 16u)) + 1;   // through the padded XOR checksum byte
+    if (hash) end += 32;                            // ...and the appended SHA-256, which is part of the image
+    if (end > d.size()) { why = "the image runs past the end of the bundle"; return false; }
+
+    out.assign(d.begin() + (long)appOff, d.begin() + (long)end);
+    return true;
+}
+
 } // namespace ftc

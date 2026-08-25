@@ -11,6 +11,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -130,6 +132,39 @@ inline std::vector<uint32_t> localIPv4s()
 /**
  * @brief Multicast SEARCH_REQUEST; collect responders for `timeoutMs`. Returns the list (may be empty).
  */
+/**
+ * @brief Is this an OpenKNX interface, going by the name it announces?
+ * @details One place decides it, because "OpenKNX" and "OpenKnx" both occur in the wild and a second
+ *          copy of the test somewhere else would eventually disagree with this one.
+ */
+inline bool isOpenKnxIface(const DiscoveredIface& f)
+{
+    return f.name.find("OpenKNX") != std::string::npos || f.name.find("OpenKnx") != std::string::npos;
+}
+
+/** @brief A dotted quad as a number, so 11.11.0.2 sorts before 11.11.0.126 instead of after it. */
+inline uint32_t ipOrder(const std::string& ip)
+{
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0xFFFFFFFFu; // unparsable: last
+    return ((a & 0xFF) << 24) | ((b & 0xFF) << 16) | ((c & 0xFF) << 8) | (d & 0xFF);
+}
+
+/**
+ * @brief The order every interface list is shown in: OpenKNX first, then by address.
+ * @details Discovery returns whatever answered fastest, so two searches a second apart produce two
+ *          different lists -- and the row a person was about to pick moves under their finger. Sorting
+ *          on something that does not change makes the list the same every time.
+ */
+inline void sortInterfaces(std::vector<DiscoveredIface>& v)
+{
+    std::sort(v.begin(), v.end(), [](const DiscoveredIface& a, const DiscoveredIface& b) {
+        const bool ao = isOpenKnxIface(a), bo = isOpenKnxIface(b);
+        if (ao != bo) return ao;
+        return ipOrder(a.ip) < ipOrder(b.ip);
+    });
+}
+
 inline std::vector<DiscoveredIface> discoverInterfaces(uint16_t port = 3671, int timeoutMs = 3000)
 {
     using namespace detail;
@@ -233,6 +268,9 @@ inline std::vector<DiscoveredIface> discoverInterfaces(uint16_t port = 3671, int
         if (!dup) found.push_back(f);
     }
     sockClose(s);
+    // Sorted HERE rather than at each of the four call sites: a caller that forgot would show a list
+    // that reshuffles on every search, and that is exactly what this is meant to stop.
+    sortInterfaces(found);
     return found;
 }
 

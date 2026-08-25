@@ -18,10 +18,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "../core/EspImage.h"
 #include "../core/Gzip.h"
 #include "../core/HostFs.h"
+#include "../core/Delta.h"
+#include "../core/ImageFacts.h"
 #include "../core/Uf2.h"
 #include "I18n.h"
 #include "Templates.h"
@@ -29,6 +32,9 @@
 
 namespace ftc
 {
+// Enough of the application image to reach the OpenKNX stamp in its descriptor.
+static constexpr size_t detail_espStampEnd = 44;
+
 
 /** @brief What kind of firmware file we were handed. */
 enum class FwKind
@@ -62,8 +68,9 @@ enum class Verdict
     Upgrade,
     AlreadyInstalled,
     Downgrade,
-    DifferentDevice, ///< another OpenKNX application or another vendor id — refuse
-    Unknown,         ///< one side did not state a version; never claim a direction
+    DifferentApplication, ///< same product, a different application number — possible, but it costs the setup
+    DifferentDevice,      ///< another vendor/product id — the wrong file, not a decision
+    Unknown,              ///< one side did not state a version; never claim a direction
 };
 
 /** @brief One device's identity, read from PID 78 + PID 25. */
@@ -92,7 +99,13 @@ inline DevVersion devVersionFrom(const uint8_t hardware[6], bool haveHw, uint16_
 inline Verdict compareVersions(const Uf2Identity& file, const DevVersion& dev)
 {
     if (!file.valid || !dev.valid) return Verdict::Unknown;
-    if (file.openKnxId != dev.openKnxId || file.appNumber != dev.appNumber) return Verdict::DifferentDevice;
+    // Two different things used to share one verdict. A different vendor/product id means the file
+    // belongs to another product and nothing good can come of it. A different APPLICATION number, with
+    // the same product id, is what a redesign looks like: same device, new application, and the user
+    // has to program it again in ETS afterwards -- the physical address included. That is a decision
+    // someone may well want to take, so it is put to them instead of being refused for them.
+    if (file.openKnxId != dev.openKnxId) return Verdict::DifferentDevice;
+    if (file.appNumber != dev.appNumber) return Verdict::DifferentApplication;
     // The device reports its revision in 5 bits of PID_VERSION; the file stamp is a full byte. Masking
     // makes the two comparable — without it, revision 32 reads as 0 on the device and every comparison
     // from there on is wrong in one direction or the other.
@@ -104,6 +117,49 @@ inline Verdict compareVersions(const Uf2Identity& file, const DevVersion& dev)
 }
 
 /** @brief The verdict as a chip, in the user's language. */
+/**
+ * @brief What a verdict means for the person about to decide, in their language.
+ * @details The chip alone names the outcome; it does not say what the outcome costs. "NEW APPLICATION"
+ *          is a label, not an answer to "should I press yes" -- and the one thing that matters about it,
+ *          that the device comes back unprogrammed, is nowhere in those two words.
+ */
+inline std::vector<std::string> verdictExplain(const I18n& L, Verdict v)
+{
+    switch (v)
+    {
+        case Verdict::Upgrade:
+            return {L.tr("A newer version. Settings, group addresses and the address are kept.",
+                         "Neuere Version. Einrichtung, Gruppenadressen und Adresse bleiben erhalten.")};
+        case Verdict::AlreadyInstalled:
+            return {L.tr("The device already runs exactly this. Installing it again changes nothing.",
+                         "Genau das läuft bereits auf dem Gerät. Erneutes Einspielen ändert nichts.")};
+        case Verdict::Downgrade:
+            return {L.tr("Older than what the device runs. Program it again in ETS afterwards.",
+                         "Älter als das, was auf dem Gerät läuft. Danach in der ETS neu programmieren.")};
+        case Verdict::DifferentApplication:
+            return {L.tr("Same product, but a new ETS application.",
+                         "Gleiches Produkt, aber eine neue ETS-Applikation."),
+                    L.tr("The device comes back unprogrammed on 15.15.255: parameters, group",
+                         "Das Gerät kommt unprogrammiert auf 15.15.255 zurück: Parameter,"),
+                    L.tr("addresses and the physical address all have to be set again in ETS.",
+                         "Gruppenadressen und die physikalische Adresse müssen in der ETS neu vergeben werden.")};
+        case Verdict::DifferentDevice:
+            return {L.tr("This firmware belongs to a different product and will not be installed.",
+                         "Diese Firmware gehört zu einem anderen Produkt und wird nicht eingespielt.")};
+        default:
+            return {L.tr("One side states no version, so knxOTA cannot tell whether the file fits.",
+                         "Eine Seite nennt keine Version, knxOTA kann also nicht sagen, ob die Datei passt.")};
+    }
+}
+
+/** @brief "0xAD/1" -- the product id and the application number, the pair a verdict turns on. */
+inline std::string appIdText(uint8_t openKnxId, uint8_t appNumber)
+{
+    char b[24];
+    std::snprintf(b, sizeof(b), "0x%02X/%u", (unsigned)openKnxId, (unsigned)appNumber);
+    return b;
+}
+
 inline std::string verdictChip(const Tpl& t, const I18n& L, Verdict v)
 {
     switch (v)
@@ -111,6 +167,7 @@ inline std::string verdictChip(const Tpl& t, const I18n& L, Verdict v)
         case Verdict::Upgrade: return t.chip(L.tr("UPGRADE", "UPGRADE"), 'g');
         case Verdict::AlreadyInstalled: return t.chip(L.tr("ALREADY INSTALLED", "SCHON DRAUF"), 'a');
         case Verdict::Downgrade: return t.chip(L.tr("DOWNGRADE", "DOWNGRADE"), 'a');
+        case Verdict::DifferentApplication: return t.chip(L.tr("NEW APPLICATION", "NEUE ANWENDUNG"), 'a');
         case Verdict::DifferentDevice: return t.chip(L.tr("DIFFERENT DEVICE", "ANDERES GERÄT"), 'r');
         default: return t.chip(L.tr("VERSION UNKNOWN", "VERSION UNBEKANNT"), 'a');
     }
@@ -173,6 +230,15 @@ inline bool readFirmware(const std::string& path, FwFile& out, const I18n& L)
         out.id = u.id;
         out.familyId = u.familyId;
         out.hardware = uf2FamilyName(u.familyId);
+        // Cut to the length the release states: the block padding is not part of the image, and sending
+        // it would make what lands on the device differ from what a later difference is computed against.
+        ImageFacts fx;
+        if (readImageFacts(path, fx) && !applyImageFacts(fx, u.bin))
+        {
+            out.error = L.tr("this UF2 is shorter than the release states",
+                             "diese UF2 ist kürzer, als das Release angibt");
+            return false;
+        }
         out.rawSize = u.bin.size();
         if (!gzipBuffer(u.bin.data(), u.bin.size(), out.payload))
         {
@@ -265,8 +331,64 @@ inline bool readFirmware(const std::string& path, FwFile& out, const I18n& L)
             out.ok = true;
             return true;
         }
+        // An esptool bundle: the application is inside it, and the release states where. With that
+        // stated, there is no reason to refuse the file a user actually has -- and it is what lets a
+        // release ship one package per device instead of the same image three times.
+        {
+            ImageFacts fx;
+            if (readImageFacts(path, fx) && fx.appLength > 0 && fx.format == "factory")
+            {
+                std::vector<uint8_t> whole;
+                if (delta::readWholeFileInto(path, whole) &&
+                    (size_t)fx.appOffset + fx.appLength <= whole.size())
+                {
+                    out.payload.assign(whole.begin() + fx.appOffset,
+                                       whole.begin() + fx.appOffset + fx.appLength);
+                    const uint8_t* a = out.payload.data();
+                    if (out.payload.size() > detail_espStampEnd && a[0] == 0xE9)
+                    {
+                        out.kind = FwKind::EspBin;
+                        out.chipId = (uint16_t)(a[12] | (a[13] << 8));
+                        out.hardware = espChipName(out.chipId);
+                        const uint8_t* st = a + 40; // esp_app_desc_t.reserv1 — the OpenKNX stamp
+                        if (st[0] || st[1] || st[2] || st[3])
+                        {
+                            out.id.openKnxId = st[0];
+                            out.id.appNumber = st[1];
+                            out.id.appVersion = st[2];
+                            out.id.revision = st[3];
+                            out.id.valid = true;
+                        }
+                        out.rawSize = out.payload.size();
+                        out.compressed = false; // compressed later, once the device says it can unpack
+                        out.ok = true;
+                        return true;
+                    }
+                }
+                out.error = L.tr("this package does not hold the image the release describes",
+                                 "dieses Paket enthält nicht das Image, das das Release angibt");
+                return false;
+            }
+        }
+
         out.kind = FwKind::RawBin;
-        out.error = L.tr("a .bin from an RP build does not say which device it is for — use the .uf2 next to it", "eine .bin aus einem RP-Build sagt nicht, für welches Gerät sie ist — nimm die .uf2 im selben Ordner");
+        // A raw RP image states no identity, so it cannot be checked against the device -- but it is also
+        // exactly the file a difference is computed from, and knxOTA finds that one by itself. Saying only
+        // "use the .uf2" would leave someone who reached for the .app.bin on purpose none the wiser.
+        const bool isAppImage = (path.size() > 8 && path.compare(path.size() - 8, 8, ".app.bin") == 0);
+        const bool isFactory = (path.size() > 12 && path.compare(path.size() - 12, 12, ".factory.bin") == 0);
+        // A .factory.bin is an esptool package: bootloader and partition table sit in front of the image,
+        // so nothing at offset 0 states an identity. Reaching this branch at all means the ESP parse
+        // failed, and pointing at a .uf2 would send an ESP owner looking for a file that does not exist.
+        if (isFactory)
+            out.error = L.tr("this is the packaged image for a USB flash - over the bus use the .bin beside it",
+                             "das ist das Paket für das Flashen über USB - über den Bus die .bin daneben nehmen");
+        else if (isAppImage)
+            out.error = L.tr("this is the raw application image - knxOTA finds it by itself; pass the .uf2 next to it",
+                             "das ist das rohe Anwendungsimage - knxOTA findet es von selbst; nimm die .uf2 daneben");
+        else
+            out.error = L.tr("a .bin from an RP build does not say which device it is for - use the .uf2 next to it",
+                             "eine .bin aus einem RP-Build sagt nicht, für welches Gerät sie ist - nimm die .uf2 im selben Ordner");
         return false;
     }
 
@@ -294,6 +416,24 @@ inline bool compressForTarget(FwFile& fw)
 }
 
 /** @brief The firmware panel: what this file is, in plain words first. */
+/**
+ * @brief How long a payload takes over the bus, as the RANGE the hardware actually spans.
+ * @details A single number here was read as a promise and then missed: what a bus carries depends on the
+ *          interface, from about 350 B/s on a slow one to about 650 B/s on a fast one with `fast` mode.
+ *          Quoting both ends is the only honest answer before a single byte has moved -- and once it has,
+ *          the live rate in the transfer view replaces the estimate anyway.
+ */
+inline std::string transferEta(const I18n& L, size_t bytes)
+{
+    const unsigned slow = (unsigned)((bytes / 350) / 60); // minutes on a slow interface
+    const unsigned fast = (unsigned)((bytes / 650) / 60); // ...and on a fast one
+    char b[64];
+    if (slow == 0) std::snprintf(b, sizeof(b), "< 1 %s", L.tr("min", "Min."));
+    else if (fast == slow) std::snprintf(b, sizeof(b), "~%u %s", slow, L.tr("min", "Min."));
+    else std::snprintf(b, sizeof(b), "%u-%u %s", fast, slow, L.tr("min", "Min."));
+    return b;
+}
+
 inline void renderFirmwarePanel(Tpl& t, Theme& c, I18n& L, const FwFile& fw, bool verbose)
 {
     // Only the file name in the header — a build path is long enough to push the panel rule off screen,
@@ -320,14 +460,9 @@ inline void renderFirmwarePanel(Tpl& t, Theme& c, I18n& L, const FwFile& fw, boo
         std::snprintf(sz, sizeof(sz), "%zu B", fw.payload.size());
     t.kv(L.tr("Size", "Größe"), c.txt(sz) +
          (fw.compressed ? c.dim(L.tr("   compressed for the bus", "   für den Bus komprimiert")) : std::string()));
-    // 350 B/s, not the 400 the bus can peak at: measured on hardware this image ran at 315-357 B/s, and
-    // an estimate that overruns costs more trust than one that comes in early.
-    const unsigned mins = (unsigned)((fw.payload.size() / 350) / 60);
-    char eta[64];
-    std::snprintf(eta, sizeof(eta), "~%u %s", mins, L.tr("min", "Min."));
-    t.kv(L.tr("Transfer", "Übertragung"), c.txt(eta) +
-         c.dim(L.tr("   the KNX bus carries about 350 bytes a second",
-                    "   der KNX-Bus trägt etwa 350 Byte pro Sekunde")));
+    // No duration here. Three things it depends on are all still unknown at this point: which interface
+    // will carry it (350-650 B/s between models), whether only a difference goes, and -- for an ESP --
+    // whether the device unpacks. The Ready panel says it once all three are settled.
     if (verbose && (fw.familyId != 0 || fw.chipId != 0xFFFF))
     {
         char h[64];
