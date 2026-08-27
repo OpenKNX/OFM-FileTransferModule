@@ -69,6 +69,13 @@
 #endif
 
 #if FTC_TIER >= 2
+    // The "knxOTA" web page: a front-end onto the embedded client (target PA, send firmware/delta from
+    // this device's flash/SD/ext-flash, trigger the update, measure throughput).
+    // Measured: 34732 B flash + 80 B RAM on RP2040, 40056 B + 64 B RAM on ESP32.
+    // Needs a web server to be served from; OPENKNX_WEBSERVER comes from the ini and is visible here.
+    #if defined(OPENKNX_WEBSERVER) && !defined(OPENKNX_FTC_KNXOTA_WEB)
+        #define OPENKNX_FTC_KNXOTA_WEB
+    #endif
     #ifndef OPENKNX_FTC_SCAN
         #define OPENKNX_FTC_SCAN
     #endif
@@ -90,6 +97,12 @@
 // --- No switch may be set and do nothing. Each of these was a silent misconfiguration before. --------
 #if defined(OPENKNX_FTC_GZIP_UPDATE) && !defined(ARDUINO_ARCH_ESP32)
     #error "FTC: OPENKNX_FTC_GZIP_UPDATE only exists on ESP32 -- on RP2040 the bootloader unpacks. Set it in your ESP32 env only, or let a profile do it."
+#endif
+#if defined(OPENKNX_FTC_KNXOTA_WEB) && !defined(OPENKNX_WEBSERVER)
+    #error "FTC: OPENKNX_FTC_KNXOTA_WEB needs a web server to serve the page -- add OPENKNX_WEBSERVER or drop it."
+#endif
+#if defined(OPENKNX_FTC_KNXOTA_WEB) && !defined(OPENKNX_FTC_CLIENT)
+    #error "FTC: OPENKNX_FTC_KNXOTA_WEB drives the client half -- add OPENKNX_FTC_CLIENT or drop it."
 #endif
 #if (defined(OPENKNX_FTC_SCAN) || defined(OPENKNX_FTC_DEVICEINFO)) && !defined(OPENKNX_FTC_CLIENT)
     #error "FTC: OPENKNX_FTC_SCAN / _DEVICEINFO are client features -- add OPENKNX_FTC_CLIENT or drop them."

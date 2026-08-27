@@ -7,6 +7,9 @@
  */
 #include "FileTransferConfig.h" // switches first -- every guard below depends on it
 #include "FileTransferClient.h"
+#ifdef OPENKNX_FTC_KNXOTA_WEB
+    #include "FileTransferWebClient.h"
+#endif
 #include "FirmwarePatch.h"
 #include "KnxDeviceMap.h"
 
@@ -180,6 +183,11 @@ const FtcBackend *FileTransferClient::ftcResolveBackend(const char *path, const 
 
 void FileTransferClient::setup(bool configured)
 {
+#ifdef OPENKNX_FTC_KNXOTA_WEB
+    // The knxOTA page registers itself here so a product needs no extra line -- the switch decides.
+    openknxFtcWeb.setup();
+#endif
+
     (void)configured;
 }
 

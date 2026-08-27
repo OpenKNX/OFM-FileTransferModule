@@ -1,0 +1,112 @@
+/* base.css colours .yellow/.red for the dark sidebar; on the white content area they are not
+   readable (#ffff55 lands at 1.1:1). The page needs its own severity colours. */
+.ota-warn { color: #8a5a00; }
+.ota-err  { color: #c62828; }
+.ota-ok   { color: #2e7d32; }
+.gray     { color: #888; }
+.mono     { font-family: monospace; }
+/* No max-width here: the intro is one 97-character sentence, and a 70ch cap broke it mid-line. */
+.lead { color:#555; font-size:.92em; margin:-4px 0 14px; }
+.lbl { font-size:.88em; color:#888; flex:0 0 auto; }
+.stale { color:#888; font-size:.8em; }
+
+/* A later `display:` beats .fm-hidden at equal specificity -- without this a hidden element stays. */
+.fm-hidden { display: none !important; }
+
+/* Summary line: carries target, access, file and what the interface is doing -- from every tab. */
+.ctx { position:sticky; top:0; z-index:2; display:flex; flex-direction:column; gap:6px;
+       background:#f7f7f7; border:1px solid #e6e6e6; padding:8px 12px; margin-bottom:10px; font-size:.86em; }
+.ctx-line { display:flex; flex-wrap:wrap; gap:0 26px; width:100%; }
+.ctx-line span { display:flex; align-items:center; gap:7px; }
+.ctx-line b { font-weight:600; color:#111; }
+.ctx .k { color:#888; }
+.ctx .cx-run { margin-left:auto; }
+.ctx-prog { display:flex; align-items:center; gap:10px; width:100%; }
+.ctx-bar { flex:1; height:5px; background:#e0e0e0; }
+.ctx-bar i { display:block; height:100%; background:#449841; width:0; transition:width .25s linear; }
+
+/* The page-wide trace: one line above the tabs, closed by default. */
+details.log { margin:0 0 10px; }
+details.log > summary { padding:4px 2px; color:#888; font-size:.84em; list-style:none; cursor:pointer; }
+details.log > summary::-webkit-details-marker { display:none; }
+details.log > summary::before { content:"\25B8"; display:inline-block; width:12px; color:#aaa; }
+details.log[open] > summary::before { content:"\25BE"; }
+details.log > summary:hover { color:#555; }
+.logbox { font-family:monospace; font-size:.8em; color:#555; background:#fafafa;
+          border:1px solid #eee; padding:8px 10px; max-height:150px; overflow:auto; margin:0 0 2px; }
+
+/* Tab strip and pane share one frame in one colour. */
+.steps { position:sticky; top:37px; z-index:2; background:#fff; margin:0; border-bottom:1px solid #e6e6e6; }
+.steps .fm-tab { display:flex; align-items:center; gap:9px; }
+.steps .fm-tab.active { border-color:#e6e6e6; }
+/* The digit is the traffic light: red = blocked, amber = something is missing, green = ready.
+   A blocked tab stays visible -- it shows what is still open instead of disappearing. */
+.steps .fm-tab .n { display:inline-flex; width:19px; height:19px; border-radius:50%; background:#c9c9c9;
+                    color:#fff; font-size:.72em; font-weight:700; align-items:center; justify-content:center; }
+.steps .fm-tab .n.red { background:#c62828; }
+.steps .fm-tab .n.amber { background:#c98a00; }
+.steps .fm-tab .n.green { background:#449841; }
+.steps .fm-tab.locked { opacity:.5; cursor:not-allowed; }
+.steps .fm-tab.locked:hover { background:transparent; }
+.steps .fm-tab .st { font-size:.8em; color:#888; font-weight:400; }
+.steps .fm-tab.active .st { color:#555; }
+@media (max-width:620px){ .steps .fm-tab .st { display:none; } }
+
+.reg { border:1px solid #e6e6e6; margin-bottom:20px; }
+.reg.pane { border-top:none; margin-top:0; }
+.reg > h2 { font-size:1em; margin:0; padding:9px 14px; background:#fff; border-bottom:1px solid #f0f0f0;
+            display:flex; align-items:center; gap:10px; }
+.reg > h2 .sub { margin-left:auto; font-weight:400; font-size:.84em; color:#888; }
+.reg .body { padding:14px; }
+.sec { border-top:1px solid #f0f0f0; padding-top:12px; margin-top:12px; }
+.sec:first-child { border-top:none; padding-top:0; margin-top:0; }
+.sec h3 { font-size:.82em; letter-spacing:.06em; text-transform:uppercase; color:#888; margin:0 0 8px; font-weight:600; }
+
+.ota-hint { font-size:.82em; color:#888; margin:6px 0 0; }
+.ota-hint.warn { color:#8a5a00; } .ota-hint.err { color:#c62828; }
+.caps { font-size:.85em; margin-top:8px; color:#555; }
+.caps .no { color:#999; }
+.ota-sw { display:flex; flex-wrap:wrap; gap:6px 24px; margin-top:10px; }
+.ota-sw label { display:flex; align-items:center; gap:7px; font-size:.88em; color:#333; cursor:pointer; }
+.ota-sw input { accent-color:#449841; margin:0; }
+.ota-seg button { border:1px solid #d0d0d0; background:#fff; height:32px; padding:0 15px; cursor:pointer; }
+.ota-seg button[aria-pressed=true] { background:#449841; border-color:#449841; color:#fff; font-weight:600; }
+.mini { height:26px; padding:0 10px; border:1px solid #d0d0d0; background:#fff; cursor:pointer; font-size:.85em; }
+.mini:hover { border-color:#449841; }
+tr.pick { cursor:pointer; }
+tr.pick:hover td { background:#f5f5f5; }
+tr.pick[aria-selected=true] td { background:#eef6ee; font-weight:600; }
+table.tight td, table.tight th { padding:5px 8px; font-size:.9em; }
+
+/* The sweep: its own place, its own bar, its own hits. */
+.drawer { border:1px solid #e6e6e6; background:#fafafa; padding:10px 12px; margin-top:8px; }
+.scan { border:1px solid #e6e6e6; background:#fff; padding:10px 12px; margin-top:10px; }
+.scanbar { height:6px; background:#e4e4e4; margin:8px 0; }
+.scanbar i { display:block; height:100%; background:#449841; width:0; transition:width .2s linear; }
+.hits { max-height:190px; overflow:auto; border:1px solid #eee; }
+.hits table { margin:0; }
+.gabox { max-height:230px; overflow:auto; border:1px solid #eee; }
+details.ga > summary { cursor:pointer; font-size:.88em; color:#555; padding:4px 0; }
+
+.ready { display:flex; flex-wrap:wrap; gap:6px 22px; font-size:.86em; margin-bottom:10px; }
+.ready span { display:flex; align-items:center; gap:7px; }
+.ready .k { color:#888; }
+.gobar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+#otaStart { height:36px; padding:0 22px; border:1px solid #449841; background:#449841; color:#fff;
+            font-weight:600; cursor:pointer; }
+#otaStart[disabled] { background:#e8e8e8; border-color:#d5d5d5; color:#999; cursor:default; }
+.why { font-size:.88em; color:#555; }
+.why.ota-warn { color:#8a5a00; }
+
+.bar { height:20px; background:#e0e0e0; margin:2px 0 12px; }
+.bar i { display:block; height:100%; background:#449841; width:0; transition:width .25s linear; }
+.runhead { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:6px; }
+.runhead .t { font-weight:600; }
+.balance { border-left:3px solid #449841; padding-left:12px; }
+.balance.bad { border-left-color:#c62828; }
+/* Throughput, window regulation and gaps in one picture -- the numbers the console prints. */
+.chart { width:100%; height:150px; display:block; border:1px solid #eee; background:#fafafa; margin-bottom:6px; }
+
+button.busy { position:relative; color:transparent !important; pointer-events:none; }
+button.busy::after { content:"\2026"; position:absolute; inset:0; display:flex;
+                     align-items:center; justify-content:center; color:#666; font-weight:700; }
