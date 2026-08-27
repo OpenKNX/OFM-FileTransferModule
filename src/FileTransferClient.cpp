@@ -1291,6 +1291,13 @@ void FileTransferClient::ftcResumeCrcDone()
             _xferResult.resumedBytes = _ftcSize;
             _xferResult.mode = _ftcMode;
             openknx.logger.logWithPrefix("FTC", "already up to date -- nothing to send");
+            // Nothing to send is not nothing to do: `apply` wants the file applied, no matter whether
+            // it just arrived or was already there. Without this a second run ends without applying.
+            if (_ftcApply && !_ftcIsPerf && !_ftcTestSource && !ftcIsExtDrive(_ftcPath))
+            {
+                ftcEnterApplyGate();
+                return;
+            }
             ftcFinish();
             return;
         }
@@ -2386,16 +2393,14 @@ void FileTransferClient::ftcFinish()
 /** @brief Apply-gate entry: use the cached feature byte now, else probe CheckFeatures(102) -> FtcApplyProbe. */
 void FileTransferClient::ftcEnterApplyGate()
 {
-    if (_ftcFeatValid && _ftcFeatPa == _ftcTarget)
-    {
-        ftcApplyDecide();
-        return;
-    }
-    if (ftcSend(FTC_CMD_CHECK_FEATURES, 0)) // ftcSend arms _ftcRespPending + stamps _ftcSince
+    // No cache: this decision flashes a firmware or skips it, and the target's write window can close
+    // during a transfer that took minutes. One round trip buys a fresh answer.
+    if (ftcSend(FTC_CMD_CHECK_FEATURES, 0)) // arms _ftcRespPending + stamps _ftcSince
         _ftcState = FtcApplyProbe;
-    else // cannot even probe -> assume no self-apply; the image is uploaded, so just skip
+    else // cannot even ask -> assume no self-apply; the image is uploaded, so just skip
     {
         openknx.logger.logWithPrefix("FTC", "target cannot self-apply (Update feature not advertised) -- image uploaded, apply skipped");
+        ftcStatusMsg("uploaded; could not ask the target");
         ftcFinish();
     }
 }
@@ -2409,6 +2414,9 @@ void FileTransferClient::ftcApplyDecide()
     if (_ftcFeatBits & 0x20) // WRITES_DISABLED (locked / login required)
     {
         openknx.logger.logWithPrefix("FTC", "target refuses writes (locked / login required) -- fwupdate NOT triggered; run: ftc <pa> login <pw>");
+        // Into the status, not only the log -- a log-only refusal reads as success to every front-end.
+        _status.ok = false; // the transfer stands; only the apply did not go through
+        ftcStatusMsg("apply refused: locked / login");
         ftcFinish();
         return;
     }
@@ -2419,6 +2427,8 @@ void FileTransferClient::ftcApplyDecide()
     if (_ftcDeltaSend && !(_ftcFeatBits & 0x80))
     {
         openknx.logger.logWithPrefix("FTC", "target does not support delta updates -- apply NOT triggered");
+        _status.ok = false; // the transfer stands; only the apply did not go through
+        ftcStatusMsg("apply refused: no delta support");
         ftcFinish();
         return;
     }
@@ -2428,6 +2438,7 @@ void FileTransferClient::ftcApplyDecide()
     else
     {
         openknx.logger.logWithPrefix("FTC", "target cannot self-apply (Update feature not advertised) -- image uploaded, apply skipped");
+        ftcStatusMsg("uploaded; target cannot self-apply");
         ftcFinish();
     }
 }
@@ -2493,10 +2504,14 @@ void FileTransferClient::ftcTriggerFwUpdate()
         return;
     } // bounds the _ftcTx copy
     memcpy(_ftcTx, _ftcPath, len);
-    ftcSend(FTC_CMD_FW_UPDATE, (uint8_t)len);
-    openknx.logger.logWithPrefixAndValues("FTC", "*** UPDATE TRIGGERED -- %u.%u.%u reboots in ~2 s to apply %s ***",
-                                          FTC_PA_ARGS(_ftcTarget), _ftcPath);
-    ftcFinish(); // NO wait -- the server returns false (no answer); waiting would just time out
+    if (!ftcSend(FTC_CMD_FW_UPDATE, (uint8_t)len))
+    {
+        ftcAbort("apply: could not send");
+        return;
+    }
+    // Silence means applied (the server answers nothing and reboots); a refusal from the security gate
+    // does answer, 0xA0 / 0xA2. Wait one short window instead of discarding it.
+    _ftcState = FtcApplyWait;
 }
 
 // --- request* : the public API the console drives. The console has already gated diagnoseKo, the
@@ -6741,6 +6756,35 @@ void FileTransferClient::loop(bool configured)
                     if (ftcSend(FTC_CMD_FILE_INFO, (uint8_t)n)) return; // stays in FtcApplyCheck
                 }
                 openknx.logger.logWithPrefix("FTC", "fwupdate: no answer to the existence check -- not triggering");
+                ftcFinish();
+            }
+            return;
+        }
+
+        case FtcApplyWait:
+        {
+            if (_ftcRespPending)
+            {
+                _ftcRespPending = false;
+                if (_ftcRespProp != FTC_CMD_FW_UPDATE) return; // a mirror of something else -- keep waiting
+                const uint8_t r = (_ftcRespLen >= 1) ? _ftcResp[0] : 0xFF;
+                const char *why = (r == 0xA0) ? "apply refused: login required"
+                                : (r == 0xA2) ? "apply refused: writes disabled"
+                                              : "apply refused by the target";
+                openknx.logger.logWithPrefixAndValues("FTC", "*** APPLY REFUSED (0x%02X) -- %u.%u.%u did NOT restart ***",
+                                                      r, FTC_PA_ARGS(_ftcTarget));
+                _status.ok = false; // the file is on the target; only the apply was refused
+                ftcStatusMsg(why);
+                ftcFinish();
+                return;
+            }
+            if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            {
+                // Nothing came back within the short window: the target took it and is rebooting.
+                openknx.logger.logWithPrefixAndValues("FTC", "*** UPDATE TRIGGERED -- %u.%u.%u reboots in ~2 s to apply %s ***",
+                                                      FTC_PA_ARGS(_ftcTarget), _ftcPath);
+                _status.ok = true;
+                ftcStatusMsg("apply triggered");
                 ftcFinish();
             }
             return;

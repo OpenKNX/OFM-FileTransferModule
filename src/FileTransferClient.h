@@ -434,6 +434,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcPerfCleanup,
         FtcApplyCheck,
         FtcApplyProbe,       // apply: CheckFeatures(102) sent, short gate to learn if the target can self-apply
+        FtcApplyWait,        // apply: FwUpdate(101) sent -- silence means it applied, an answer means it refused
 #ifdef OPENKNX_FTC_DELTA_UPDATE
         FtcDeltaFeat,        // delta: CheckFeatures(102) sent -- does the target understand patches at all?
         FtcDeltaProbe,       // delta: FwProbe(106) sent -- is the target running the image this patch expects?
