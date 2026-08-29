@@ -20,6 +20,20 @@ ftc --ip 11.11.0.126 5.0.3 con                  # open its remote console
 `<pa>` is the **target device** on the bus (e.g. `5.0.3`), not the interface. `--ip` is the interface you
 tunnel through. Run `ftc --help` for the full, always-current reference.
 
+Real output of the first line above, on a live installation:
+
+```
+  suche 224.0.23.12:3671 …
+  ● 11.11.0.31   OpenKNX: IP-Router REG2 - ESP     TP1 (twisted pair)
+  ● 11.11.0.151  OpenKNX: IP-Router (Dev)          TP1 (twisted pair)
+  ● 11.11.0.210  OpenKNX: IP-Interface - REG1 E    TP1 (twisted pair)
+  ● 11.11.0.3    IP-Router N 146/02                TP1 (twisted pair)
+  ● 11.11.0.5    IP Interface N148 - ALT           TP1 (twisted pair)
+  5 Interface(s)
+```
+
+It finds third-party interfaces just as well as OpenKNX ones, and tunnels through them.
+
 ## Features
 
 **Transfer & files** — over the tunnel, PA-to-PA
@@ -37,23 +51,61 @@ tunnel through. Run `ftc --help` for the full, always-current reference.
 **Live monitors**
 - `groupmon`/`gm` — decoded group telegrams · `busmon`/`bm` — raw LPDU with ETS ACK colouring
 - `--frames N` / `--seconds N` to stop after N (scriptable)
+- `gm|bm compare <ipB>` — run two interfaces side by side and diff what each one saw; reassembles split
+  telegrams, `--raw` keeps the pieces, `--multi` reads two streams. This is how the busmonitor fidelity
+  against a commercial interface was established
+- `led on|off|blink` — drive the target's programming LED to find it in the cabinet
 
 **Remote console & firmware**
 - `con`/`console` — a device's console over the KNX tunnel (or an interface's own webconsole); `/job` recurring
   auto-commands, `/stat`, `--log` to file
 - `fwupdate` — flash an uploaded firmware (reboots the target) · `perf` — throughput test
 
-**Access control & local utilities**
-- `login`/`logout` — unlock write actions on password-protected targets (MAC computed locally)
-- `gzip` (firmware prep), `decode` (offline raw-LPDU decode), `config` (persisted defaults), `--theme`
-  green/amber/cyan, `--lang de|en`
+
+**Firmware over the bus — `knxota`**
+- `knxota <file.uf2|.bin>` — update a device from a firmware file **on this PC**; without `--ip` and an
+  address it asks which interface and which device
+- `--from <folder|.app.bin>` — send only the **difference** to that release. Minutes instead of half an
+  hour; without the option `knxota` offers what it finds
+- `--check` — compare and report only, write nothing. Run this first
+- `--no-delta` full image · `--no-compress` uncompressed · `--force` allow a downgrade or an unmarked file
+- `<pa> fwupdate <remote>` — flash a firmware the device already holds, then reboot
+- exit codes: `0` done · `1` nothing to do · `2` usage · `3` device refuses · `6` no answer
+
+**Access control**
+- `login`/`logout` — unlock write actions on password-protected targets (the MAC is computed locally, the
+  password never goes on the bus)
+- `feat` — what the target supports, and why it refuses a write
+
+**Local utilities — no bus, no interface**
+- `gzip` (firmware prep) · `decode <hex LPDU>` (decode a raw TP1 frame offline)
+- `install` / `uninstall` — put this `ftc` on the PATH, version-aware and asking before a downgrade
+- `config <key> <value>` — persisted defaults · `retry` — how often a transfer repeats and how long it waits
+- `--theme green|amber|cyan` · `--lang de|en` · `--ascii` for terminals without box drawing
+- `--quiet` — no chrome, TSV output, automatic when stdout is not a terminal, so it scripts cleanly
+- `--log[=path]` — write the console session to a file
+- `--prio low|normal|urgent|system` — KNX priority of the FTC frames; raising it warns and asks
+
+## The same client also runs on the device
+
+`ftc` on your PC and the **embedded FTC client** in the firmware are the *same state machine*. On a device
+with `OPENKNX_FTC_CLIENT` the console offers `ftc` as a command, and one device transfers to another
+**PA to PA over the bus** — no PC involved:
+
+```
+ftc 5.0.3 send /cfg.json /cfg.json      # on the device console: this device -> 5.0.3
+ftc 5.0.3 con                           # open another device's console from this one
+```
+
+The desktop tool exists because a PC has the files, the screen and the firmware images. What it does not
+have is a bus connection — that is what the tunnel is for.
 
 ## How it works — the glue-shim (for developers)
 
 `FileTransferClient.{h,cpp}` + `FileTransferClientConsole.{h,cpp}` from `../src/` are compiled
 **byte-identical**. A host-only shim replaces the OpenKNX/knx/Arduino stack with just the thin slice those
-four files touch (see `doc/FTC-HOST-SHIM-CONTRACT.md`). The `knx.bau().ftc*` calls forward to a KNXnet/IP
-tunnel (`doc/FTC-WIRE-PROTOCOL.md`). **No `lib/knx` changes.**
+four files touch, and the `knx.bau().ftc*` calls forward to a KNXnet/IP tunnel. The wire format is the same
+one the firmware speaks — see [../doc/PROTOCOL.md](../doc/PROTOCOL.md). **No `lib/knx` changes.**
 
 ```
   ../src/FileTransferClient.cpp  (UNCHANGED state machine)
@@ -69,8 +121,8 @@ tunnel (`doc/FTC-WIRE-PROTOCOL.md`). **No `lib/knx` changes.**
 
 | Path | Owner | Contents |
 |------|-------|----------|
-| `doc/FTC-HOST-SHIM-CONTRACT.md` | spec | exact symbols the shim must provide |
-| `doc/FTC-WIRE-PROTOCOL.md` | spec | byte-exact APDU/cEMI/CRC/CO-scan |
+| `../doc/PROTOCOL.md` | spec | the wire format both firmware and this tool speak |
+| `doc/CONCEPT-api.md` | concept | the planned local HTTP/SSE API (`ftc --api`) |
 | `src/knx_ip_tunnel.h` | **fixed contract** | the transport seam (authored, do not widen casually) |
 | `shim/*.h` | shim | host stand-ins; makes the 4 unchanged files compile |
 | `src/knx_ip_tunnel.cpp` | transport | the real KNXnet/IP tunnel client |
@@ -98,3 +150,9 @@ it via zig.
 
 Feature-complete and driven against real hardware (interface + target on a live bus). The remaining work is
 throughput/robustness tuning under bus congestion, not missing features.
+
+## Author & license
+
+Written by **Erkan Çolak** as part of the OpenKNX FileTransferModule.
+
+Licensed under the **GNU General Public License v3** — see the module's [LICENSE](../LICENSE).
