@@ -20,6 +20,8 @@ mono_crash.*
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
+# scripts/release/ is source, not build output: the release hooks live there and must be cloned.
+!scripts/release/
 [Rr]eleases/
 x64/
 x86/
