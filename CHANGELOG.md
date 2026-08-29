@@ -1,20 +1,9 @@
 # Changes
 
 
-## upcoming
+## ec/v0.2.0-beta.1 -- second batch: 2026-08-29
 
-**Device info**
-* Fix: the device error-code read is gone -- the client asked for PID 24 on the device object, which is not the error-code property (property.h names PID_ERROR_CODE 28), and no device object in the stack registers PID_ERROR_CODE either
-* Fix: that read spent the 800 ms optional-property probe on every device-info query and never produced a value; the row is dropped from the web status, the knxOTA page and the ftc-cli report
-
-**Documentation**
-* Feature: QUICKSTART, FIRMWARE-UPDATE, WEB, FTC-CLI, SCRIPTS and INTEGRATION added; README is the index and names the audience of every document
-* Change: the superseded ftc-cli wire-protocol and host-shim documents are removed; the module doc set carries their content
-* Note: `errorcodes.txt` records that 0x01..0x04 are listed as LittleFS errors while the server also uses 0x01..0x03 as per-command status bytes -- the two readings conflict and are not reconciled
-
-## ec/v0.2.0-beta.1 -- second batch: 2026-08-27
-
-The tag was moved from `f489fcf` to `8ed3336`, so everything below is part of it. Main additions:
+The tag was moved from `f489fcf` to the head of this batch, so everything below is part of it. Main additions:
 firmware update as a difference instead of a whole image, a knxOTA page in the device's own web
 interface, and a repaired `fast` mode.
 
@@ -63,6 +52,15 @@ interface, and a repaired `fast` mode.
 * Test: PowerShell hardening suite over the FunctionProperty RPC surface
 * Test: response-matrix and state-machine suites extended — every command against every server response per drive and async state
 * Test: PowerShell tooling for the delta update path
+
+**Device info**
+* Fix: the device error-code read is gone -- the client asked for PID 24 on the device object, which is not the error-code property (property.h names PID_ERROR_CODE 28), and no device object in the stack registers PID_ERROR_CODE either
+* Fix: that read spent the 800 ms optional-property probe on every device-info query and never produced a value; the row is dropped from the web status, the knxOTA page and the ftc-cli report
+
+**Documentation**
+* Feature: QUICKSTART, FIRMWARE-UPDATE, WEB, FTC-CLI, SCRIPTS and INTEGRATION added; README is the index and names the audience of every document
+* Change: the superseded ftc-cli wire-protocol and host-shim documents are removed; the module doc set carries their content
+* Note: `errorcodes.txt` records that 0x01..0x04 are listed as LittleFS errors while the server also uses 0x01..0x03 as per-command status bytes -- the two readings conflict and are not reconciled
 
 ## ec/v0.2.0-beta.1: 2026-08-09
 
