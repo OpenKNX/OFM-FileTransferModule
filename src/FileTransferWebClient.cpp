@@ -207,7 +207,6 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
             for (int i = 0; i < 6; i++) { snprintf(buf, sizeof(buf), "%s%02X", i ? " " : "", d.hardware[i]); out += buf; }
             out += "\"";
         }
-        if (d.haveErrorCode) { snprintf(buf, sizeof(buf), ",\"err\":%u", (unsigned)d.errorCode); out += buf; }
         if (d.haveDownloads) { snprintf(buf, sizeof(buf), ",\"dl\":%u", (unsigned)d.downloads); out += buf; }
         if (d.haveBusVolt) { snprintf(buf, sizeof(buf), ",\"volt\":%u", (unsigned)d.busVoltmV); out += buf; }
         snprintf(buf, sizeof(buf), ",\"tabs\":[%u,%u,%u,%u]}", (unsigned)d.appState,

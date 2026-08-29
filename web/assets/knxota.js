@@ -633,7 +633,6 @@ _o("otaDevHead").textContent = pa
       + otaRow("Dateitransfer (FTM)", d.ftm ? ("Version " + ver)
         : '<span class="ota-err">nicht vorhanden — kein Update möglich</span>')
       + otaRow("Programmiermodus", d.prog ? "an" : "aus")
-      + otaRow("Letzter Fehler", d.err === undefined ? nm(null) : (d.err === 0 ? "keiner" : "0x" + d.err.toString(16).toUpperCase()))
       + otaRow("ETS-Downloads", d.dl === undefined ? nm(null) : d.dl);
     _o("otaDevRows2").innerHTML =
       otaRow("Seriennummer", d.serial ? '<span class="mono">' + d.serial + '</span>' : nm(null))

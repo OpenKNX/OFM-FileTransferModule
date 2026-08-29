@@ -227,14 +227,13 @@ static constexpr uint8_t FTC_PID_ORDER = 15;     // order number (up to 10 bytes
 static constexpr uint8_t FTC_PID_VERSION = 25;
 static constexpr uint8_t FTC_PID_PROGMODE = 54;  // programming mode (1 byte, 0/1)
 static constexpr uint8_t FTC_PID_HARDWARE = 78;  // hardware type (6 bytes: 0000 + app number + version)
-static constexpr uint8_t FTC_DEV_PROP_COUNT = 9;
-// The first six are answered by every device; the last three are optional (absent -> full timeout), so
+static constexpr uint8_t FTC_DEV_PROP_COUNT = 8;
+// The first six are answered by every device; the last two are optional (absent -> full timeout), so
 // the optional tail gets a short probe.
 static constexpr uint8_t FTC_DEV_PROP_CORE = 6;
 static constexpr uint32_t FTC_DEV_OPT_TMO_MS = 800;
 static constexpr uint8_t FTC_PID_MAX_APDU = 56;  // PID_MAX_APDU_LENGTH (2 bytes) -- caps our frame size
 static constexpr uint8_t FTC_PID_DEV_CONTROL = 14; // safe state / verify mode / own address sent
-static constexpr uint8_t FTC_PID_ERROR_CODE = 24;  // the last error the device recorded about itself
 static constexpr uint8_t FTC_PID_DOWNLOADS = 30;   // how often ETS has downloaded into it
 // Probe window for that read. Longer than the fast-probe gate (it may cross a coupler), once per target.
 static constexpr uint32_t FTC_APDU_TIMEOUT = 1500;
@@ -3121,7 +3120,7 @@ void FileTransferClient::ftcDevInfoBegin(uint16_t pa, bool fromScan)
 // The Device-Object property read sequence. Keep in sync with FTC_DEV_PROP_COUNT and the store switch.
 static const uint8_t FTC_DEV_PIDS[FTC_DEV_PROP_COUNT] = {FTC_PID_SERIAL, FTC_PID_ORDER, FTC_PID_VERSION,
                                                          FTC_PID_PROGMODE, FTC_PID_HARDWARE, FTC_PID_MAX_APDU,
-                                                         FTC_PID_DEV_CONTROL, FTC_PID_ERROR_CODE,
+                                                         FTC_PID_DEV_CONTROL,
                                                          FTC_PID_DOWNLOADS};
 
 void FileTransferClient::ftcDevSendProp()
@@ -3319,7 +3318,6 @@ void FileTransferClient::ftcDevReport()
     _deviceInfo.progMode = _devProgMode != 0;
     _deviceInfo.maxApdu = _devHasApdu ? _devApdu : 0;
     _deviceInfo.devControl = _devCtrl;       _deviceInfo.haveDevControl = _devHasCtrl;
-    _deviceInfo.errorCode = _devErr;         _deviceInfo.haveErrorCode = _devHasErr;
     _deviceInfo.downloads = _devDownloads;   _deviceInfo.haveDownloads = _devHasDownloads;
     _deviceInfo.isRouter = (_devIdxRouter != -1);   // -1 = no Router Object; -2 = one, already read
     _deviceInfo.lineStatus = _devLineStatus;  _deviceInfo.haveLineStatus = _devHasLineStatus;
@@ -4757,13 +4755,6 @@ void FileTransferClient::loopDeviceInfo()
                             {
                                 _devCtrl = _propData[0];
                                 _devHasCtrl = true;
-                            }
-                            break;
-                        case FTC_PID_ERROR_CODE:
-                            if (_propLen >= 1)
-                            {
-                                _devErr = _propData[0];
-                                _devHasErr = true;
                             }
                             break;
                         case FTC_PID_DOWNLOADS:

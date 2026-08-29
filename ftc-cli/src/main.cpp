@@ -4284,10 +4284,6 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                  d.progMode ? t.chip("PROG", 'o') : c.mut(std::string(g_term.glyph("○", "o")) + " " + L.tr("off", "aus")));
             // Each of these appears only when the device answered it -- an empty row would claim knowledge
             // we do not have, and most devices implement none of the three.
-            if (d.haveErrorCode)
-                p.kv(L.tr("Last error", "Letzter Fehler"),
-                     d.errorCode == 0 ? c.green(L.tr("none", "keiner"))
-                                      : c.amber(std::string("0x") + [&]{ char b[8]; std::snprintf(b, sizeof(b), "%02X", d.errorCode); return std::string(b); }()));
             if (d.haveDownloads)
             {
                 char db[24];
