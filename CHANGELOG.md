@@ -60,6 +60,9 @@ interface, and a repaired `fast` mode.
 **Documentation**
 * Feature: QUICKSTART, FIRMWARE-UPDATE, WEB, FTC-CLI, SCRIPTS and INTEGRATION added; README is the index and names the audience of every document
 * Change: the superseded ftc-cli wire-protocol and host-shim documents are removed; the module doc set carries their content
+* Doc: the module README is rewritten -- what the module carries besides files, knxOTA end to end including why a delta update turns half an hour into minutes, the three front ends as one state machine, the measured throughput and its cause, every build switch and both profiles
+* Doc: the ftc-cli README gains knxOTA, install/uninstall, retry, prio, logging, the busmon A/B comparison and the programming LED, and points at doc/PROTOCOL.md instead of the shim documents that were removed
+* Doc: the example addresses are marked as an isolated lab VLAN, with the note that 11.0.0.0/8 is publicly allocated space rather than an RFC 1918 range
 * Note: `errorcodes.txt` records that 0x01..0x04 are listed as LittleFS errors while the server also uses 0x01..0x03 as per-command status bytes -- the two readings conflict and are not reconciled
 
 ## ec/v0.2.0-beta.1: 2026-08-09
