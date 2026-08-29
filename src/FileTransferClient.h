@@ -153,7 +153,7 @@ struct FtcDeviceInfo
     uint16_t ftmVersion = 0;
     uint16_t maxApdu = 0;      // PID_MAX_APDU_LENGTH of the TARGET (0 = it did not report one)
     uint8_t devControl = 0;    bool haveDevControl = false; // bit0 safe state · bit2 verify mode · bit1 own addr sent
-    uint16_t downloads = 0;    bool haveDownloads = false;  // ETS download counter (0 = never programmed)
+    uint16_t downloads = 0;    bool haveDownloads = false;  // ETS download counter; 0 = never programmed OR not persisted by the target (the stack keeps it in RAM)
     bool isRouter = false;                                  // a Router Object was found -> the two rows below apply
     uint8_t lineStatus = 0;    bool haveLineStatus = false;
     uint16_t routerApdu = 0;   bool haveRouterApdu = false;

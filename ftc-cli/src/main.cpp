@@ -4288,8 +4288,13 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             {
                 char db[24];
                 std::snprintf(db, sizeof(db), "%u", (unsigned)d.downloads);
+                // 0 is ambiguous and must not be read as a fact: the knx stack keeps the counter in RAM
+                // and leaves persisting it to the product, so a device that does not persist reports 0
+                // after every restart -- and an ETS download ends in a restart. Name both readings, and
+                // keep the note dim: it is a caveat about the value, not a warning about the device.
                 p.kv(L.tr("ETS downloads", "ETS-Downloads"),
-                     d.downloads == 0 ? c.amber(std::string(db) + L.tr("  — never programmed", "  — nie programmiert"))
+                     d.downloads == 0 ? c.txt(db) + c.dim(L.tr("  — never programmed, or not persisted by the device",
+                                                              "  — nie programmiert oder vom Gerät nicht persistiert"))
                                       : c.txt(db));
             }
             if (d.haveDevControl)
