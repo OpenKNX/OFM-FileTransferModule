@@ -93,6 +93,11 @@ ftc -i 11.11.0.126 5.0.3 con                     # open its console over the bus
 ftc 5.0.3 send /cfg.json /cfg.json               # this device -> 5.0.3
 ```
 
+> **The addresses in this document are examples.** Every `11.11.0.x` shown here comes from the author's own
+> test installation — an isolated VLAN with no route to the internet and no bearing on any production
+> network. Note that `11.0.0.0/8` is publicly allocated space, not an RFC 1918 range: that is a deliberate
+> and known choice for this lab, not a recommendation. Use your own addressing.
+
 ---
 
 ## knxOTA — firmware over the KNX bus

@@ -23,6 +23,7 @@ tunnel through. Run `ftc --help` for the full, always-current reference.
 Real output of the first line above, on a live installation:
 
 ```
+
   suche 224.0.23.12:3671 …
   ● 11.11.0.31   OpenKNX: IP-Router REG2 - ESP     TP1 (twisted pair)
   ● 11.11.0.151  OpenKNX: IP-Router (Dev)          TP1 (twisted pair)
@@ -31,6 +32,11 @@ Real output of the first line above, on a live installation:
   ● 11.11.0.5    IP Interface N148 - ALT           TP1 (twisted pair)
   5 Interface(s)
 ```
+
+> **The addresses in this document are examples.** Every `11.11.0.x` shown here comes from the author's own
+> test installation — an isolated VLAN with no route to the internet and no bearing on any production
+> network. Note that `11.0.0.0/8` is publicly allocated space, not an RFC 1918 range: that is a deliberate
+> and known choice for this lab, not a recommendation. Use your own addressing.
 
 It finds third-party interfaces just as well as OpenKNX ones, and tunnels through them.
 
