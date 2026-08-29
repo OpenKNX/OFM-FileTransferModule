@@ -1,5 +1,69 @@
 # Changes
 
+
+## upcoming
+
+**Device info**
+* Fix: the device error-code read is gone -- the client asked for PID 24 on the device object, which is not the error-code property (property.h names PID_ERROR_CODE 28), and no device object in the stack registers PID_ERROR_CODE either
+* Fix: that read spent the 800 ms optional-property probe on every device-info query and never produced a value; the row is dropped from the web status, the knxOTA page and the ftc-cli report
+
+**Documentation**
+* Feature: QUICKSTART, FIRMWARE-UPDATE, WEB, FTC-CLI, SCRIPTS and INTEGRATION added; README is the index and names the audience of every document
+* Change: the superseded ftc-cli wire-protocol and host-shim documents are removed; the module doc set carries their content
+* Note: `errorcodes.txt` records that 0x01..0x04 are listed as LittleFS errors while the server also uses 0x01..0x03 as per-command status bytes -- the two readings conflict and are not reconciled
+
+## ec/v0.2.0-beta.1 -- second batch: 2026-08-27
+
+The tag was moved from `f489fcf` to `8ed3336`, so everything below is part of it. Main additions:
+firmware update as a difference instead of a whole image, a knxOTA page in the device's own web
+interface, and a repaired `fast` mode.
+
+**Delta firmware update**
+* Feature: firmware can be sent as a difference to the running image (`.okd`, magic `OKD1`) instead of a full image — a 1.8 MB image takes about 78 min over the bus at 400 B/s, a typical 45 KB difference about 2 min
+  * the rebuild runs in `loop()` in slices no larger than one flash sector; nothing is made bootable before the rebuilt image has been checksummed, so every abort leaves the device on the firmware it is already running
+  * the client probes first (`FwProbe`, cmd 106) whether the target runs the image the patch expects, and reports the reason when it does not
+  * build switches follow what is present instead of being set by hand; a failure is reported rather than silently skipped
+* Feature: compressed full images — a gzipped image is unpacked straight into the ESP32 OTA slot through the inflater in the chip's mask ROM (about 88 min down to 54 min); the RP2040 bootloader already unpacks, so the switch has no code there and the build refuses it
+* Feature: ESP32 OTA-slot safety guard — a single-app partition layout has no second slot, which is now checked before writing and reported through `CheckFeatures`
+
+**knxOTA**
+* Feature: knxOTA web page (`OPENKNX_FTC_KNXOTA_WEB`) — pick a target PA, read what the device is, send a firmware or a difference from this device's flash, SD or external flash over KNX, trigger the update, or measure throughput. The page is a front-end onto the embedded client, so no PC and no console are in the chain. 34732 B flash + 80 B RAM on RP2040, 40056 B + 64 B RAM on ESP32
+* Feature: an unfinished knxOTA run can be resumed instead of restarted
+* Fix: a refused firmware apply is reported instead of being announced as triggered — `FwUpdate` answers nothing on success but `0xA0`/`0xA2` when the security gate refuses it, and that answer was discarded
+* Feature: knxOTA assistant command in `ftc-cli`, with a reachability probe and `--check`/`--force`
+
+**Transfer**
+* Fix: `fast` throughput repaired — payload degrade, window regulation and the host pacer worked against each other, so the negotiated window collapsed under load
+* Feature: the negotiated mode is reported, including why `fast` was denied, instead of silently falling back to `safe`
+* Feature: downloads are CRC-verified, and `FwUpdate` is refused while writes are disabled
+* Feature: a device scan paces itself, so a scan no longer floods a busy bus
+* Change: `perf` and the transfer commands share one option grammar (`FtcXferOptions`), so `w<N>` and the mode tokens mean the same thing everywhere
+
+**ftc-cli (desktop client)**
+* Feature: live A/B fidelity compare of two KNXnet/IP monitors (busmon or group monitor), for checking one interface against another
+* Feature: self-install and self-uninstall of the binary, with no external dependencies
+* Feature: host core modules — scan, describe, features, reachability, UF2 and ESP image handling, host filesystem, access
+* Feature: the window regulation is visible, every run is reported, and a write is confirmed before it happens
+* Fix: the tunnel ACK guard frees the in-flight slot only on a full, in-channel ACK, so a truncated or foreign frame cannot free it
+* Fix: the plain monitor path honours the `L_Busmon.ind` framing rules
+* Fix: the client notices when the webconsole peer stops answering, instead of waiting out the timeout
+* Fix: directories are created without a shell, so a path with quotes or metacharacters cannot inject
+* Fix: the real abort reason is reported, and an elevated FTC priority is confirmed
+* Fix: the console link state reflects the target's answer, not just the state of the tunnel
+* Change: CoreFoundation is linked on the macOS host; report directories are ignored
+
+**ETS and documentation**
+* Feature: German context help ships as an ETS baggage
+* Doc: the German documents are replaced by an English set — README, ARCHITECTURE, PROTOCOL, CONSOLE, SECURITY, THROUGHPUT, DELTA, FLAGS, CONCEPT-defines
+* Doc: `FLAGS.md` documents `OPENKNX_FTC_KNXOTA_WEB` with its measured flash and RAM cost
+* Doc: the throughput chapter drops the 450-544 B/s crash cliff — that was an intermediate finding; the reboot needs an artificial unpaced tunnel flood, not a normal transfer
+* Fix: the ETS help text calls access stage 0 "Blockiert", matching the parameter enum
+
+**Tests**
+* Test: PowerShell hardening suite over the FunctionProperty RPC surface
+* Test: response-matrix and state-machine suites extended — every command against every server response per drive and async state
+* Test: PowerShell tooling for the delta update path
+
 ## ec/v0.2.0-beta.1: 2026-08-09
 
 The complete OpenKNX FileTransferModule (FTC — file transfer, FW-update, console tunnel and access control
