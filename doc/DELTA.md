@@ -1,9 +1,12 @@
 # Firmware as a difference
 
+**For:** developers working on the update path or the patch format. Operating side — how to build and
+send one: [FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md).
+
 A new firmware usually differs from the running one by a few percent. Instead of sending 1.8 MB over
 the bus (nearly an hour) only the differences go — often under 50 KB, so minutes.
 
-Build flag: `OPENKNX_FTC_DELTA_UPDATE`.
+Build flag: `OPENKNX_FTC_DELTA_UPDATE` — cost and the board question in [FLAGS.md](FLAGS.md).
 
 ## The sequence
 
@@ -46,9 +49,13 @@ the real image is a proof. Hence `FwProbe` and not a version comparison.
 
 ## What comes back after triggering
 
-**`FwUpdate` (101) does not respond.** On no path — neither on success nor on an error does
-`cmdFwUpdate` set a response length. That is intentional (the device restarts right away and would
-not keep up with the response), but it means: **from the command alone the client learns nothing.**
+**`cmdFwUpdate` (101) does not respond.** On no path — neither on success nor on an error does the
+handler set a response length. That is intentional (the device restarts right away and would not keep
+up with the response), but it means: **from the command alone the client learns nothing.**
+
+The one answer a client can still see to a `FwUpdate` comes from *before* the handler: the access
+gate rejects it with `0xA0` / `0xA2` when writing is locked ([SECURITY.md](SECURITY.md)). That is a
+refusal, never a result.
 
 ```
    Client                                       Device
@@ -112,13 +119,14 @@ any case — exactly that lets the device confirm the expected base **before** a
 
 ## What the interpreter rejects
 
-Fourteen named errors, each of them telling on its own — never two causes under one code:
+Eighteen named errors (`FirmwarePatch::Error`), each of them telling on its own — never two causes
+under one code:
 
 `ERR_MAGIC` (no patch file) · `ERR_VERSION` (newer format) · `ERR_FLAGS` · `ERR_HEADER_CRC`
 (header damaged, so every length below it is worthless) · `ERR_SIZE` · `ERR_SRC_RANGE` ·
 **`ERR_SRC_CRC`** (the device does not run on the image that was computed against) · `ERR_VARINT` ·
 `ERR_OPCODE` · `ERR_ZERO_LEN` (would never end) · `ERR_COPY_RANGE` · `ERR_LIT_RANGE` ·
-`ERR_DST_RANGE` · …
+`ERR_DST_RANGE` · `ERR_TRUNCATED` · `ERR_TRAILING` · `ERR_DST_CRC` · `ERR_READ` · `ERR_WRITE`
 
 `ERR_SRC_CRC` is the important one: it prevents a difference from being applied to a wrong image —
 which would yield an unusable device.

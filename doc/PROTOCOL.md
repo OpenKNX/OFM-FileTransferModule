@@ -1,5 +1,8 @@
 # Protocol
 
+**For:** developers writing or changing a client, a server command, or a response code. The wire
+surface of object 159; the console (object 160) is in [CONSOLE.md](CONSOLE.md).
+
 A command is an `A_FunctionProperty_Command` (APCI `0x2C7`) on object **159**, the response an
 `A_FunctionPropertyState_Response` (APCI `0x2C9`). The command number is in the PID.
 Payload ≤ **247 bytes** per frame.
@@ -21,9 +24,9 @@ Payload ≤ **247 bytes** per frame.
 | 80 | `DirList` | `path\0` | Code + type + name, one entry per call |
 | 81 | `DirCreate` | `path\0` | Code |
 | 82 | `DirDelete` | `path\0` | Code |
-| 90 | `Cancel` | — | Code |
+| 90 | `Cancel` | — | **nothing** — the handler returns `false`, so no L7 response is sent |
 | 100 | `ModuleVersion` | — | Version |
-| 101 | `FwUpdate` | `path\0` | **nothing** · exception: `0xA0`/`0xA2` when the write lock rejects it. What became of it is told by 106 ([DELTA.md](DELTA.md)) |
+| 101 | `FwUpdate` | `path\0` | **nothing** from the handler · the access gate ahead of it can still answer `0xA0`/`0xA2` ([SECURITY.md](SECURITY.md)). What became of it is told by 106 ([DELTA.md](DELTA.md)) |
 | 102 | `CheckFeatures` | — | feature byte |
 | 103 | `AuthChallenge` | — | Nonce |
 | 104 | `AuthResponse` | MAC | Code |
@@ -32,21 +35,37 @@ Payload ≤ **247 bytes** per frame.
 
 ## Response codes
 
+The first result byte. **Codes below `0x40` are per-command status, not shared errors** — the same
+value means something else depending on which command it answers. Codes from `0x40` up are shared.
+
+**Per-command status**
+
+| Code | Command | Meaning |
+|---|---|---|
+| `0x00` | all | done · for `FileInfo`: size **and** checksum |
+| `0x01` | `FileInfo` | size only, no checksum (SD/ExtFlash in the normal case) |
+| `0x01` | `FilesystemInfo` | total and used are in **KB**, not bytes (SD/ExtFlash) |
+| `0x01` | object 160 | busy — the console session is owned by someone else ([CONSOLE.md](CONSOLE.md)) |
+| `0x02` | `FileInfo` | **size is there, checksum still computing — ask again** |
+| `0x03` | `FwProbe` | a delta job is still running; the extra carries the bytes produced so far |
+| `0x05` | `FwProbe` | the last apply failed, reason in the extra ([DELTA.md](DELTA.md)) |
+
+**Shared errors**
+
 | Code | Meaning |
 |---|---|
-| `0x00` | done · for `FileInfo`: size **and** checksum |
-| `0x01` | `FileInfo`: size only, no checksum (SD/ExtFlash in the normal case) |
-| `0x02` | `FileInfo`: **size is there, checksum still computing — ask again** |
-| `0x03` | busy |
-| `0x05` | last operation failed, reason in the extra |
-| `0x41` … `0x47` | file error (open, cannot be opened, cannot be deleted, cannot be renamed …) |
-| `0x81` … `0x86` | directory error |
-| `0x42` | not found — the most frequent one, and the only one that means "does not exist" |
+| `0x41` … `0x47` | file error (already open, cannot be opened, cannot be deleted, cannot be renamed …) |
+| `0x42` | in practice "does not exist" — the open failed; the most frequent code there is |
 | `0x4A` | too many blocks for the fast transfer → fall back to the classic one |
 | `0x4B` | range outside what is allowed |
+| `0x4C` | busy — a firmware update is being applied right now |
+| `0x81` … `0x86` | directory error |
 | `0xA0` `0xA1` `0xA2` | login required · login failed · writing locked ([SECURITY.md](SECURITY.md)) |
 
-The complete list is in [errorcodes.txt](errorcodes.txt).
+The named list of the `0x4x` / `0x8x` / `0xAx` codes is [errorcodes.txt](errorcodes.txt). It also
+carries `0x01`…`0x04` as LittleFS errors — **those four conflict with the per-command status bytes
+above and have not been reconciled against the current server.** For anything below `0x40`, go by the
+command, and by this table.
 
 ## The one rule that costs the most when it is missed
 

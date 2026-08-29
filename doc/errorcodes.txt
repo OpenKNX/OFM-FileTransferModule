@@ -1,3 +1,9 @@
+FTC result codes -- the named file, directory and access-control errors (0x40 and up).
+For: anyone reading a code off a client.
+NOTE: 0x01..0x04 below are listed as LittleFS errors, but the server also uses 0x01..0x03 as
+per-command status bytes (FileInfo, FilesystemInfo, FwProbe, object 160). The two readings
+conflict and have not been reconciled -- for codes below 0x40 see PROTOCOL.md.
+
 0x01    LittleFS.begin() failed
 0x02    LittleFS.format() failed
 0x03    LittleFS not initialized

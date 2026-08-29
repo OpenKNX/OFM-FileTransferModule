@@ -1,5 +1,8 @@
 # Architecture
 
+**For:** developers integrating, extending or debugging the module. How the pieces fit and why the
+transport looks the way it does. The command surface itself is in [PROTOCOL.md](PROTOCOL.md).
+
 ## The path of a file
 
 ```
@@ -43,7 +46,7 @@ Two objects, two separate worlds:
 
 | Object | for | session |
 |---|---|---|
-| **159** | files, directories, firmware, access protection | none — every command stands alone |
+| **159** | files, directories, firmware, access protection ([PROTOCOL.md](PROTOCOL.md)) | none — every command stands alone |
 | **160** | the console ([CONSOLE.md](CONSOLE.md)) | one, with OPEN and CLOSE |
 
 ## One client, one state machine
@@ -98,5 +101,4 @@ The PC client carries **no** protocol logic of its own. It only provides a base 
 `knx.bau()` onto a KNXnet/IP tunnel. What works on the device therefore works on the PC — and a
 protocol bug shows on both sides instead of hiding between two implementations.
 
-Built for eight targets: macOS arm64/x64 · Linux x64/arm64/armhf (Raspberry Pi) ·
-Windows x86/x64/arm64.
+Built for eight targets; the list and the build itself are in [FTC-CLI.md](FTC-CLI.md).

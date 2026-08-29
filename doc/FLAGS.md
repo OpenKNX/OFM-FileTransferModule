@@ -1,7 +1,9 @@
 # FTC switches
 
-All defined in [`../src/FileTransferConfig.h`](../src/FileTransferConfig.h).
-Why it is built this way: [CONCEPT-defines.md](CONCEPT-defines.md).
+**For:** developers writing a product's `ini` — what to set and what it costs. All defined in
+[`../src/FileTransferConfig.h`](../src/FileTransferConfig.h). Why it is built this way:
+[CONCEPT-defines.md](CONCEPT-defines.md). Wiring the module into a product at all:
+[INTEGRATION.md](INTEGRATION.md).
 
 ## The rule in one sentence
 
@@ -59,17 +61,17 @@ individually against a build without a profile.
 
 | Switch | what it does | Role | RP2040 | ESP32 |
 |---|---|---|---|---|
-| `SECURITY` | login before every writing command | both | *)* | *)* |
+| `SECURITY` | login before every writing command ([SECURITY.md](SECURITY.md)) | both | *)* | *)* |
 | `DOWNLOAD` | `FileDownload` (41) — read a file from the device | Server | 1 392 B | 1 736 B |
 | `DIROPS` | `DirList/Create/Delete` (80/81/82) | Server | 1 584 B | 1 732 B |
 | `FASTUPLOAD` | `FileUploadFast`/`Report` (44/45) — serve `fast` | Server | 1 640 B | 1 716 B |
 | `GZIP_UPDATE` | unpack a packed full image into the OTA slot | Server | **ESP32 only** | 1 976 B |
-| `CONSOLE` | console tunnel (object 160) | both | 1 816 B · 144 RAM | 1 808 B · 136 RAM |
-| `DELTA_UPDATE` | firmware as a difference to the running image | both | 11 712 B · 360 RAM | 10 528 B · 280 RAM |
+| `CONSOLE` | console tunnel (object 160, [CONSOLE.md](CONSOLE.md)); implies `SECURITY` | both | 1 816 B · 144 RAM | 1 808 B · 136 RAM |
+| `DELTA_UPDATE` | firmware as a difference to the running image ([DELTA.md](DELTA.md)) | both | 11 712 B · 360 RAM | 10 528 B · 280 RAM |
 | `CLIENT` | the "I ask others" role: send `ftc …` yourself | Client | *in the profile* | *in the profile* |
 | `SCAN` | search the bus | Client | *in the profile* | *in the profile* |
 | `DEVICEINFO` | `ftc <pa> info`, device card, GA report | Client | *in the profile* | *in the profile* |
-| `KNXOTA_WEB` | the "knxOTA" page in this device's own web interface | Client | 34 732 B · 80 RAM | 40 056 B · 64 RAM |
+| `KNXOTA_WEB` | the "knxOTA" page in this device's own web interface ([WEB.md](WEB.md)) | Client | 34 732 B · 80 RAM | 40 056 B · 64 RAM |
 | `LEGACY_STACK` | "I build against knx 2.4.0" — forbids the client | — | 0 B | 0 B |
 
 *) The zero point of the measurement is not entirely switch-free: the interface `ini` already sets
@@ -86,21 +88,17 @@ The jump from `DEVICE` to `MANAGER` is, at around 102 KB, almost entirely the cl
 
 ## Why `CLIENT` and `CONSOLE` have to be added separately
 
-Both are read **outside** this module, by libraries that never include `FileTransferConfig.h` and are
-not allowed to:
+Both are read **outside** this module, by libraries that never include `FileTransferConfig.h`:
 
 | Switch | who else reads it |
 |---|---|
 | `OPENKNX_FTC_CLIENT` | `lib/knx`, 9 files — that is where the counterpart of the FunctionProperty exchange lives |
 | `OPENKNX_FTC_CONSOLE` | `lib/OGM-Common`, `Console.h` — a **data member** (`_lineSink`) hangs on it there |
 
-A `#define` in the header only reaches the files of the module. If `CONSOLE` came from there, OGM-Common
-would compile the class `Console` **without** `_lineSink`, the module **with** it — two halves of the
-same program with different ideas of the same class. Measured: `Console::submitLine` is
-104 B without the switch and 112 B with it.
-
-A `-D` on the command line, in contrast, reaches every file. That is why these two go there — and that
-is why the build aborts when a profile is set without them.
+A `#define` in the header reaches only this module's translation units; a `-D` reaches every file.
+That is why these two go in the `ini`, and why the build aborts when a profile is set without them.
+The failure mode this prevents:
+[CONCEPT-defines.md](CONCEPT-defines.md#client-and-console-do-not-come-from-the-header).
 
 ## Without a profile: eleven commands, unprotected
 
@@ -139,7 +137,8 @@ Two things you can read off it:
 - **On RP2040** it is built up as a file in the filesystem. Patch, unpacked patch **and** the finished
   image have to fit in there at the same time. The report says whether that is enough.
 
-That is why `DELTA_UPDATE` is not in the `DEVICE` profile: it hangs on the board, not on the device class.
+`DELTA_UPDATE` is therefore in no end-device profile — it hangs on the board, not on the device class
+([CONCEPT-defines.md](CONCEPT-defines.md)).
 
 ## What the build catches
 

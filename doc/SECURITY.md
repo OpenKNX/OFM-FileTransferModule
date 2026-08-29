@@ -1,13 +1,17 @@
 # Access protection
 
-Optional, through `-D OPENKNX_FTC_SECURITY`. Without the flag the whole section disappears.
+**For:** anyone operating a protected device; the build note at the end is for integrators. Optional,
+through `-D OPENKNX_FTC_SECURITY` — without the flag the whole section disappears. Setting
+`OPENKNX_FTC_CONSOLE` pulls it in unconditionally: an unauthenticated console tunnel is not a build
+option ([CONCEPT-defines.md](CONCEPT-defines.md)).
 
 ## What is protected
 
-**Writes only.** Reading stays open — `ls`, `info`, `df`, download, version, features.
+**Writes**, in stages 1–3. Reading stays open there — `ls`, `info`, `df`, download, version,
+features.
 
-Protected are: `Format` · `Rename` · `FileUpload` · `FileUploadFast` · `FileDelete` · `DirCreate` ·
-`DirDelete` · `FwUpdate` — and opening the console.
+Gated are: `Format` · `Rename` · `FileUpload` · `FileUploadFast` · `FileDelete` · `DirCreate` ·
+`DirDelete` · `FwUpdate` — and opening the console ([CONSOLE.md](CONSOLE.md)).
 
 ## The four stages
 
@@ -17,6 +21,10 @@ Protected are: `Format` · `Rename` · `FileUpload` · `FileUploadFast` · `File
 | `ProgMode` | the programming button is pressed |
 | `Always` | always |
 | `Password` | a valid login window is open |
+
+**Stage `Off` is the exception to "writes only":** on a configured device it locks the *whole* file
+transfer, reads included. Only `CheckFeatures` (102) still answers, so a client can discover that the
+device is locked rather than time out. Every other command gets `0xA2`.
 
 The stage is **read again for every command**, not cached at start — a device just programmed behaves
 by its new setting at once. An unconfigured device behaves like `Always`, so a freshly flashed device
@@ -58,6 +66,8 @@ error to the user.
 | `0xA0` | login required | run 103/104, then retry |
 | `0xA1` | login failed | wrong password, an expired or missing challenge, an empty password |
 | `0xA2` | writes disabled | stage `Off`, or `ProgMode` without the button — **no** login helps |
+
+The full code list: [errorcodes.txt](errorcodes.txt).
 
 The difference between `0xA0` and `0xA2` is the difference between "log in" and "go to the device".
 Showing both as "access denied" sends the user the wrong way.

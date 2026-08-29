@@ -1,7 +1,8 @@
 # Throughput
 
-Every figure here is measured, not calculated. They are the reason for almost every design decision
-in this module — knowing them explains the rest by itself.
+**For:** anyone operating a device who needs to budget a transfer or pick a mode, and anyone
+designing against the module. Every figure here is measured, not calculated — `ll` 1.42 s ·
+`info` 0.345 s · 350–650 B/s depending on the interface.
 
 ## The number
 
@@ -62,7 +63,8 @@ device writes each block through to the end before it answers — stricter locks
 a wire that carries a thousand times more.
 
 **That cannot be carried over to the bus.** The KNX tunnel carries ~246 bytes per frame; `safe` *is*
-the counterpart of the web lockstep, at the pace of the wire.
+the counterpart of the web lockstep, at the pace of the wire. Which of the two tools writes where:
+[WEB.md](WEB.md).
 
 ## What a transfer really takes
 
@@ -75,8 +77,3 @@ the counterpart of the web lockstep, at the pace of the wire.
 
 That is why [DELTA.md](DELTA.md) exists. And why every transfer goes into a queue instead of blocking
 a user interface for an hour.
-
-## Where the measurements come from
-
-`ll` 1.42 s · `info` 0.345 s · throughput 350–650 B/s depending on the interface · after the rollback
-of 2026-08-18: ~430 B/s `safe` from the PC, ~440 B/s `fast` over the device console, ESP/NCN at 38400.

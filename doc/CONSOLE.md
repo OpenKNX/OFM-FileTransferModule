@@ -1,7 +1,8 @@
 # The console over the bus
 
-The device console from a distance: `ftc <pa> con` types lines and reads the output — no serial
-cable, no network at the device.
+**For:** anyone operating a device; the build flag at the end is for integrators. The device console
+from a distance: `ftc <pa> con` types lines and reads the output — no serial cable, no network at the
+device.
 
 ## How it differs from the file transfer
 
@@ -9,7 +10,7 @@ cable, no network at the device.
 |---|---|---|
 | Session | none | one, with OPEN and CLOSE |
 | Direction | request → answer | two separate channels |
-| PIDs | the command number | `1` = in · `2` = out |
+| PIDs | the command number ([PROTOCOL.md](PROTOCOL.md)) | `1` = in · `2` = out |
 
 ## The sequence
 
@@ -44,12 +45,13 @@ stall the stack. So: park, acknowledge, and let `conLoop()` run it when `freeLoo
 
 ## The two limits you will notice
 
-**The log ring is shared and 4096 bytes.** An output larger than what the client can drain overwrites
+**The log ring is shared and 4096 bytes** (`OPENKNX_WEBCONSOLE_BUFSIZE`, OGM-Common
+`Log/Logger.h`). An output larger than what the client can drain overwrites
 itself — a `help` beyond 4 KB arrives truncated. The device reports that once (`_conOverflow`), so it
 does not hide it. A ring of the console's own is on the list.
 
-**You cannot reach your own PA.** `ftc <own-PA> con` runs into a timeout: a KNX device does not
-process frames it sent itself. Not a bug, a property of KNX. You need a second interface.
+**You cannot reach your own PA.** `ftc <own-PA> con` runs into a timeout — a device does not process
+frames it sent itself; you need a second interface ([QUICKSTART.md](QUICKSTART.md#before-you-start)).
 
 ## From the web interface
 
@@ -61,4 +63,9 @@ without the bus.
 ## Build flag
 
 `OPENKNX_FTC_CONSOLE`. Without it object 160 disappears entirely, and `CheckFeatures` no longer
-reports the console bit.
+reports the console bit. It has to be set as a `-D` in the product's `ini`, not through a profile —
+`lib/OGM-Common` reads it too ([FLAGS.md](FLAGS.md), [CONCEPT-defines.md](CONCEPT-defines.md)).
+
+Opening the console is a **write** action: setting `OPENKNX_FTC_CONSOLE` pulls in
+`OPENKNX_FTC_SECURITY` unconditionally, so the session is gated like every other write
+([SECURITY.md](SECURITY.md)).

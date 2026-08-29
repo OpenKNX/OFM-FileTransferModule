@@ -1,20 +1,43 @@
 # FTC — File Transfer over cEMI/KNX
 
 Files and firmware over the KNX bus, without a second wire. A server in the device, a client next to
-it — both live in this module.
+it — both live in this module. This page is the index; every document below states its own audience
+in its first line.
 
-| If you want to know … | read |
+**New here?** [QUICKSTART.md](QUICKSTART.md) — five minutes, three front-ends, one first firmware
+update.
+
+## Using it
+
+For anyone operating a device: transferring a file, flashing firmware over the bus, unlocking a
+protected target.
+
+| Question | Document |
 |---|---|
-| how the whole thing is put together | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| which commands exist and what they answer | [PROTOCOL.md](PROTOCOL.md) |
-| how the console works over the bus | [CONSOLE.md](CONSOLE.md) |
-| how a firmware update travels as a difference | [DELTA.md](DELTA.md) |
-| how the access protection works | [SECURITY.md](SECURITY.md) |
-| why it is ~400 bytes per second and not more | [THROUGHPUT.md](THROUGHPUT.md) |
-| which switches exist and what they cost | [FLAGS.md](FLAGS.md) |
-| what an error code means | [errorcodes.txt](errorcodes.txt) |
+| How do I get going at all? | [QUICKSTART.md](QUICKSTART.md) |
+| How do I flash a device over the bus? | [FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md) |
+| How does the browser page work? | [WEB.md](WEB.md) |
+| What can the desktop client do? | [FTC-CLI.md](FTC-CLI.md) |
+| How do I reach a device's console over the bus? | [CONSOLE.md](CONSOLE.md) |
+| Why is writing locked, and how do I log in? | [SECURITY.md](SECURITY.md) |
+| How long will my transfer take, `safe` or `fast`? | [THROUGHPUT.md](THROUGHPUT.md) |
+| What does this error code mean? | [errorcodes.txt](errorcodes.txt) |
 
-The native desktop client has its own guide: [`../ftc-cli/README.md`](../ftc-cli/README.md).
+## Building with it
+
+For anyone integrating the module into a product, changing the wire protocol, or debugging it.
+
+| Question | Document |
+|---|---|
+| How do I add this module to a product? | [INTEGRATION.md](INTEGRATION.md) |
+| Which switches exist, what do they cost? | [FLAGS.md](FLAGS.md) |
+| Why are the switches built that way? | [CONCEPT-defines.md](CONCEPT-defines.md) |
+| How is the whole thing put together? | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Which commands exist, what do they answer? | [PROTOCOL.md](PROTOCOL.md) |
+| How does a firmware update travel as a difference? | [DELTA.md](DELTA.md) |
+| Which scripts exist, what do they prove? | [SCRIPTS.md](SCRIPTS.md) |
+
+The native desktop client carries its own README: [`../ftc-cli/README.md`](../ftc-cli/README.md).
 
 ## The four sentences that explain everything
 
@@ -37,7 +60,7 @@ ftc-cli/                        native desktop client (macOS · Linux · Windows
 ```
 
 `src/FileTransferClient*` is compiled **unchanged** on the PC — the desktop client is not a rewrite
-but the same code on a different base (`ftc-cli/shim/`).
+but the same code on a different base (`ftc-cli/shim/`). See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## `_alt/`
 

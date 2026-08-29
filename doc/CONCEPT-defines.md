@@ -1,7 +1,8 @@
 # Why the FTC switches look the way they do
 
-The reasoning behind [FLAGS.md](FLAGS.md). Anyone who only wants to know what to write into their `ini`
-does not need this document.
+**For:** developers changing the switch scheme or reviewing it. The reasoning behind
+[FLAGS.md](FLAGS.md) — anyone who only wants to know what to write into their `ini` does not need
+this document.
 
 ## The problem that was solved
 
@@ -19,8 +20,9 @@ single place at all: measured effect 0 bytes.
 seventy `FTC_…`/`FTM_…` names are module-internal. Without that separation, seventeen switches cannot be
 found among ninety names.
 
-**R3 — No switch may be silently ineffective.** It has an effect, or the build aborts. Ten
-misconfigurations catch that today; every one of them was silent before.
+**R3 — No switch may be silently ineffective.** It has an effect, or the build aborts. Eight
+misconfigurations catch that today; every one of them was silent before. The list:
+[FLAGS.md](FLAGS.md#what-the-build-catches).
 
 **R4 — Profiles propose, they do not prescribe.** A profile sets a set of switches and never takes away
 anything that is stated explicitly.
@@ -42,7 +44,8 @@ console tunnel is not a build option.
 It hangs on the **board**, not on the device class:
 
 - **ESP32** writes the reconstructed image straight into the second OTA slot
-  (`Update.begin()`/`Update.write()`). Only the patch lies in the filesystem — a few tens of KB.
+  (`Update.begin()`/`Update.write()`). Only the patch lies in the filesystem — a few tens of KB
+  ([DELTA.md](DELTA.md)).
 - **RP2040** builds it up as a file. Patch, unpacked patch **and** the finished image have to fit in
   there at the same time.
 
