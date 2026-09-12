@@ -7065,7 +7065,33 @@ int main(int argc, char** argv)
             const std::string want = ftc::fwVersionText(knxotaFw.id);
             bool wentAway = false; // the device stopped answering -> it really restarted
             bool back = false;
+            // Proof by version: the firmware that was replaced cannot report the version that replaced it.
+            // Only usable when the version actually changes -- a re-flash of the same version still needs
+            // the disappearance as its only evidence (see the note above observeRestart).
+            bool appliedProven = false;
+            std::string verBefore;   // what it reported before the restart -- the yardstick
+            std::string lastSeenVer; // what it reported last -- for the diagnosis if this fails
+            bool pingBack = false;   // it answers the ping again -- even if its info could not be read
+            uint32_t probeCount = 0;
+            uint32_t observedMs = 0;
+            // Presence and version are two questions, and they must not share one query. A full `info`
+            // walks 7 properties; against a device that does not answer that is 6*FTC_TIMEOUT plus the
+            // optional one -- about 37 s for a single call. A reboot fits entirely inside that window, so
+            // the call straddles the outage, gets its answers from the device that came back, and reports
+            // "alive" the whole way through: the disappearance can never be seen. One DeviceDescriptor_Read
+            // answers the same question in ~30 ms (2.4 s worst case), which is what makes polling work.
+            ftc::ReachDeps rdeps;
+            rdeps.pump = []() { g_knxTunnel.pump(); };
+            rdeps.nowMs = []() { return nowMs(); };
+            rdeps.aborted = []() { return g_abort != 0; };
             auto probeAlive = [&]() {
+                int tries = 0;
+                uint32_t spent = 0;
+                return ftc::deviceAnswers(g_knxTunnel, targetPa, rdeps, tries, spent);
+            };
+
+            // Only asked once the ping says it is back -- this is the expensive one.
+            auto readVersion = [&]() {
                 g_ftcSuppress = true;
                 std::vector<FtcEntry> vsnap;
                 openknxFileTransferClient.processCommand("ftc " + paText + " info", false);
@@ -7084,31 +7110,78 @@ int main(int argc, char** argv)
             // The same watcher the standalone `fwupdate` uses -- one question, one implementation.
             auto watchRebuild = [&]() { return watchFirmwareInstall(targetPa); };
 
+            // How long to watch. An RP2040/RP2350 reboots within seconds, but the image is applied by the
+            // bootloader AFTERWARDS, so the gap can be short and the return far out. Both budgets are
+            // generous on purpose; every loop leaves as soon as its outcome is decided.
+            const uint32_t GONE_WINDOW_MS = 30000;   // watching for it to stop answering
+            const uint32_t BACK_WINDOW_MS = 240000;  // total budget once it HAS gone
+            const uint32_t CONFIRM_MS = 12000;       // gap never seen -> just re-read the version, briefly
+
             auto observeRestart = [&]() {
                 const uint64_t t0 = nowMs();
                 wentAway = false;
                 back = false;
-                while (nowMs() - t0 < 25000 && !g_abort && !wentAway)
+                appliedProven = false;
+                pingBack = false;
+                probeCount = 0; // paired with observedMs in the diagnosis -- both must count the same run
+                lastSeenVer.clear();
+
+                // The yardstick, taken before anything restarts.
+                {
+                    const FtcDeviceInfo& pre = openknxFileTransferClient.deviceInfo();
+                    const ftc::DevVersion pv = ftc::devVersionFrom(pre.hardware, pre.haveHw, pre.version, pre.haveVersion);
+                    if (pv.valid) verBefore = ftc::devVersionText(pv);
+                }
+
+                // Phase 1: it should stop answering. Polling for that is a race -- missing the gap is not
+                // a verdict, so phase 2 runs either way and decides on the version.
+                while (nowMs() - t0 < GONE_WINDOW_MS && !g_abort && !wentAway)
                 {
                     g_tpl.waitTick(L.tr("the device is restarting", "das Gerät startet neu"),
                                    (uint32_t)((nowMs() - start) / 1000), L.tr("normally 15-40 s", "normal 15-40 s"));
+                    ++probeCount;
                     if (!probeAlive()) wentAway = true;
                     else
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
-                while (wentAway && nowMs() - t0 < 90000 && !g_abort)
+
+                // Phase 2: it has to be BACK on the wanted version. Patient once the gap was seen, brief
+                // when it was not -- there the question is only whether the version moved after all.
+                // Measured from HERE, not from t0: phase 1 may have burned its whole window, and a budget
+                // counted from t0 would then be spent before phase 2 runs even once -- which is exactly
+                // the case this phase exists for.
+                const uint64_t t2 = nowMs();
+                const uint32_t budget = wentAway ? BACK_WINDOW_MS : CONFIRM_MS;
+                while (nowMs() - t2 < budget && !g_abort)
                 {
-                    g_tpl.waitTick(L.tr("waiting for the device", "warte auf das Gerät"),
+                    g_tpl.waitTick(wentAway ? L.tr("waiting for the device", "warte auf das Gerät")
+                                            : L.tr("checking the version", "prüfe die Version"),
                                    (uint32_t)((nowMs() - start) / 1000),
                                    L.tr("normally 15-40 s", "normal 15-40 s"));
-                    if (probeAlive())
+                    ++probeCount;
+                    // Two separate facts: it answers again (ping), and its info could be read. Folding
+                    // them into one flag reported a device that was demonstrably back as "not come back".
+                    const bool alive = probeAlive();
+                    if (alive) pingBack = true;
+                    if (alive && readVersion())
                     {
                         back = true;
                         const FtcDeviceInfo& now = openknxFileTransferClient.deviceInfo();
                         const ftc::DevVersion seen = ftc::devVersionFrom(now.hardware, now.haveHw, now.version, now.haveVersion);
-                        if (seen.valid && ftc::devVersionText(seen) == want) break; // the new firmware is up
+                        if (seen.valid) lastSeenVer = ftc::devVersionText(seen);
+                        if (seen.valid && lastSeenVer == want)
+                        {
+                            // A version that moved TO the wanted one settles it on its own. Unchanged
+                            // version on a re-flash proves nothing -- there the disappearance still rules.
+                            appliedProven = !verBefore.empty() && verBefore != want;
+                            break;
+                        }
                     }
+                    else
+                        back = false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 }
+                observedMs = (uint32_t)(nowMs() - t0);
                 std::printf("\r\x1b[K");
             };
             const bool rebuilt = watchRebuild();
@@ -7117,7 +7190,7 @@ int main(int argc, char** argv)
             // It did not restart -> the apply was refused. Everything needed to put that right is known
             // here: the target, the file on it, and why it was refused. Printing a command for the user
             // to retype would be handing back a job this already has in its hands.
-            if (!wentAway && g_term.isTty() && !quiet && !g_abort)
+            if (!appliedProven && !wentAway && g_term.isTty() && !quiet && !g_abort)
             {
                 g_ui.errorBlock(false,
                                 L.tr("the device did not restart - the update was NOT applied",
@@ -7153,16 +7226,34 @@ int main(int argc, char** argv)
             }
             const FtcDeviceInfo& after = openknxFileTransferClient.deviceInfo();
             const ftc::DevVersion nv = ftc::devVersionFrom(after.hardware, after.haveHw, after.version, after.haveVersion);
-            if (!wentAway)
+            if (!appliedProven && !wentAway)
             {
                 // Still not restarted -- either the offer above was declined, or the second attempt was
                 // refused too. The entry stays, so the run can be picked up once the reason is gone.
+                // Say what this rests on: the verdict comes from an observation that can be missed, and
+                // without the numbers the next occurrence is guesswork again.
+                char diag[192];
+                if (probeCount == 0)
+                    // Nothing was watched at all -- the apply was never triggered (offer declined, or no
+                    // rebuild to wait for). Claiming an observation here would invent evidence.
+                    std::snprintf(diag, sizeof(diag), "%s",
+                                  L.tr("the restart was not observed: the apply was not triggered",
+                                       "der Neustart wurde nicht beobachtet: das Einspielen wurde nicht ausgelöst"));
+                else
+                    std::snprintf(diag, sizeof(diag),
+                                  L.tr("watched %u s, %u queries, never stopped answering; version %s -> %s (expected %s)",
+                                       "%u s beobachtet, %u Abfragen, hat durchgehend geantwortet; Version %s -> %s (erwartet %s)"),
+                                  (unsigned)(observedMs / 1000), (unsigned)probeCount,
+                                  verBefore.empty() ? "?" : verBefore.c_str(),
+                                  lastSeenVer.empty() ? "?" : lastSeenVer.c_str(),
+                                  ftc::fwVersionText(knxotaFw.id).c_str());
                 g_tpl.status(ftc::Tpl::Stat::Err,
                              L.tr("the firmware was not applied", "die Firmware wurde nicht eingespielt"),
                              {L.tr("the file stays on the device - nothing has to be transferred again",
-                                   "die Datei bleibt auf dem Gerät - es muss nichts neu übertragen werden")});
+                                   "die Datei bleibt auf dem Gerät - es muss nichts neu übertragen werden"),
+                              std::string(diag)});
             }
-            else if (back && nv.valid && ftc::devVersionText(nv) == ftc::fwVersionText(knxotaFw.id))
+            else if (appliedProven || (back && nv.valid && ftc::devVersionText(nv) == ftc::fwVersionText(knxotaFw.id)))
             {
                 ftc::otaResumeErase(otaResumePath(), sess); // proven done -> never offer this run again
                 // Recorded only here, where the device has confirmed the version it came back with: a
@@ -7184,13 +7275,91 @@ int main(int argc, char** argv)
                              {ftc::devVersionText(nv)});
             else
             {
-                g_ui.errorBlock(false, L.tr("the device has not come back yet", "das Gerät hat sich noch nicht zurückgemeldet"),
-                                {L.tr("the image was checked before flashing, so this points at the connection",
-                                      "das Image wurde vor dem Flashen geprüft, das spricht eher für die Verbindung"),
-                                 L.tr("a device whose flash failed starts the old firmware again by itself",
-                                      "ein Gerät, dessen Flash fehlschlug, startet die alte Firmware von selbst wieder")},
-                                std::string("ftc --ip ") + ip + " " + paText + L.tr(" info  shows whether it is back",
-                                                                                   " info  zeigt, ob es wieder da ist"));
+                // It went away and never answered on THIS address again. Before blaming the connection,
+                // ask the default address: a firmware that does not carry the physical address over comes
+                // back unprogrammed on 15.15.255. An answer there proves nothing on its own -- every
+                // unprogrammed device sits on it. The VERSION it reports does prove it: nothing but the
+                // firmware just flashed can report the version just flashed.
+                if (pingBack)
+                {
+                    // It answers on its own address again -- the restart happened and it is there. Only
+                    // its info stayed unreadable, which is a different fault from "gone". Probing the
+                    // default address here would be nonsense: it is demonstrably not on it.
+                    g_ui.errorBlock(true, L.tr("the device answers again, but its info could not be read",
+                                               "das Gerät antwortet wieder, seine Info war aber nicht lesbar"),
+                                    {std::string(L.tr("it restarted and is back on ", "es hat neu gestartet und ist wieder auf ")) + paText,
+                                     std::string(L.tr("whether the new firmware is running could not be established",
+                                                      "ob die neue Firmware läuft, liess sich nicht feststellen"))},
+                                    std::string("ftc --ip ") + ip + " " + paText + L.tr(" info   asks it again",
+                                                                                        " info   fragt es erneut"));
+                    socketCleanup();
+                    return 6;
+                }
+
+                const uint16_t DEFAULT_PA = 0xFFFF; // 15.15.255
+                bool defAnswers = false;
+                std::string defVer;
+                if (!g_abort)
+                {
+                    int dtries = 0;
+                    uint32_t dspent = 0;
+                    defAnswers = ftc::deviceAnswers(g_knxTunnel, DEFAULT_PA, rdeps, dtries, dspent);
+                    if (defAnswers)
+                    {
+                        g_ftcSuppress = true;
+                        std::vector<FtcEntry> dsnap;
+                        openknxFileTransferClient.processCommand("ftc 15.15.255 info", false);
+                        ftcPumpStructured(dsnap, false, false);
+                        g_ftcSuppress = false;
+                        const FtcDeviceInfo& di = openknxFileTransferClient.deviceInfo();
+                        const ftc::DevVersion dvv = ftc::devVersionFrom(di.hardware, di.haveHw, di.version, di.haveVersion);
+                        if (di.valid && dvv.valid) defVer = ftc::devVersionText(dvv);
+                    }
+                }
+
+                if (defAnswers && !defVer.empty() && defVer == want)
+                {
+                    // Settled: the update worked, the device just lost its address with it. Treating this
+                    // as a failure would send the user chasing a transfer that is already on the device.
+                    ftc::otaResumeErase(otaResumePath(), sess);
+                    if (!deltaNewApp.empty())
+                        ftc::baseCacheRemember(knxotaBaseCachePath(), targetPa, deltaNewApp);
+                    g_tpl.status(ftc::Tpl::Stat::Warn,
+                                 std::string(L.tr("the firmware is on the device -- it now sits on 15.15.255 with ",
+                                                  "die Firmware ist auf dem Gerät -- es sitzt jetzt auf 15.15.255 mit ")) + defVer,
+                                 {L.tr("this firmware does not carry the physical address over, so it came back unprogrammed",
+                                       "diese Firmware übernimmt die physikalische Adresse nicht, sie kam unprogrammiert zurück"),
+                                  L.tr("the version there is the one just transferred -- nothing else can report it",
+                                       "die Version dort ist die soeben übertragene -- nichts anderes kann sie melden"),
+                                  L.tr("program it with ETS to give it its address and parameters back",
+                                       "mit der ETS programmieren, damit es Adresse und Parameter zurückbekommt")});
+                    socketCleanup();
+                    return 0;
+                }
+
+                // What the default address told us, in one line -- the wording has to stay honest about
+                // how much it proves, which is why the three cases read differently.
+                std::string defLine;
+                if (!defAnswers)
+                    defLine = L.tr("nothing answers on 15.15.255 either, so it did not come back unprogrammed",
+                                   "auf 15.15.255 antwortet ebenfalls nichts, es kam also nicht unprogrammiert zurück");
+                else if (defVer.empty())
+                    defLine = L.tr("something answers on 15.15.255 but reports no version -- it may be this device",
+                                   "auf 15.15.255 antwortet etwas, meldet aber keine Version -- es kann dieses Gerät sein");
+                else
+                    defLine = std::string(L.tr("15.15.255 answers with ", "15.15.255 meldet ")) + defVer +
+                              L.tr(", not the transferred version -- probably a different device",
+                                   ", nicht die übertragene Version -- vermutlich ein anderes Gerät");
+
+                g_ui.errorBlock(false, L.tr("the device has not come back on this address",
+                                            "das Gerät hat sich auf dieser Adresse nicht zurückgemeldet"),
+                                {std::string(L.tr("it did stop answering, so the restart itself happened",
+                                                  "es hat aufgehört zu antworten, der Neustart hat also stattgefunden")),
+                                 defLine,
+                                 std::string(L.tr("a device whose flash failed starts the old firmware again by itself",
+                                                  "ein Gerät, dessen Flash fehlschlug, startet die alte Firmware von selbst wieder"))},
+                                std::string("ftc --ip ") + ip + L.tr(" scan   finds it under the address it has now",
+                                                                    " scan   findet es unter der Adresse, die es jetzt hat"));
                 socketCleanup();
                 return 6;
             }
