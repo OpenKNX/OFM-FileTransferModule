@@ -111,7 +111,7 @@ have is a bus connection — that is what the tunnel is for.
 `FileTransferClient.{h,cpp}` + `FileTransferClientConsole.{h,cpp}` from `../src/` are compiled
 **byte-identical**. A host-only shim replaces the OpenKNX/knx/Arduino stack with just the thin slice those
 four files touch, and the `knx.bau().ftc*` calls forward to a KNXnet/IP tunnel. The wire format is the same
-one the firmware speaks — see [../doc/PROTOCOL.md](../doc/PROTOCOL.md). **No `lib/knx` changes.**
+one the firmware speaks — see [../doc/reference/protocol.md](../doc/reference/protocol.md). **No `lib/knx` changes.**
 
 ```
   ../src/FileTransferClient.cpp  (UNCHANGED state machine)
@@ -127,8 +127,8 @@ one the firmware speaks — see [../doc/PROTOCOL.md](../doc/PROTOCOL.md). **No `
 
 | Path | Owner | Contents |
 |------|-------|----------|
-| `../doc/PROTOCOL.md` | spec | the wire format both firmware and this tool speak |
-| `doc/CONCEPT-api.md` | concept | the planned local HTTP/SSE API (`ftc --api`) |
+| `../doc/reference/protocol.md` | spec | the wire format both firmware and this tool speak |
+| `doc/concept/desktop-api.md` | concept | the planned local HTTP/SSE API (`ftc --api`) |
 | `src/knx_ip_tunnel.h` | **fixed contract** | the transport seam (authored, do not widen casually) |
 | `shim/*.h` | shim | host stand-ins; makes the 4 unchanged files compile |
 | `src/knx_ip_tunnel.cpp` | transport | the real KNXnet/IP tunnel client |

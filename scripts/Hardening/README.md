@@ -14,12 +14,12 @@ den **ftc-Client**. Ergänzt die vorhandenen `../Test-Ftc*.ps1` — sie ersetzt 
 
 Für FTC gibt es **keine KNX-Prüfvorschrift**. Das Protokoll ist OpenKNX-eigen: ein
 `A_FunctionProperty_Command` auf zwei Interface-Objekten. „Nach Protokoll" heißt hier also gegen
-`../../doc/FTC-Reference.md`, `../../doc/errorcodes.txt`, `../../doc/FTC-Console.md` und
-`../../doc/FTC-Security.md`.
+`../../doc/reference/protocol.md`, `../../doc/guide/error-codes.md`, `../../doc/guide/console.md` und
+`../../doc/guide/unlocking-a-device.md`.
 
 > **Offener Punkt (F0 im Testplan):** Diese Dokumente haben **keine stabilen Klauselnummern**. Solange das
 > so ist, kann eine Testfall-Referenz nur den Abschnittsnamen nennen statt einer Klausel — und ein FAIL ist
-> schwerer zu widerlegen. Die Durchnummerierung von `FTC-Reference.md` ist die erste Aufgabe, bevor diese
+> schwerer zu widerlegen. Stabile Klauselnummern im Doku-Satz sind die erste Aufgabe, bevor diese
 > Suite ihren vollen Wert hat.
 
 Der **Träger** ist dagegen sehr wohl KNX-spezifiziert (`03_03_07` Application Layer, geprüft in

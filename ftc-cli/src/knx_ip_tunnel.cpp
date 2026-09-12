@@ -3,7 +3,7 @@
  * @brief       KNXnet/IP tunnel transport for the FTC ftc-cli.
  * @details     Implements the fixed contract in knx_ip_tunnel.h: each ftc* call becomes a cEMI L_Data.req
  *              carried in a KNXnet/IP TUNNELING_REQUEST, and each inbound L_Data.ind APDU is decoded into
- *              one of the five FTC callbacks. Byte layout follows doc/FTC-WIRE-PROTOCOL.md (§1 APDU,
+ *              one of the five FTC callbacks. Byte layout follows doc/reference/protocol-wire.md (§1 APDU,
  *              §5 decode, §6 CO scan, §7 cEMI framing). Non-blocking throughout: pump() drains pending
  *              datagrams and returns. All extra transport state lives in a translation-unit-local struct;
  *              there is exactly one g_knxTunnel.
@@ -1154,7 +1154,7 @@ uint32_t knxTunnelDrops() { return g_dropActivity; }
 /**********************************************************************
  ****************************** SELF-TEST ***************************
  **********************************************************************/
-// Build the four spec APDUs and compare against doc/FTC-WIRE-PROTOCOL.md §1.6/§3 hexdumps.
+// Build the four spec APDUs and compare against doc/reference/protocol-wire.md §1.6/§3 hexdumps.
 //   clang++ -std=c++17 -DFTC_TUNNEL_SELFTEST -I <src> knx_ip_tunnel.cpp -o /tmp/ftc && /tmp/ftc
 #ifdef FTC_TUNNEL_SELFTEST
     #include <cstdio>

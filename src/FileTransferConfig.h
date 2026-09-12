@@ -9,7 +9,7 @@
 // Set nothing and you get the bare server core: upload, FileInfo, FilesystemInfo, Format/Rename/Delete,
 // FwUpdate, CheckFeatures. Everything beyond that comes from a PROFILE, or from a single -D.
 // Names starting with OPENKNX_ are yours to set; FTC_/FTM_ names are the module's own and are not.
-// Measured sizes: doc/FLAGS.md -- the reasoning: doc/CONCEPT-defines.md
+// Measured sizes: doc/reference/flags.md -- the reasoning: doc/concept/build-defines.md
 
 // --- Profiles: set ONE in your ini. MANAGER contains DEVICE. -----------------------------------
 //     (nothing)                        CUSTOM -- pick the switches yourself; the core alone answers

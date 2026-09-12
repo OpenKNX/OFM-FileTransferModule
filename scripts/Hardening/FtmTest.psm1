@@ -21,7 +21,7 @@ FILEPATH: scripts/Hardening/FtmTest.psm1
     (APDU minus the 7 octet header). That single number bounds most of the protocol suite.
 
     This library provides:
-      * command and result-code tables taken from doc/FTC-Reference.md and doc/errorcodes.txt
+      * command and result-code tables taken from doc/reference/protocol.md and doc/guide/error-codes.md
       * builders for A_FunctionProperty_Command frames, including deliberately malformed ones
       * a serial console driver, because the on-device ftc client is driven through it
       * the same PASS / FAIL / SKIP / N-A verdict engine and report format as the
@@ -487,8 +487,8 @@ function Invoke-FtmTestCase {
     .SYNOPSIS
         Runs one hardening case, captures its verdict and evidence, and records it.
     .PARAMETER Reference
-        Where the expectation comes from - a section of doc/FTC-Reference.md, an error code
-        from doc/errorcodes.txt, or a named constraint. Mandatory for the same reason the
+        Where the expectation comes from - a section of doc/reference/protocol.md, an error code
+        from doc/guide/error-codes.md, or a named constraint. Mandatory for the same reason the
         KNXnet/IP suites demand a clause: an expectation nobody can look up cannot be argued
         about, and an unarguable FAIL is worthless.
     #>
