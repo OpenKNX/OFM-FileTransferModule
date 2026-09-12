@@ -5,9 +5,9 @@ the transfer?**
 
 | You have | You use | Read on |
 |---|---|---|
-| a browser and an OpenKNX device with a web interface | the **knxOTA page** | [below](#1-browser-knxota-page) · [WEB.md](WEB.md) |
-| a serial or web console on an OpenKNX device | the **`ftc` command** | [below](#2-device-console) · [CONSOLE.md](CONSOLE.md) |
-| a PC and a KNXnet/IP interface | the **`ftc` binary** | [below](#3-pc-ftc-cli) · [FTC-CLI.md](FTC-CLI.md) |
+| a browser and an OpenKNX device with a web interface | the **knxOTA page** | [below](#1-browser-knxota-page) · [knxota-web.md](knxota-web.md) |
+| a serial or web console on an OpenKNX device | the **`ftc` command** | [below](#2-device-console) · [CONSOLE.md](console.md) |
+| a PC and a KNXnet/IP interface | the **`ftc` binary** | [below](#3-pc-ftc-cli) · [FTC-CLI.md](ftc-cli.md) |
 
 All three drive the *same* client code against the *same* server in the target device. Nothing else
 differs.
@@ -25,9 +25,9 @@ differs.
 * **You cannot reach your own PA.** A KNX device does not process frames it sent itself. Use a second
   device or an external interface. Not a bug, a property of KNX.
 * **Writing may be locked.** If the target was configured with access protection, `login` first
-  ([SECURITY.md](SECURITY.md)).
+  ([SECURITY.md](unlocking-a-device.md)).
 * **Budget the time.** ~400 bytes per second. 43 KB config file ≈ 2 min, 1.8 MB firmware ≈ 78 min,
-  the same firmware as a difference ≈ 2 min ([THROUGHPUT.md](THROUGHPUT.md)).
+  the same firmware as a difference ≈ 2 min ([THROUGHPUT.md](throughput.md)).
 
 ---
 
@@ -42,7 +42,7 @@ when the current is green.
 3. **Transfer** — send, watch the curve, trigger the update.
 
 Nothing is on the PC. The device you are looking at sends the firmware to the *other* device over the
-bus. Details and the failure cases: [WEB.md](WEB.md).
+bus. Details and the failure cases: [knxota-web.md](knxota-web.md).
 
 ---
 
@@ -59,7 +59,7 @@ ftc 5.0.3 apply fw.bin            make it boot that firmware
 ftc 5.0.3 con                     open its console from here
 ```
 
-The full command surface: [CONSOLE.md](CONSOLE.md).
+The full command surface: [CONSOLE.md](console.md).
 
 ---
 
@@ -76,13 +76,13 @@ ftc --ip 11.11.0.126 5.0.3 con                   remote console
 ```
 
 `--ip` is the **interface you tunnel through**, `<pa>` is the **target on the bus**. The full
-reference: [FTC-CLI.md](FTC-CLI.md).
+reference: [FTC-CLI.md](ftc-cli.md).
 
 ---
 
 ## Your first firmware update
 
-The short version. The long one, including what to do when it fails: [FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md).
+The short version. The long one, including what to do when it fails: [FIRMWARE-UPDATE.md](firmware-update.md).
 
 ```bash
 # 1. prepare the image (optional but worth it)
@@ -106,6 +106,6 @@ it refused, and the reason is printed.
 | `0xA0` / "login required" | access protection, stage password — run `login` |
 | `0xA2` / "writes disabled" | access protection, stage blocked or prog mode — press the button or change the stage |
 | transfer starts, then stalls | busy bus — use `safe` instead of `fast` |
-| `apply` says triggered but nothing happens | the image is not bootable for that chip, or there is no free OTA slot; see [FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md) |
+| `apply` says triggered but nothing happens | the image is not bootable for that chip, or there is no free OTA slot; see [FIRMWARE-UPDATE.md](firmware-update.md) |
 
-Any other code: [errorcodes.txt](errorcodes.txt).
+Any other code: [ERRORCODES.md](error-codes.md).

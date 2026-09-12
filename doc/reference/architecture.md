@@ -1,7 +1,50 @@
 # Architecture
 
 **For:** developers integrating, extending or debugging the module. How the pieces fit and why the
-transport looks the way it does. The command surface itself is in [PROTOCOL.md](PROTOCOL.md).
+transport looks the way it does. The command surface itself is in [PROTOCOL.md](protocol.md).
+
+## The pieces
+
+```mermaid
+flowchart TB
+    subgraph FE["front ends"]
+        direction LR
+        cli["ftc-cli<br/><i>PC · macOS Linux Windows Pi</i>"]
+        dcon["device console<br/><i>ftc … on the device itself</i>"]
+        web["web file manager<br/><i>OFM-Network · HTTP</i>"]
+    end
+
+    subgraph CLIENT["FileTransferClient* — one source, two bases"]
+        sm["the state machine<br/><i>resume · window · retry · verify</i>"]
+    end
+
+    base1["shim/knx_shim.h<br/><i>18 bau methods, 5 callbacks</i>"]
+    base2["the real KNX stack<br/><i>bau + TPUart</i>"]
+
+    subgraph DEV["inside the target device"]
+        srv["FileTransferModule<br/><i>obj 159 files · obj 160 console</i>"]
+        patch["FirmwarePatch<br/><i>delta interpreter</i>"]
+        drives["LittleFS · SD · external flash"]
+        slot["OTA slot"]
+    end
+
+    cli --> sm
+    dcon --> sm
+    sm --> base1
+    sm --> base2
+    base1 -->|"KNXnet/IP tunnel"| srv
+    base2 -->|"TP1"| srv
+    web -->|"HTTP, never the bus"| drives
+    srv --> drives
+    srv --> patch
+    patch --> slot
+```
+
+Two things this picture is meant to settle. **The client is not written twice** -- `FileTransferClient*`
+is compiled unchanged for the device and for the PC; only what it stands on differs, and that base is a
+contract, not a port ([host-shim.md](host-shim.md)). And **the web file manager never touches the bus**;
+it writes through the same drives over HTTP, which is why it is fast and why that speed cannot be
+carried over ([../guide/throughput.md](../guide/throughput.md)).
 
 ## The path of a file
 
@@ -25,7 +68,7 @@ transport looks the way it does. The command surface itself is in [PROTOCOL.md](
 
 The tunnel carries **every** PA on the bus — one interface is enough to reach any device. What limits
 the pace is not the tunnel but the TP1 line behind it and the device at the end
-([THROUGHPUT.md](THROUGHPUT.md)).
+([THROUGHPUT.md](../guide/throughput.md)).
 
 ## The transport is a call, not a stream
 
@@ -46,8 +89,8 @@ Two objects, two separate worlds:
 
 | Object | for | session |
 |---|---|---|
-| **159** | files, directories, firmware, access protection ([PROTOCOL.md](PROTOCOL.md)) | none — every command stands alone |
-| **160** | the console ([CONSOLE.md](CONSOLE.md)) | one, with OPEN and CLOSE |
+| **159** | files, directories, firmware, access protection ([PROTOCOL.md](protocol.md)) | none — every command stands alone |
+| **160** | the console ([CONSOLE.md](../guide/console.md)) | one, with OPEN and CLOSE |
 
 ## One client, one state machine
 
@@ -72,7 +115,7 @@ not a second client.
 
 **Nothing long in the dispatch.** A checksum over 500 KB would stall the KNX stack and reboot the
 device. That is why `FileInfo` answers "still computing" the first time and the checksum runs across
-many `loop()` passes ([PROTOCOL.md](PROTOCOL.md)).
+many `loop()` passes ([PROTOCOL.md](protocol.md)).
 
 ## Drives
 
@@ -101,4 +144,4 @@ The PC client carries **no** protocol logic of its own. It only provides a base 
 `knx.bau()` onto a KNXnet/IP tunnel. What works on the device therefore works on the PC — and a
 protocol bug shows on both sides instead of hiding between two implementations.
 
-Built for eight targets; the list and the build itself are in [FTC-CLI.md](FTC-CLI.md).
+Built for eight targets; the list and the build itself are in [FTC-CLI.md](../guide/ftc-cli.md).

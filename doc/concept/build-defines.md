@@ -1,8 +1,11 @@
 # Why the FTC switches look the way they do
 
 **For:** developers changing the switch scheme or reviewing it. The reasoning behind
-[FLAGS.md](FLAGS.md) — anyone who only wants to know what to write into their `ini` does not need
-this document.
+[flags.md](../reference/flags.md) — anyone who only wants to know what to write into their `ini` does
+not need this document.
+
+**Status: built.** Every switch described here exists. The document is kept because the *cut* is the
+part that gets re-opened, not the list.
 
 ## The problem that was solved
 
@@ -22,7 +25,7 @@ found among ninety names.
 
 **R3 — No switch may be silently ineffective.** It has an effect, or the build aborts. Eight
 misconfigurations catch that today; every one of them was silent before. The list:
-[FLAGS.md](FLAGS.md#what-the-build-catches).
+[FLAGS.md](../reference/flags.md#what-the-build-catches).
 
 **R4 — Profiles propose, they do not prescribe.** A profile sets a set of switches and never takes away
 anything that is stated explicitly.
@@ -45,7 +48,7 @@ It hangs on the **board**, not on the device class:
 
 - **ESP32** writes the reconstructed image straight into the second OTA slot
   (`Update.begin()`/`Update.write()`). Only the patch lies in the filesystem — a few tens of KB
-  ([DELTA.md](DELTA.md)).
+  ([DELTA.md](../reference/delta.md)).
 - **RP2040** builds it up as a file. Patch, unpacked patch **and** the finished image have to fit in
   there at the same time.
 

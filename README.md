@@ -172,18 +172,18 @@ on logout or when it goes idle. Repeated failures back off without blocking the 
 
 ## Throughput — what is realistic
 
-Measured, not estimated: **roughly 350 to 650 bytes per second**, depending on the interface. Two figures
-from a real installation: about **430 B/s** with `safe` from a PC, about **440 B/s** with `fast` over the
-device console.
+Measured, not estimated: **roughly 350 to 650 bytes per second**, depending on the interface. Four
+figures from one session, same target device, same file: **441 B/s** `safe` and **470 B/s** `fast`
+through an OpenKNX interface — **585** and **599** through an MDT one.
 
-The limit is neither the client nor the tunnel — it is the **target device**, writing to flash while running
-the KNX stack. Consequences that are settled and not worth re-exploring:
+That spread is the point: **the limiter is the sending interface, not the target and not the wire.** Its
+host link hands the transceiver a whole frame before the bus transmission starts, so its time adds to
+the bus time instead of hiding behind it; a bus monitor shows the wire idle 41 % of the time. The
+derivation is in [doc/reference/bottleneck.md](doc/reference/bottleneck.md).
 
-- pushing harder does not help; past roughly 450 B/s an RP2040 target is driven into a reboot
-- a second parallel tunnel makes it worse, not better: one target is one processor
-- any real speed-up has to move work **onto the device** — batching flash writes, less work per block
-
-This is why a delta update is worth so much more than a faster transfer.
+Settled, and not worth re-exploring: a second parallel tunnel makes it worse, more than one block in
+flight wedges real interfaces, and raising the client's pacing rate does nothing at all. The remaining
+lever is the interface's host link — or a delta update, which is why that exists.
 
 ---
 
@@ -216,21 +216,20 @@ Exactly one profile may be set; two are rejected at compile time.
 
 ## Documentation
 
-| Document | For |
+Everything lives under [`doc/`](doc/README.md), split by what you are doing. The index names the
+audience of every document.
+
+| | |
 |---|---|
-| [doc/QUICKSTART.md](doc/QUICKSTART.md) | five minutes, three front ends, one first firmware update |
-| [doc/README.md](doc/README.md) | the index — every document with the audience it is written for |
-| [doc/FIRMWARE-UPDATE.md](doc/FIRMWARE-UPDATE.md) | knxOTA in detail |
-| [doc/DELTA.md](doc/DELTA.md) | how a difference update is built and applied |
-| [doc/PROTOCOL.md](doc/PROTOCOL.md) | the wire format, command by command |
-| [doc/SECURITY.md](doc/SECURITY.md) | the access-control layer |
-| [doc/THROUGHPUT.md](doc/THROUGHPUT.md) | what was measured, and why the ceiling is where it is |
-| [doc/CONSOLE.md](doc/CONSOLE.md) | the console channel |
-| [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) | how the pieces fit together |
-| [doc/FLAGS.md](doc/FLAGS.md) · [doc/CONCEPT-defines.md](doc/CONCEPT-defines.md) | every build switch |
-| [doc/WEB.md](doc/WEB.md) · [doc/SCRIPTS.md](doc/SCRIPTS.md) · [doc/INTEGRATION.md](doc/INTEGRATION.md) | web interface, tooling, putting the module into your own OAM |
-| [doc/errorcodes.txt](doc/errorcodes.txt) | what a result code means |
-| [ftc-cli/README.md](ftc-cli/README.md) | the desktop client |
+| **[doc/README.md](doc/README.md)** | the index — start here |
+| [guide/](doc/guide/quickstart.md) | operating a device: quickstart, firmware update, console, unlocking, throughput, result codes, the web page, the desktop client |
+| [reference/](doc/reference/architecture.md) | building with it: architecture, integration, build flags, the protocol and its byte layout, the host shim, delta updates, the bottleneck, known limits, the test scripts |
+| [concept/](doc/concept/access-control.md) | why it is so: the access-control rationale, the build-switch cut, where the desktop front ends are going |
+| [findings/](doc/findings/) | dated analyses of open problems — expected to disappear once they are closed |
+| [ftc-cli/README.md](ftc-cli/README.md) | building and installing the desktop client |
+
+`pwsh scripts/Test-DocLinks.ps1` checks every link in the set, including the ones that resolve on a
+case-insensitive filesystem but would 404 on GitHub.
 
 ---
 
@@ -246,8 +245,8 @@ that drive a real device and name, per test case, the clause being verified — 
 Tunnelling, Routing, Remote Diagnosis and device-level checks. Where a measurement contradicted an
 assumption, the assumption was corrected, not the measurement.
 
-**Where it deliberately steps outside.** The `fast` and `forget` upload modes trade protocol
-acknowledgement for speed. That is a conscious departure, it is documented as such, it is off by default,
+**Where it deliberately steps outside.** The `fast` upload mode trades protocol acknowledgement for
+speed. That is a conscious departure, it is documented as such, it is off by default,
 and it works only between OpenKNX devices. It is not offered as standard behaviour.
 
 **Warranty.** Everything here was implemented to the best of the author's knowledge and belief and verified
@@ -257,9 +256,19 @@ implied; see the licence for the binding wording. You use it on your own install
 
 ---
 
-## Author and licence
+## Authors and licence
 
-Written by **Erkan Çolak** for OpenKNX.
+This module was **not written from scratch**. It was created on **2 May 2023 by Mike (`thewhobox`)**,
+who carried it to version **0.1.5** — the server inside the device (`FileTransferModule.*`), the file
+and directory commands and the ETS integration come from that work, with contributions from **Marco
+Scholl**, **Michael Geramb** and **Waldemar Porscha**.
+
+**Erkan Çolak** took it over at 0.1.5 in July 2026 and everything from **0.2.0** on is his: the client
+(`FileTransferClient*`, the same sources on the device and on a PC), the native desktop client
+(`ftc-cli/`), the windowed `fast` transfer, the console tunnel, the access control, the delta update and
+knxOTA — plus this documentation set.
+
+The commit history is the authority on all of it: `git shortlog -sne`.
 
 Licensed under the **GNU General Public License v3** — see [LICENSE](LICENSE).
 

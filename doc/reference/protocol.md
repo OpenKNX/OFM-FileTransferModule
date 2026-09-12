@@ -1,11 +1,41 @@
 # Protocol
 
 **For:** developers writing or changing a client, a server command, or a response code. The wire
-surface of object 159; the console (object 160) is in [CONSOLE.md](CONSOLE.md).
+surface of object 159; the console (object 160) is in [CONSOLE.md](../guide/console.md).
 
 A command is an `A_FunctionProperty_Command` (APCI `0x2C7`) on object **159**, the response an
 `A_FunctionPropertyState_Response` (APCI `0x2C9`). The command number is in the PID.
 Payload ≤ **247 bytes** per frame.
+
+## One block, both ways
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as client
+    participant I as interface
+    participant D as device server
+
+    Note over C,D: safe — every block is answered
+    C->>I: FileUpload 40 · seq n · payload
+    I->>D: over TP1
+    D-->>C: 0x00 · or a result code
+    C->>I: FileUpload 40 · seq n+1
+
+    Note over C,D: fast — a window, then one question
+    C->>D: FileUploadFast 44 · seq n … n+15 (silent)
+    C->>D: FileReport 45 · which of them arrived?
+    D-->>C: bitmap + the target's measured ingest rate
+    C->>D: FileUploadFast 44 · only the gaps
+```
+
+The difference is not the write, it is the acknowledgement. `safe` pays one round trip per block and
+therefore paces itself at whatever the bus and the device give. `fast` pays one per window and learns
+about losses only from the report — which is why it is the faster of the two on a quiet bus and the
+wrong tool on a flooded one ([../guide/throughput.md](../guide/throughput.md)).
+
+The received bit is set **only** after the block's checksum verifies *and* the write succeeds, so a
+bitmap never claims a block the device did not store.
 
 ## Commands
 
@@ -26,12 +56,12 @@ Payload ≤ **247 bytes** per frame.
 | 82 | `DirDelete` | `path\0` | Code |
 | 90 | `Cancel` | — | **nothing** — the handler returns `false`, so no L7 response is sent |
 | 100 | `ModuleVersion` | — | Version |
-| 101 | `FwUpdate` | `path\0` | **nothing** from the handler · the access gate ahead of it can still answer `0xA0`/`0xA2` ([SECURITY.md](SECURITY.md)). What became of it is told by 106 ([DELTA.md](DELTA.md)) |
+| 101 | `FwUpdate` | `path\0` | **nothing** from the handler · the access gate ahead of it can still answer `0xA0`/`0xA2` ([SECURITY.md](../guide/unlocking-a-device.md)). What became of it is told by 106 ([DELTA.md](delta.md)) |
 | 102 | `CheckFeatures` | — | feature byte |
 | 103 | `AuthChallenge` | — | Nonce |
 | 104 | `AuthResponse` | MAC | Code |
 | 105 | `AuthLogout` | — | Code |
-| 106 | `FwProbe` | `[len:4][crc:4]` | Code + extra · also the **job status** ([DELTA.md](DELTA.md)) |
+| 106 | `FwProbe` | `[len:4][crc:4]` | Code + extra · also the **job status** ([DELTA.md](delta.md)) |
 
 ## Response codes
 
@@ -45,10 +75,10 @@ value means something else depending on which command it answers. Codes from `0x
 | `0x00` | all | done · for `FileInfo`: size **and** checksum |
 | `0x01` | `FileInfo` | size only, no checksum (SD/ExtFlash in the normal case) |
 | `0x01` | `FilesystemInfo` | total and used are in **KB**, not bytes (SD/ExtFlash) |
-| `0x01` | object 160 | busy — the console session is owned by someone else ([CONSOLE.md](CONSOLE.md)) |
+| `0x01` | object 160 | busy — the console session is owned by someone else ([CONSOLE.md](../guide/console.md)) |
 | `0x02` | `FileInfo` | **size is there, checksum still computing — ask again** |
 | `0x03` | `FwProbe` | a delta job is still running; the extra carries the bytes produced so far |
-| `0x05` | `FwProbe` | the last apply failed, reason in the extra ([DELTA.md](DELTA.md)) |
+| `0x05` | `FwProbe` | the last apply failed, reason in the extra ([DELTA.md](delta.md)) |
 
 **Shared errors**
 
@@ -60,9 +90,9 @@ value means something else depending on which command it answers. Codes from `0x
 | `0x4B` | range outside what is allowed |
 | `0x4C` | busy — a firmware update is being applied right now |
 | `0x81` … `0x86` | directory error |
-| `0xA0` `0xA1` `0xA2` | login required · login failed · writing locked ([SECURITY.md](SECURITY.md)) |
+| `0xA0` `0xA1` `0xA2` | login required · login failed · writing locked ([SECURITY.md](../guide/unlocking-a-device.md)) |
 
-The named list of the `0x4x` / `0x8x` / `0xAx` codes is [errorcodes.txt](errorcodes.txt). It also
+The named list of the `0x4x` / `0x8x` / `0xAx` codes is [ERRORCODES.md](../guide/error-codes.md). It also
 carries `0x01`…`0x04` as LittleFS errors — **those four conflict with the per-command status bytes
 above and have not been reconciled against the current server.** For anything below `0x40`, go by the
 command, and by this table.
@@ -116,7 +146,7 @@ Whoever only wants to know **whether** a file is there treats `0x00`, `0x01` and
 The receive bit is **set only once the block's checksum matches and the write has succeeded** — not
 when the block has arrived.
 
-Which way is the right one when: [THROUGHPUT.md](THROUGHPUT.md).
+Which way is the right one when: [THROUGHPUT.md](../guide/throughput.md).
 
 ## One response belongs to one command
 

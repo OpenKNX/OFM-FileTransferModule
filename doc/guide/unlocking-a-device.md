@@ -3,7 +3,7 @@
 **For:** anyone operating a protected device; the build note at the end is for integrators. Optional,
 through `-D OPENKNX_FTC_SECURITY` — without the flag the whole section disappears. Setting
 `OPENKNX_FTC_CONSOLE` pulls it in unconditionally: an unauthenticated console tunnel is not a build
-option ([CONCEPT-defines.md](CONCEPT-defines.md)).
+option ([CONCEPT-defines.md](../concept/build-defines.md)).
 
 ## What is protected
 
@@ -11,7 +11,32 @@ option ([CONCEPT-defines.md](CONCEPT-defines.md)).
 features.
 
 Gated are: `Format` · `Rename` · `FileUpload` · `FileUploadFast` · `FileDelete` · `DirCreate` ·
-`DirDelete` · `FwUpdate` — and opening the console ([CONSOLE.md](CONSOLE.md)).
+`DirDelete` · `FwUpdate` — and opening the console ([CONSOLE.md](console.md)).
+
+## The states you can meet
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open: stage Always
+    [*] --> Closed: stage Off
+    [*] --> ProgGate: stage ProgMode
+    [*] --> NeedsPassword: stage Password
+
+    Closed --> Closed: every write answered 0xA2
+    ProgGate --> Open: programming mode on
+    Open --> ProgGate: programming mode off
+    NeedsPassword --> Open: login accepted
+    NeedsPassword --> NeedsPassword: wrong password, 0xA1
+    Open --> NeedsPassword: idle timeout
+
+    note right of Open
+        reads are open in every state
+        each accepted write refreshes the window
+    end note
+```
+
+The desktop client resolves this **before** it sends a write, so in practice you meet its prompt rather
+than a result code.
 
 ## The four stages
 
@@ -59,6 +84,20 @@ Practical consequence: a **running** transfer keeps itself open, a **waiting** j
 working through a queue logs in before each job instead of failing on an `0xA0` that looks like an
 error to the user.
 
+## Asked before, not after
+
+The desktop client resolves the target's access state **before** it sends a write, and its verb list
+mirrors the server's own gate (`secIsWriteCommand`): `send`, `perf`, `apply`, `rm`, `mv`, `mkdir`,
+`rmdir`, `format`, `fwupdate`. Reads stay open and are never gated.
+
+If the target wants a password, the client asks for it -- the same prompt the console has always used,
+including the reminder that this is the ETS "access protection" parameter and not an ETS password or a
+KNX Secure key. Under `-q` there is nobody to ask, so it prints `please login first` on stderr and exits
+`3` without sending anything.
+
+The point is the wasted half hour: a firmware upload that runs into a closed window fails at the first
+write, after the setup, the version read and the confirmation. One round trip up front replaces that.
+
 ## Result codes
 
 | Code | means | what the client should do |
@@ -67,7 +106,7 @@ error to the user.
 | `0xA1` | login failed | wrong password, an expired or missing challenge, an empty password |
 | `0xA2` | writes disabled | stage `Off`, or `ProgMode` without the button — **no** login helps |
 
-The full code list: [errorcodes.txt](errorcodes.txt).
+The full code list: [ERRORCODES.md](error-codes.md).
 
 The difference between `0xA0` and `0xA2` is the difference between "log in" and "go to the device".
 Showing both as "access denied" sends the user the wrong way.

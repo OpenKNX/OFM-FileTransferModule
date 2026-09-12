@@ -1,12 +1,12 @@
 # Firmware as a difference
 
 **For:** developers working on the update path or the patch format. Operating side — how to build and
-send one: [FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md).
+send one: [FIRMWARE-UPDATE.md](../guide/firmware-update.md).
 
 A new firmware usually differs from the running one by a few percent. Instead of sending 1.8 MB over
 the bus (nearly an hour) only the differences go — often under 50 KB, so minutes.
 
-Build flag: `OPENKNX_FTC_DELTA_UPDATE` — cost and the board question in [FLAGS.md](FLAGS.md).
+Build flag: `OPENKNX_FTC_DELTA_UPDATE` — cost and the board question in [FLAGS.md](flags.md).
 
 ## The sequence
 
@@ -54,7 +54,7 @@ handler set a response length. That is intentional (the device restarts right aw
 up with the response), but it means: **from the command alone the client learns nothing.**
 
 The one answer a client can still see to a `FwUpdate` comes from *before* the handler: the access
-gate rejects it with `0xA0` / `0xA2` when writing is locked ([SECURITY.md](SECURITY.md)). That is a
+gate rejects it with `0xA0` / `0xA2` when writing is locked ([SECURITY.md](../guide/unlocking-a-device.md)). That is a
 refusal, never a result.
 
 ```

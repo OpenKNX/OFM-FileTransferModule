@@ -10,7 +10,7 @@ device.
 |---|---|---|
 | Session | none | one, with OPEN and CLOSE |
 | Direction | request → answer | two separate channels |
-| PIDs | the command number ([PROTOCOL.md](PROTOCOL.md)) | `1` = in · `2` = out |
+| PIDs | the command number ([PROTOCOL.md](../reference/protocol.md)) | `1` = in · `2` = out |
 
 ## The sequence
 
@@ -51,7 +51,7 @@ itself — a `help` beyond 4 KB arrives truncated. The device reports that once 
 does not hide it. A ring of the console's own is on the list.
 
 **You cannot reach your own PA.** `ftc <own-PA> con` runs into a timeout — a device does not process
-frames it sent itself; you need a second interface ([QUICKSTART.md](QUICKSTART.md#before-you-start)).
+frames it sent itself; you need a second interface ([QUICKSTART.md](quickstart.md#before-you-start)).
 
 ## From the web interface
 
@@ -64,8 +64,8 @@ without the bus.
 
 `OPENKNX_FTC_CONSOLE`. Without it object 160 disappears entirely, and `CheckFeatures` no longer
 reports the console bit. It has to be set as a `-D` in the product's `ini`, not through a profile —
-`lib/OGM-Common` reads it too ([FLAGS.md](FLAGS.md), [CONCEPT-defines.md](CONCEPT-defines.md)).
+`lib/OGM-Common` reads it too ([FLAGS.md](../reference/flags.md), [CONCEPT-defines.md](../concept/build-defines.md)).
 
 Opening the console is a **write** action: setting `OPENKNX_FTC_CONSOLE` pulls in
 `OPENKNX_FTC_SECURITY` unconditionally, so the session is gated like every other write
-([SECURITY.md](SECURITY.md)).
+([SECURITY.md](unlocking-a-device.md)).

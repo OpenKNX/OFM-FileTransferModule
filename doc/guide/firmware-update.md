@@ -11,6 +11,35 @@ filesystem, **apply** makes it boot from it.
    interruptible, resumable                     one command, no way back
 ```
 
+## The whole run at a glance
+
+```mermaid
+flowchart TD
+    A["ftc knxota &lt;file&gt;"] --> B["read the image<br/><i>which device, which version</i>"]
+    B --> C{"unfinished run<br/>for this checksum?"}
+    C -->|yes| G
+    C -->|no| D["pick interface and device"]
+    D --> E["read the target's version"]
+    E --> F{"same? older? another device?"}
+    F -->|"another device"| X["refused — it would wipe the setup"]
+    F -->|"same version"| Y["asks: send it anyway?"]
+    F -->|"newer"| G
+    Y --> G
+    G["Ready — the last confirmation"] --> H["transfer<br/><i>resumes where it stopped</i>"]
+    H --> I{"finished?"}
+    I -->|"broke off"| J{"can a retry help?"}
+    J -->|"stall, silence, timeout"| H
+    J -->|"target full, refused, cancelled"| K["stop — the record is kept"]
+    I -->|yes| L["checksum verified in the target"]
+    L --> M["apply + reboot<br/><i>~30 s away</i>"]
+    M --> N["read the version back"]
+    N --> O["done — the record is removed"]
+```
+
+The old firmware keeps running until the new one is complete and its checksum is good; if anything
+fails, the device starts again with the old one. The two places the run can stop are the two places it
+can be picked up again -- both are described below.
+
 ## What you can send
 
 | Kind | Extension | Size, typical | Time at 400 B/s | Supported on |
@@ -20,7 +49,7 @@ filesystem, **apply** makes it boot from it.
 | Difference | `.okd` | 30-90 KB | **2-4 min** | both, with `OPENKNX_FTC_DELTA_UPDATE` |
 
 **A difference is the normal case for an update**, a full image the case for a first install or a
-recovery. Details of the format and how it is rebuilt: [DELTA.md](DELTA.md).
+recovery. Details of the format and how it is rebuilt: [DELTA.md](../reference/delta.md).
 
 > `.okd` must stay raw — never gzip a difference. Both ends detect it by its `OKD1` magic.
 
@@ -45,7 +74,7 @@ firmware it is already running.
 
 `http://<device-ip>/knxota`. Pick the target PA, pick the file from this device's flash, SD or
 external flash, send, apply. The device you are looking at drives the transfer; no PC is in the
-chain. See [WEB.md](WEB.md).
+chain. See [knxota-web.md](knxota-web.md).
 
 ### Device console
 
@@ -92,7 +121,7 @@ only when it refuses:
 
 **Known gap:** the device also stays silent when the apply fails locally — the staged file is not a
 bootable image, is unreadable, or the OTA commit failed. The reason is logged in the target and, with
-`OPENKNX_FTC_DELTA_UPDATE`, retrievable through `FwProbe` (command 106, [DELTA.md](DELTA.md)), but
+`OPENKNX_FTC_DELTA_UPDATE`, retrievable through `FwProbe` (command 106, [DELTA.md](../reference/delta.md)), but
 the client does not ask for it yet. So a silent apply that never reboots means: look at the target's
 own log.
 
@@ -106,6 +135,21 @@ ftc 5.0.3 info
 
 The knxOTA web page does this automatically and shows the version before and after — the only proof
 that the new firmware is actually running.
+
+## When it breaks off
+
+An upload takes tens of minutes, so a broken-off run is not a reason to answer every question again.
+
+**During the run**, the client offers to retry as soon as the transfer ends badly -- but only for causes
+a second attempt can clear. A target that is full stays full; a run you cancelled was a decision. A
+stall, a target that stopped answering, a timeout: those get the offer, and the retry continues where it
+stopped rather than starting over.
+
+**On the next start**, an unfinished run is offered again. It is recognised by the **payload checksum**,
+not the file name -- a rebuilt firmware under the same name is a different image, and continuing into it
+would write the remainder of something else. Everything that would be reused is shown before the
+question: firmware, version, interface, target, and how far the last attempt got. A verified update
+removes its record, so a finished job is never offered.
 
 ## Recovery
 
@@ -123,6 +167,6 @@ fatal. If the target no longer answers on the bus:
 |---|---|
 | `OPENKNX_FTC_DELTA_UPDATE` | differences (`.okd`), both sides; also enables the failure reporting via command 106 |
 | `OPENKNX_FTC_GZIP_UPDATE` | ESP32 only — unpack a packed image into the OTA slot. RP2040 unpacks in the bootloader, the build refuses the switch there |
-| `OPENKNX_FTC_KNXOTA_WEB` | the browser page ([WEB.md](WEB.md)) |
+| `OPENKNX_FTC_KNXOTA_WEB` | the browser page ([knxota-web.md](knxota-web.md)) |
 
-Measured flash and RAM cost of each, and every coupling the build enforces: [FLAGS.md](FLAGS.md).
+Measured flash and RAM cost of each, and every coupling the build enforces: [FLAGS.md](../reference/flags.md).

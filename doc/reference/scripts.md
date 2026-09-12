@@ -35,17 +35,17 @@ It runs seven suites and writes into `Hardening/Reports/`:
 | Suite | Covers |
 |---|---|
 | `1-Protocol` | frame layout, lengths, the command numbering |
-| `2-ResponseMatrix` | every command against every server answer, per drive and async state ([PROTOCOL.md](PROTOCOL.md)) |
+| `2-ResponseMatrix` | every command against every server answer, per drive and async state ([PROTOCOL.md](protocol.md)) |
 | `3-StateMachine` | the client states and every path out of them |
-| `4-Security` | the access stages, login, lockout, the back-off ([SECURITY.md](SECURITY.md)) |
-| `5-Console` | object 160: session, park, drain, overflow reporting ([CONSOLE.md](CONSOLE.md)) |
+| `4-Security` | the access stages, login, lockout, the back-off ([SECURITY.md](../guide/unlocking-a-device.md)) |
+| `5-Console` | object 160: session, park, drain, overflow reporting ([CONSOLE.md](../guide/console.md)) |
 | `6-Limits` | the boundaries — 247-byte payload, path lengths, chunk counts |
 | `7-NonBlocking` | nothing long runs in the KNX dispatch |
 
 The important one is the **response matrix**. It exists to enforce one rule: **any change to a wire
 response code or command triggers a full command × response × state audit** — not the edited file,
 every consumer. What that rule cost to learn:
-[PROTOCOL.md](PROTOCOL.md#when-you-change-a-response-code).
+[PROTOCOL.md](protocol.md#when-you-change-a-response-code).
 
 ## 3. Without a device
 
@@ -56,7 +56,7 @@ every consumer. What that rule cost to learn:
 | `Compress-Firmware.ps1` | packs a firmware for the gzip path |
 
 `Invoke-DeltaSelfTest.ps1` is the one to run after touching `FirmwarePatch.*` — it catches an encoder
-and interpreter drifting apart in seconds, where hardware would take an hour ([DELTA.md](DELTA.md)).
+and interpreter drifting apart in seconds, where hardware would take an hour ([DELTA.md](delta.md)).
 
 ## Preparing an image
 
@@ -66,13 +66,13 @@ Image preparation itself lives in OGM-Common, because it is not FTC-specific:
 pwsh Prepare-Firmware.ps1        # menu: full image, gzip or delta, with a file browser
 ```
 
-See [FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md).
+See [FIRMWARE-UPDATE.md](../guide/firmware-update.md).
 
 ## Building ftc-cli
 
 `ftc-cli/scripts/pio_zig_cross.py` is a PlatformIO pre-hook, not a user script: it pulls a
 project-local `zig` and sets the cross-compiler per target, so a single `pio run` produces all eight
-binaries ([FTC-CLI.md](FTC-CLI.md)). It is Python because PlatformIO requires `extra_scripts` to be
+binaries ([FTC-CLI.md](../guide/ftc-cli.md)). It is Python because PlatformIO requires `extra_scripts` to be
 Python.
 
 ## Convention

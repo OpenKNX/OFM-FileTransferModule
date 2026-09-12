@@ -6,6 +6,23 @@ looking at sends a firmware to **another** device over the bus. No PC in the cha
 `http://<device-ip>/knxota` · build switch `OPENKNX_FTC_KNXOTA_WEB` · 34732 B flash + 80 B RAM on
 RP2040, 40056 B + 64 B RAM on ESP32.
 
+## What ships in flash
+
+The page is two files under `web/assets/`, gzipped into the firmware and served straight from flash by
+`FileTransferWebClient.cpp`:
+
+| | | |
+|---|--:|---|
+| `knxota.js` | 70 KB | the page — **markup included**. The route `/knxota` returns only a shell; everything the user sees is built in the browser |
+| `knxota.css` | 7 KB | the styling, served from `/assets/knxota.css` |
+
+Building the markup in JavaScript instead of shipping HTML is what keeps the device side small: the
+firmware serves two static blobs and a handful of small JSON endpoints, and never assembles a page.
+Compressed, the whole page costs the ~35 KB of flash that `OPENKNX_FTC_KNXOTA_WEB` is listed with in
+[flags.md](../reference/flags.md).
+
+Editing either file means rebuilding the firmware — they are not read from the filesystem at runtime.
+
 ## The layout
 
 ```
@@ -14,7 +31,7 @@ RP2040, 40056 B + 64 B RAM on ESP32.
   ├──────────────────────────────────────────────────────────────┤
   │  ▸ Log                                                       │  collapsed by default
   ├───────────┬───────────┬──────────────────────────────────────┤
-  │ ① Target  │ ② File    │ ③ Transfer                           │  numbered steps
+  │ ① Target   ② File     ③ Transfer                           │  numbered steps
   └───────────┴───────────┴──────────────────────────────────────┘
 ```
 
@@ -54,7 +71,7 @@ real sizes and marks what is a firmware (`.bin`, `.uf2`, `.gz`) and what is a di
 * You cannot switch tabs while a transfer runs. That is enforced, not just discouraged.
 * After **apply**, the page reads the version back and compares it against the version before the
   trigger. That comparison is the only proof the new firmware is running, because `FwUpdate` answers
-  nothing when it succeeds ([FIRMWARE-UPDATE.md](FIRMWARE-UPDATE.md)).
+  nothing when it succeeds ([FIRMWARE-UPDATE.md](firmware-update.md)).
 
 ## How it talks to the device
 
@@ -64,21 +81,30 @@ stay responsive.
 
 | Route | Purpose |
 |---|---|
-| `/knxota` | the page shell; the markup is built in the browser from the embedded JS |
-| `/knxota/status` | phase, busy, ok, message, progress, device, scan hits, drives, GA, result |
-| `/knxota/files` | the source listing per drive |
-| `/knxota/start` | arm a transfer — answers `409` when the client is already busy |
-| `/knxota/ga`, `/drives`, `/progmode` | the separate bus runs of step ① |
+| `GET /knxota` | the page shell; everything the user sees is built in the browser from the embedded JS |
+| `GET /knxota/status` | the one polled endpoint: phase, busy, ok, message, progress, device, scan hits, drives, GA, result |
+| `GET /knxota/files` | the source listing per drive |
+| `GET /assets/knxota.js` · `.css` | the two gzipped blobs the page is made of |
+| `POST /knxota/start` | arm a transfer |
+| `POST /knxota/cancel` | stop the running one |
+| `POST /knxota/trigger` | apply a firmware **already lying on the target** — no transfer |
+| `POST /knxota/scan` | search the bus for devices; `?scope=area` widens it from the line to the area |
+| `POST /knxota/feat` | ask one target what it can do, and why a write would be refused |
+| `POST /knxota/ga` | read the target's group communication |
+| `POST /knxota/drives` | which drives the target has — one call per drive, the browser chains them |
+| `POST /knxota/progmode` | set the target's programming mode (PID 54); the state is read back with the device |
+| `POST /knxota/auth` | log in to a password-protected target. The password travels in the **body**, never in the request line, and is stored nowhere |
 
-Every exclusive endpoint answers `409` instead of queuing, so two browser tabs cannot start two
-transfers.
+Every one of these arms **one** client operation, and the client serves one at a time — so a request
+that arrives while a job runs is answered `409` instead of being queued. That is what stops a second
+browser tab from ending the first tab's transfer.
 
 ## Not the same thing: the web file manager
 
 `OFM-Network` serves a **file manager** (`OPENKNX_WEBFS`) for the device's own storage. It writes to
 the device you are looking at; the knxOTA page writes to a device somewhere else on the bus.
 Different tools, different wires — and that is why the file manager feels so much faster
-([THROUGHPUT.md](THROUGHPUT.md)).
+([THROUGHPUT.md](throughput.md)).
 
 ## Limits
 
@@ -86,5 +112,5 @@ Different tools, different wires — and that is why the file manager feels so m
 * Leaving the page during a transfer does not abort it: the job runs in `loop()` in the device. The
   file-manager upload in OFM-Network is the opposite — that one is a browser-side loop and dies with
   the page.
-* The page is a front-end only. Everything it can do, the console ([CONSOLE.md](CONSOLE.md)) and
-  `ftc-cli` ([FTC-CLI.md](FTC-CLI.md)) can do too.
+* The page is a front-end only. Everything it can do, the console ([CONSOLE.md](console.md)) and
+  `ftc-cli` ([FTC-CLI.md](ftc-cli.md)) can do too.
