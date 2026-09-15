@@ -1,7 +1,9 @@
 # Changes
 
 
-## unreleased
+## ec/v0.2.0-beta.1 -- third batch: 2026-09-15
+
+The tag was moved from `873ce01` to the head of this batch, so everything below is part of it.
 
 **Documentation checks**
 * Feature: `scripts/Test-DocCurrency.ps1` holds the documentation against the sources -- every `FTC_`, `FTM_`, `OPENKNX_` and `KNX_` name written in backticks must exist, and a documented value must match the constant. It reads `#define NAME 42` as well as an initialiser, without which the whole value check was inert for the build switches it targets
