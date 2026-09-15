@@ -1,6 +1,13 @@
 # Changes
 
 
+## unreleased
+
+**Documentation checks**
+* Feature: `scripts/Test-DocCurrency.ps1` holds the documentation against the sources -- every `FTC_`, `FTM_`, `OPENKNX_` and `KNX_` name written in backticks must exist, and a documented value must match the constant. It reads `#define NAME 42` as well as an initialiser, without which the whole value check was inert for the build switches it targets
+* Feature: `scripts/Test-DocLinks.ps1` resolves the relative links between the documentation files and reports the dead ones, plus file names that differ from the target only by case -- those resolve on macOS and Windows and 404 on GitHub
+* Both exit 0 on a healthy tree with the neighbouring module roots passed, carry the OpenKNX header with working comment-based help, and a byte order mark so Windows PowerShell 5.1 does not read them as ANSI
+
 ## ec/v0.2.0-beta.1 -- second batch: 2026-08-29
 
 The tag was moved from `f489fcf` to the head of this batch, so everything below is part of it. Main additions:
