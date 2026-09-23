@@ -6617,8 +6617,12 @@ int main(int argc, char** argv)
 
                 std::vector<uint8_t> baseImg, patch;
                 std::string baseUsed, baseWhy;
+                // Which hardware variant this update is for, taken from the folder the new firmware sits
+                // in. A release folder holds one per variant, and the base has to be the SAME one.
+                const std::string wantVariant =
+                    std::filesystem::path(pos[knxotaVerb + 1]).parent_path().filename().string();
                 const bool haveBase = !baseApp.empty() &&
-                                      ftc::loadBaseImage(baseApp, baseImg, baseUsed, baseWhy);
+                                      ftc::loadBaseImage(baseApp, baseImg, baseUsed, baseWhy, wantVariant);
                 if (!baseApp.empty() && !haveBase)
                     g_tpl.status(ftc::Tpl::Stat::Warn,
                                  L.tr("that is not a release image - sending the full one",

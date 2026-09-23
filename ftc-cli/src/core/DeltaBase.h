@@ -63,7 +63,7 @@ namespace ftc
         }
 
         /**
-         * @brief First *.app.bin under a folder, at most three levels down.
+         * @brief The best usable base image under a folder, at most three levels down.
          * @details A release keeps its images at <release>/Firmware/<variant>/, so three levels reach
          *          every one of them. The bound is not tidiness: the folder BESIDE a release can be
          *          anything at all -- a source tree, a backup drive -- and walking it whole would stall
@@ -73,21 +73,27 @@ namespace ftc
         {
             std::error_code ec;
             if (!std::filesystem::is_directory(dir, ec)) return "";
-            std::string any;
+            std::string best;
+            int bestScore = 0; // device match weighs more than the file kind: the wrong variant is useless
             for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec))
             {
                 if (ec) { ec.clear(); continue; }
                 if (it.depth() >= 2) it.disable_recursion_pending();
                 if (!it->is_regular_file(ec)) continue;
-                const std::string n = it->path().filename().string();
-                if (n.size() <= 8 || n.compare(n.size() - 8, 8, ".app.bin") != 0) continue;
+                const int rank = basePackageRank(it->path().filename().string());
+                if (rank == 0) continue;
                 // A release holds one folder per hardware variant. Preferring the one whose folder name
                 // matches the target keeps a KNeoPiX from being offered a REG2 image.
-                if (!preferDevice.empty() && it->path().parent_path().filename().string() == preferDevice)
-                    return it->path().string();
-                if (any.empty()) any = it->path().string();
+                const bool match = !preferDevice.empty() &&
+                                   it->path().parent_path().filename().string() == preferDevice;
+                const int score = (match ? 10 : 0) + rank;
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = it->path().string();
+                }
             }
-            return any;
+            return best;
         }
     } // namespace detail
 
@@ -335,8 +341,9 @@ namespace ftc
             {
                 if (ec) { ec.clear(); return; }
                 if (!e.is_regular_file(ec)) continue;
-                const std::string fn = e.path().filename().string();
-                if (fn.size() > 8 && fn.compare(fn.size() - 8, 8, ".app.bin") == 0) ++n;
+                // The same rule the offer list uses, or the browser would call a perfectly usable
+                // release folder empty while pickBase offers it.
+                if (basePackageRank(e.path().filename().string()) > 0) ++n;
             }
         };
         scan(dir);

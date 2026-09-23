@@ -26,6 +26,7 @@
 #include "../knx_ip_tunnel.h"
 #include "Delta.h"
 #include "EspImage.h"
+#include "Features.h" // detail::FTC_OBJ_DATA -- used below, so it is included here and not left to the caller
 #include "ImageFacts.h"
 #include "Uf2.h"
 
@@ -35,6 +36,20 @@ namespace ftc
     inline bool readWholeFile(const std::string& path, std::vector<uint8_t>& out)
     {
         return delta::readWholeFileInto(path, out);
+    }
+
+    /**
+     * @brief How usable a file is as the starting point for a difference. 0 = not one at all.
+     * @details A release ships the PACKAGE, not the raw image: `.uf2` for RP, `.factory.bin` for ESP, each
+     *          beside the `.image.txt` that states the exact length. loadBaseImage() unwraps all three, so
+     *          every screen that LOOKS for a base has to accept all three -- one rule, one place.
+     */
+    inline int basePackageRank(const std::string& name)
+    {
+        if (name.size() > 8 && name.compare(name.size() - 8, 8, ".app.bin") == 0) return 3; // raw, no unwrap
+        if (name.size() > 4 && name.compare(name.size() - 4, 4, ".uf2") == 0) return 2;
+        if (name.size() > 12 && name.compare(name.size() - 12, 12, ".factory.bin") == 0) return 1;
+        return 0;
     }
 
     /**
@@ -73,7 +88,8 @@ namespace ftc
      * @param why   on failure, the reason in one sentence.
      */
     inline bool loadBaseImage(const std::string& hint, std::vector<uint8_t>& out,
-                              std::string& used, std::string& why)
+                              std::string& used, std::string& why,
+                              const std::string& preferDevice = "")
     {
         out.clear(); used.clear(); why.clear();
         if (hint.empty()) return false;
@@ -131,19 +147,31 @@ namespace ftc
 
         if (!std::filesystem::is_directory(hint, ec)) { why = "no such file or folder"; return false; }
 
-        // A folder: the raw image first, the .uf2 as the fallback that unwraps to the same thing.
-        std::string app, uf2, fact;
+        // A folder: the raw image first, the package as the fallback that unwraps to the same thing. A
+        // release holds ONE FOLDER PER HARDWARE VARIANT, so the variant decides before the file kind does
+        // -- taking whichever package the directory order happened to yield first handed a Pico2 image to
+        // a Pico target, and the device then rightly said "a different release".
+        std::string best;
+        int bestScore = 0;
         for (std::filesystem::recursive_directory_iterator it(hint, ec), end; it != end; it.increment(ec))
         {
             if (ec) { ec.clear(); continue; }
             if (it.depth() >= 3) it.disable_recursion_pending();
             if (!it->is_regular_file(ec)) continue;
-            const std::string n = it->path().filename().string();
-            if (app.empty() && n.size() > 8 && n.compare(n.size() - 8, 8, ".app.bin") == 0) app = it->path().string();
-            else if (uf2.empty() && it->path().extension() == ".uf2") uf2 = it->path().string();
-            else if (fact.empty() && n.size() > 12 && n.compare(n.size() - 12, 12, ".factory.bin") == 0)
-                fact = it->path().string();
-            if (!app.empty()) break; // the raw image beats the wrapper
+            const int rank = basePackageRank(it->path().filename().string());
+            if (rank == 0) continue;
+            const bool match = !preferDevice.empty() &&
+                               it->path().parent_path().filename().string() == preferDevice;
+            const int score = (match ? 10 : 0) + rank;
+            if (score > bestScore) { bestScore = score; best = it->path().string(); }
+        }
+        std::string app, uf2, fact;
+        if (!best.empty())
+        {
+            const int rank = basePackageRank(std::filesystem::path(best).filename().string());
+            if (rank == 3) app = best;
+            else if (rank == 2) uf2 = best;
+            else fact = best;
         }
         if (!app.empty()) return takeApp(app);
         if (!uf2.empty()) return takeUf2(uf2);
@@ -205,7 +233,8 @@ namespace ftc
         Busy = 0x03,      ///< an update is already being applied
         Failed = 0x05,    ///< the device's last update failed; arg carries the reason
         NoMatch = 0x42,   ///< a different image
-        OutOfRange = 0x4B ///< the length is outside what a patch may read
+        OutOfRange = 0x4B, ///< the length is outside what a patch may read
+        Timeout = 0xFE    ///< it was still checksumming when the deadline ran out -- it said NOTHING
     };
 
     namespace detail
@@ -375,9 +404,10 @@ namespace ftc
         if (!answered) return false;
         answerOut = (BaseAnswer)detail::g_probeStatus;
         argOut = detail::g_probeArg;
-        // A device still computing when the deadline ran out is not a match; saying so is safer than
-        // leaving the caller to guess from a stale status.
-        if (answerOut == BaseAnswer::Computing) answerOut = BaseAnswer::NoMatch;
+        // A device still computing when the deadline ran out has not answered the question. Calling that
+        // "a different release" puts a statement in its mouth it never made -- the caller gets its own
+        // case and can say what actually happened.
+        if (answerOut == BaseAnswer::Computing) answerOut = BaseAnswer::Timeout;
         return true;
     }
 } // namespace ftc
