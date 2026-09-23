@@ -7116,6 +7116,20 @@ int main(int argc, char** argv)
                 break;
         }
 
+        // What the device can DO (delta, gzip) and what it currently ALLOWS (writes) are the same byte but
+        // not the same question. The access probe is short on purpose, and when it goes unanswered its zero
+        // byte used to read as "cannot do anything" -- so a device that supports differences quietly
+        // received the full image, an hour instead of two minutes, with nothing said. The capability half
+        // is stable, so the device-info reading of the same byte stands in for it.
+        const bool capAnswered = acc.answered || di.features != 0;
+        const uint8_t capBits = acc.answered ? acc.bits : di.features;
+        if (!capAnswered && !knxotaCheck)
+            g_tpl.status(ftc::Tpl::Stat::Warn,
+                         L.tr("the device did not say what it can do - sending the full image, uncompressed",
+                              "das Gerät hat nicht gesagt, was es kann - es geht das Voll-Image, unkomprimiert"),
+                         {L.tr("a difference and compression both need its answer",
+                               "Differenz und Komprimierung brauchen beide seine Antwort")});
+
         // --- full image or only the difference -------------------------------------------------------
         // Decided here, for the same reason the compression is: only now is it known what the device can
         // take. A patch needs three things to be worth it -- the device understands one, the raw image of
@@ -7127,7 +7141,7 @@ int main(int argc, char** argv)
         // necessarily the raw image.
         std::string deltaNewApp;
         std::vector<uint8_t> newImg; // the raw application image of THIS release
-        if (!knxotaCheck && (acc.bits & ftc::FEAT_DELTA) != 0 && !knxotaNoDelta)
+        if (!knxotaCheck && (capBits & ftc::FEAT_DELTA) != 0 && !knxotaNoDelta)
         {
             // Unwrap this release the same way the base is unwrapped -- .uf2 and .factory.bin both
             // CARRY the image. Looking only for a sibling .app.bin made the difference depend on a file
@@ -7293,7 +7307,7 @@ int main(int argc, char** argv)
 
         // An ESP image is read raw, because only the device knows whether it can unpack one. Now that it
         // has answered, compress it if it said yes — this is where ~88 minutes on the bus become ~54.
-        if (!knxotaFw.compressed && !knxotaNoCompress && (acc.bits & ftc::FEAT_GZIP_UPDATE) != 0)
+        if (!knxotaFw.compressed && !knxotaNoCompress && (capBits & ftc::FEAT_GZIP_UPDATE) != 0)
         {
             const size_t before = knxotaFw.payload.size();
             if (ftc::compressForTarget(knxotaFw))
@@ -7310,7 +7324,7 @@ int main(int argc, char** argv)
             g_tpl.status(ftc::Tpl::Stat::Idle,
                          L.tr("sending the firmware as it is (--no-compress)",
                               "die Firmware wird unverändert gesendet (--no-compress)"), {});
-        else if (!knxotaFw.compressed && acc.answered)
+        else if (!knxotaFw.compressed && capAnswered)
             g_tpl.status(ftc::Tpl::Stat::Idle,
                          L.tr("this device takes the firmware uncompressed",
                               "dieses Gerät nimmt die Firmware unkomprimiert"),
