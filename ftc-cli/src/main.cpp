@@ -193,6 +193,11 @@ static void forgetSessionPasswords(); // defined with the session password store
 
 static void socketCleanup()
 {
+    // Hand the tunnel back, on EVERY way out. A session the interface still believes in occupies one of
+    // its few slots for about two minutes, and an interface serving several sessions splits its bus
+    // queue between them -- which is what turned a quick answer into "the device did not answer" after
+    // a couple of cancelled runs. disconnect() is a no-op when nothing is open.
+    g_knxTunnel.disconnect();
 #ifdef _WIN32
     WSACleanup();
 #endif
