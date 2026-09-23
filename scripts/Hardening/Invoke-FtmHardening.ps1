@@ -208,6 +208,53 @@ if ($TargetPassword) {
     }
     Write-Host "  Target login  : accepted on $Target" -ForegroundColor Green
 }
+# ─── Pre-flight: establish the starting state instead of assuming it ────────────
+#
+# A run used to start on whatever its predecessor left behind, which produced three different failure
+# pictures from the same suite - none of them a device defect, none of them visible in the report.
+$preflight = [ordered]@{}
+
+# 1. Leave a remote console session and release anything running; both are no-ops when nothing is open.
+[void](Invoke-FtmConsoleCommand -Console $console -Command 'quit' -TimeoutMs 6000 -QuietMs 400)
+$cancel = Invoke-FtmConsoleCommand -Console $console -Command 'ftc cancel' -TimeoutMs 10000 -QuietMs 400
+$preflight['Released at start'] = if ($cancel -match '(?i)nothing to cancel') { 'nothing was running' } else { 'an operation was still running and was cancelled' }
+
+# 2. Idle baseline. A second ftc session or a `/job watch` (those live in the HOST cli and cannot be
+#    switched off from here) floods the channel the timing cases measure through, and a device that does
+#    not answer while IDLE makes every later timing verdict noise - that is how F-N-4/5 became a "defect".
+$idleProbes = 0; $idleSilent = 0
+for ($i = 0; $i -lt 6; $i++) {
+    $p = Invoke-FtmConsoleCommand -Console $console -Command 'version' -TimeoutMs 3000 -QuietMs 250
+    $idleProbes++
+    if ($p.Trim().Length -eq 0) { $idleSilent++ }
+    Start-Sleep -Milliseconds 120
+}
+if ($idleSilent -gt 0) {
+    $preflight['Idle baseline'] = "$idleSilent of $idleProbes probes got no answer WHILE IDLE - another client is on this console; every timing verdict below is noise"
+    Write-Host "  Idle baseline : $idleSilent of $idleProbes probes silent while idle - close other ftc sessions and stop /job watch entries" -ForegroundColor Red
+}
+else { $preflight['Idle baseline'] = "$idleProbes of $idleProbes probes answered while idle" }
+
+# 3. Read what the TARGET has: devices differ in flash, and a case that assumes one size measures
+#    nothing on another. The numbers go into the report so a red result can be read against them.
+foreach ($d in @(@{ k = 'internal'; a = '' }, @{ k = 'sd'; a = ' sd/' }, @{ k = 'efc'; a = ' efc/' })) {
+    $out = Invoke-FtmConsoleCommand -Console $console -Command "ftc $Target df$($d.a)" -TimeoutMs 20000
+    if ($out -match '(?i)did not route that drive') { $preflight["Target $($d.k)"] = 'not present'; continue }
+    $free = if ($out -match '(?i)free\D{0,12}(\d+)') { [int64]$Matches[1] } else { -1 }
+    $total = if ($out -match '(?i)total\D{0,12}(\d+)') { [int64]$Matches[1] } else { -1 }
+    $preflight["Target $($d.k)"] = if ($free -ge 0) { "$free B free of $total B" } else { 'could not be read' }
+}
+
+# 4. Name what already lies on the target: an old firmware image eats the space the guard is measured
+#    against. Never deleted here - that would leave a bootloader instruction pointing at nothing.
+$listing = Invoke-FtmConsoleCommand -Console $console -Command "ftc $Target ll" -TimeoutMs 25000
+$leftovers = @([regex]::Matches($listing, '(?i)(firmware\.bin|otacommand\.bin|fw\.delta\.bin)') | ForEach-Object { $_.Value } | Sort-Object -Unique)
+if ($leftovers.Count -gt 0) {
+    $preflight['Leftovers on target'] = ($leftovers -join ', ') + ' - they occupy space the limit cases measure against'
+    Write-Host "  Leftovers     : $($leftovers -join ', ') on $Target" -ForegroundColor Yellow
+}
+foreach ($k in $preflight.Keys) { Write-Host ("  {0,-14}: {1}" -f $k, $preflight[$k]) -ForegroundColor DarkGray }
+
 Write-Host "  FTC target    : $Target"
 Write-Host "  Drives        : $($Drive -join ', ')"
 if ($Security) { Write-Host '  Security      : OPENKNX_FTC_SECURITY expected' -ForegroundColor Yellow }
@@ -228,17 +275,21 @@ $ctx = [pscustomobject]@{
     Firmware           = $firmware
 }
 
-[void](Start-FtmTestRun -Product 'FTC-hardening' -Target $Target -RunProfile $(if ($IncludeDestructive) { 'Full' } else { 'Safe' }) -Environment @{
-        'Console port' = $Port
-        'FTC target'   = $Target
-        'Own address'  = $(if ($ownPa) { $ownPa } else { 'unknown' })
-        'Drives'       = ($driveList -join ', ')
-        'Firmware'     = $firmware
-        'Security'     = $Security.ToString()
-        'Destructive'  = $IncludeDestructive.ToString()
-        'Test client'  = "Invoke-FtmHardening.ps1 / FtmTest.psm1 ($($st.Total) vectors verified)"
-        'Host'         = "$($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)"
-    })
+$environment = [ordered]@{
+    'Console port' = $Port
+    'FTC target'   = $Target
+    'Own address'  = $(if ($ownPa) { $ownPa } else { 'unknown' })
+    'Drives'       = ($driveList -join ', ')
+    'Firmware'     = $firmware
+    'Security'     = $Security.ToString()
+    'Destructive'  = $IncludeDestructive.ToString()
+    'Test client'  = "Invoke-FtmHardening.ps1 / FtmTest.psm1 ($($st.Total) vectors verified)"
+    'Host'         = "$($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)"
+}
+# Into the report, not only on screen: a limit case judged against 1 MB reads differently from 58 GB.
+foreach ($k in $preflight.Keys) { $environment[$k] = $preflight[$k] }
+
+[void](Start-FtmTestRun -Product 'FTC-hardening' -Target $Target -RunProfile $(if ($IncludeDestructive) { 'Full' } else { 'Safe' }) -Environment $environment)
 
 # ─── Suites ─────────────────────────────────────────────────────────────────────
 

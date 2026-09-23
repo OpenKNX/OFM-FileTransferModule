@@ -111,7 +111,8 @@ Einige Fälle brauchen vorbereitete Quelldateien auf dem treibenden Gerät:
 |---|---|---|
 | `ftm-perf.bin` | Durchsatz, Nicht-Blockieren, `fast` unter Last, Flood-Cliff | ~200–500 KB |
 | `ftm-oversize.bin` | Space-Guard, Chunk-Grenze | größer als der freie Platz des Ziels |
-| `ftm-state-probe.bin` | Zustandsautomat, Abbruchzyklen | ~50 KB |
+| `ftm-state-probe.bin` | Zustandsautomat, Abbruchzyklen (F-S-3, F-S-4, F-S-5, F-S-6) | ~50 KB |
+| `ftm-state-probe2.bin` | zweite Quelle fuer den parallelen Transfer (F-S-4) | ~50 KB |
 
 Fehlt eine davon, meldet der betroffene Fall `SKIP` mit genau diesem Grund — er behauptet nie ein Bestehen.
 
