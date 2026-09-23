@@ -7218,11 +7218,13 @@ int main(int argc, char** argv)
                                  L.tr("asking the device whether it runs the release you named",
                                       "das Gerät wird gefragt, ob es das genannte Release fährt"),
                                  {});
-                    if (ftc::probeBase(g_knxTunnel, targetPaEarly, bLen, bCrc, ans, arg,
+                    const bool baseAnswered =
+                        ftc::probeBase(g_knxTunnel, targetPaEarly, bLen, bCrc, ans, arg,
                                        []() { g_knxTunnel.pump(); openknxFileTransferClient.loop(true);
                                               std::this_thread::sleep_for(std::chrono::milliseconds(2)); },
-                                       []() { return nowMs(); }) &&
-                        ans == ftc::BaseAnswer::Match && ftc::delta::make(baseImg, newImg, patch))
+                                       []() { return nowMs(); });
+                    const bool baseMatches = baseAnswered && ans == ftc::BaseAnswer::Match;
+                    if (baseMatches && ftc::delta::make(baseImg, newImg, patch))
                     {
                         std::vector<uint8_t> packed;
                         bool patchPacked = false;
@@ -7290,11 +7292,49 @@ int main(int argc, char** argv)
                                               "die Differenz spart hier nichts - es geht das Voll-Image"),
                                          {});
                     }
+                    // Every other outcome ends in the full image, and each one for its own reason. Four of
+                    // them used to pass in silence, which left the slow route looking like a decision
+                    // nobody took.
+                    else if (!baseAnswered)
+                        g_tpl.status(ftc::Tpl::Stat::Warn,
+                                     L.tr("the device did not answer the base check - sending the full image",
+                                          "das Gerät hat die Basis-Prüfung nicht beantwortet - es geht das Voll-Image"),
+                                     {L.tr("its file-transfer server may be older than the difference update",
+                                           "sein Dateitransfer-Server ist evtl. älter als das Differenz-Update")});
                     else if (ans == ftc::BaseAnswer::NoMatch)
                         g_tpl.status(ftc::Tpl::Stat::Idle,
                                      L.tr("the device runs a different release than the one named - sending the full image",
                                           "das Gerät fährt ein anderes Release als das genannte - es geht das Voll-Image"),
-                                     {});
+                                     {L.tr("only the checksum settles it, never the version number",
+                                           "das entscheidet nur die Prüfsumme, nie die Versionsnummer")});
+                    else if (ans == ftc::BaseAnswer::Timeout)
+                        g_tpl.status(ftc::Tpl::Stat::Warn,
+                                     L.tr("the device was still checksumming its own image - sending the full image",
+                                          "das Gerät hat sein eigenes Image noch geprüft - es geht das Voll-Image"),
+                                     {L.tr("it did not say the release is wrong, only that it needed longer",
+                                           "es hat nicht gesagt, das Release sei falsch, nur dass es länger braucht")});
+                    else if (ans == ftc::BaseAnswer::Busy)
+                        g_tpl.status(ftc::Tpl::Stat::Warn,
+                                     L.tr("the device is installing an update right now",
+                                          "das Gerät spielt gerade ein Update ein"),
+                                     {L.tr("let it finish and start again - sending the full image otherwise",
+                                           "lass es fertig werden und starte neu - sonst geht das Voll-Image")});
+                    else if (ans == ftc::BaseAnswer::Failed)
+                        g_tpl.status(ftc::Tpl::Stat::Warn,
+                                     L.tr("the device reports that its last update failed",
+                                          "das Gerät meldet, dass sein letztes Update fehlgeschlagen ist"),
+                                     {ftc::deltaErrorText(L, arg)});
+                    else if (ans == ftc::BaseAnswer::OutOfRange)
+                        g_tpl.status(ftc::Tpl::Stat::Idle,
+                                     L.tr("this image is outside what the device may read for a difference",
+                                          "dieses Image liegt außerhalb dessen, was das Gerät für eine Differenz lesen darf"),
+                                     {L.tr("sending the full image", "es geht das Voll-Image")});
+                    else
+                        g_tpl.status(ftc::Tpl::Stat::Warn,
+                                     L.tr("the difference could not be built - sending the full image",
+                                          "die Differenz ließ sich nicht bilden - es geht das Voll-Image"),
+                                     {L.tr("the device confirmed the base, so this is on this computer",
+                                           "das Gerät hat die Basis bestätigt, das liegt also an diesem Rechner")});
                 }
             }
         }
