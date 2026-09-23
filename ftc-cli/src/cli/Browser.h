@@ -36,6 +36,7 @@
 
 #include "I18n.h"
 #include "Keys.h"
+#include "Templates.h" // Tpl::vis -- display columns, which is what a table has to be measured in
 #include "Term.h"
 #include "Theme.h"
 
@@ -74,6 +75,23 @@ namespace ftc
         };
 
         /** @brief Usable columns. A fixed guess would wrap the panel on a narrow terminal. */
+        /** @brief The REAL terminal width. Not the layout width: this is what wraps a line. */
+        inline int termCols()
+        {
+#ifdef _WIN32
+            CONSOLE_SCREEN_BUFFER_INFO i;
+            if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &i))
+            {
+                const int w = i.srWindow.Right - i.srWindow.Left + 1;
+                if (w > 20) return w;
+            }
+#else
+            struct winsize w;
+            if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 20) return (int)w.ws_col;
+#endif
+            return 100;
+        }
+
         inline int browserWidth()
         {
 #ifdef _WIN32
@@ -103,11 +121,89 @@ namespace ftc
         }
 
         /** @brief Cut to `w` display columns, keeping the tail of a long name -- that is the telling half. */
+        /** @brief Display columns of a string. Bytes are not columns: "Größe" is 6 bytes and 5 columns. */
+        inline size_t dispW(const std::string& s)
+        {
+            const int v = Tpl::vis(s);
+            return v > 0 ? (size_t)v : 0;
+        }
+
+        /**
+         * @brief Pad or shorten to exactly `w` display columns, keeping the END of a long name.
+         * @details The tail is what tells two long paths apart. Cutting has to land on a character
+         *          boundary -- half a UTF-8 sequence prints as a replacement glyph and shifts every
+         *          column behind it, which is how one umlaut used to bend a whole table.
+         */
         inline std::string fit(const std::string& s, size_t w)
         {
-            if (s.size() <= w) return s + std::string(w - s.size(), ' ');
+            const size_t vis = dispW(s);
+            if (vis <= w) return s + std::string(w - vis, ' ');
             if (w <= 3) return std::string(w, '.');
-            return "..." + s.substr(s.size() - (w - 3));
+            const size_t keep = w - 3;
+            size_t cut = s.size(), cols = 0;
+            while (cut > 0)
+            {
+                size_t j = cut - 1;
+                while (j > 0 && ((unsigned char)s[j] & 0xC0) == 0x80) --j; // back over continuation bytes
+                const size_t add = dispW(s.substr(j, cut - j));
+                if (cols + add > keep) break;
+                cols += add;
+                cut = j;
+            }
+            std::string out = "..." + s.substr(cut);
+            const size_t ov = dispW(out);
+            return ov < w ? out + std::string(w - ov, ' ') : out;
+        }
+
+        /**
+         * @brief Hard-cut a coloured line to `w` display columns, keeping every escape sequence intact.
+         * @details The last line of defence for the redraw: it steps back by the number of lines PRINTED,
+         *          so one line that wraps costs two and tears the picture apart. Colour codes are copied
+         *          through without being counted -- they occupy no column.
+         */
+        inline std::string clipAnsi(const std::string& s, size_t w)
+        {
+            std::string out;
+            size_t cols = 0, i = 0;
+            while (i < s.size())
+            {
+                if (s[i] == '\x1b')
+                {
+                    const size_t start = i++;
+                    if (i < s.size() && s[i] == '[')
+                        while (++i < s.size() && !(s[i] >= '@' && s[i] <= '~')) {}
+                    if (i < s.size()) ++i;
+                    out += s.substr(start, i - start);
+                    continue;
+                }
+                size_t j = i + 1;
+                while (j < s.size() && ((unsigned char)s[j] & 0xC0) == 0x80) ++j;
+                const size_t add = dispW(s.substr(i, j - i));
+                if (cols + add > w) break;
+                cols += add;
+                out += s.substr(i, j - i);
+                i = j;
+            }
+            if (i < s.size()) out += "\x1b[0m"; // cut mid-colour -> close it, or the rest of the screen tints
+            return out;
+        }
+
+        /** @brief Shorten to `w` columns keeping the START -- for a hint, where the first words carry it. */
+        inline std::string shorten(const std::string& s, size_t w)
+        {
+            if (dispW(s) <= w) return s;
+            if (w <= 1) return std::string();
+            size_t cut = 0, cols = 0;
+            while (cut < s.size())
+            {
+                size_t j = cut + 1;
+                while (j < s.size() && ((unsigned char)s[j] & 0xC0) == 0x80) ++j;
+                const size_t add = dispW(s.substr(cut, j - cut));
+                if (cols + add > w - 1) break;
+                cols += add;
+                cut = j;
+            }
+            return s.substr(0, cut) + ".";
         }
 
         /** @brief Expand a leading ~ so a typed home path behaves the way it does in a shell. */
@@ -226,8 +322,12 @@ namespace ftc
         int drawn = 0;
 
         const int W = detail::browserWidth();
+        const int TERM = detail::termCols(); // what actually wraps -- the layout above may be capped
         const int COL_SIZE = 9, COL_TIME = 12;
-        const int COL_NAME = W - COL_SIZE - COL_TIME - 8; // borders and separators
+        // "  " + "│ " + name + " │ " + size + " │ " + time == name + size + time + 10 visible columns.
+        // Counting 8 made every row two columns too wide: the last field wrapped onto the next line, and
+        // a wrapped line also broke the cursor-up redraw, which is why the table kept re-appearing.
+        const int COL_FIXED = COL_SIZE + COL_TIME + 10;
         const size_t WINDOW = 18;
 
         bool rootsView = false;
@@ -261,40 +361,61 @@ namespace ftc
         auto draw = [&]() {
             if (interactive && drawn > 0) std::printf("\x1b[%dA\x1b[J", drawn);
             drawn = 0;
-            auto line = [&](const std::string& s) { std::printf("%s\n", s.c_str()); ++drawn; };
-
-            line("");
-            const std::string head = rootsView ? L.tr("Drives", "Laufwerke") : cur.string();
-            line("  " + c.dim("┌─ ") + c.cyan(detail::fit(head, (size_t)(W - 6))) + c.dim(" ─"));
-            line("  " + c.dim("│ ") + c.dim(detail::fit(L.tr("Name", "Name"), (size_t)COL_NAME)) + c.dim(" │ ") +
-                 c.dim(detail::fit(L.tr("Size", "Größe"), (size_t)COL_SIZE)) + c.dim(" │ ") +
-                 c.dim(detail::fit(L.tr("Modified", "Geändert"), (size_t)COL_TIME)));
+            // One line printed == one line on screen. Anything wider than the terminal would wrap, and the
+            // redraw above counts PRINTED lines, not screen lines -- so a single wrap tears the picture.
+            auto line = [&](const std::string& s) {
+                std::printf("%s\n", detail::clipAnsi(s, (size_t)(TERM - 1)).c_str());
+                ++drawn;
+            };
 
             if (sel < top) top = sel;
             if (sel >= top + WINDOW) top = sel - WINDOW + 1;
             const size_t last = (rows.size() < top + WINDOW) ? rows.size() : top + WINDOW;
+
+            // The name column follows the names that are actually in view, instead of stretching to the
+            // edge of the screen: a four-character folder in a 130-character column reads as a broken
+            // table, and the fixed columns end up so far right that they look unrelated to their row.
+            int nameW = (int)detail::dispW(L.tr("Name", "Name"));
+            for (size_t i = top; i < last; ++i)
+                nameW = std::max(nameW, (int)detail::dispW(rows[i].name));
+            const int nameMax = std::max(12, W - COL_FIXED);
+            nameW = std::max(16, std::min(nameW, nameMax));
+            const int tableW = nameW + COL_FIXED;
+            const int noteRoom = TERM - 1 - tableW - 4; // what is left behind the row for a hint
+
+            line("");
+            const std::string head = rootsView ? L.tr("Drives", "Laufwerke") : cur.string();
+            line("  " + c.dim("┌─ ") + c.cyan(detail::fit(head, (size_t)std::max(8, tableW - 7))) + c.dim(" ─"));
+            line("  " + c.dim("│ ") + c.dim(detail::fit(L.tr("Name", "Name"), (size_t)nameW)) + c.dim(" │ ") +
+                 c.dim(detail::fit(L.tr("Size", "Größe"), (size_t)COL_SIZE)) + c.dim(" │ ") +
+                 c.dim(detail::fit(L.tr("Modified", "Geändert"), (size_t)COL_TIME)));
+
             if (rows.empty()) line("  " + c.dim("│ ") + c.dim(L.tr("nothing here", "hier ist nichts")));
 
             for (size_t i = top; i < last; ++i)
             {
                 const auto& e = rows[i];
-                const std::string name = detail::fit(e.name, (size_t)COL_NAME);
+                const std::string name = detail::fit(e.name, (size_t)nameW);
                 std::string size = detail::sizeText(e);
-                if ((int)size.size() < COL_SIZE) size = std::string((size_t)COL_SIZE - size.size(), ' ') + size;
-                const std::string when = detail::timeText(e.mtime);
+                const size_t sizeVis = detail::dispW(size);
+                if ((int)sizeVis < COL_SIZE) size = std::string((size_t)COL_SIZE - sizeVis, ' ') + size;
+                const std::string when = detail::fit(detail::timeText(e.mtime), (size_t)COL_TIME);
+                // A hint only when there is room for one; clipped, never wrapped onto the next line.
+                const std::string note =
+                    (e.note.empty() || noteRoom < 6) ? std::string() : detail::shorten(e.note, (size_t)noteRoom);
 
                 if (interactive && i == sel)
                 {
                     // One solid bar, plain text inside it: colours layered under a reverse-video run
                     // fight each other and the row stops looking like one selection.
                     std::string flat = name + " │ " + size + " │ " + when;
-                    if (!e.note.empty()) flat += "  " + e.note;
+                    if (!note.empty()) flat += "  " + note;
                     line("  " + c.dim("│ ") + std::string("\x1b[7m") + flat + std::string("\x1b[27m"));
                     continue;
                 }
                 const std::string nm = e.isDir ? c.cyan(name) : c.txt(name);
                 std::string row = "  " + c.dim("│ ") + nm + c.dim(" │ ") + c.dim(size) + c.dim(" │ ") + c.dim(when);
-                if (!e.note.empty()) row += "  " + c.green(t.glyph("●", "*")) + " " + c.dim(e.note);
+                if (!note.empty()) row += "  " + c.green(t.glyph("●", "*")) + " " + c.dim(note);
                 line(row);
             }
             if (top > 0 || last < rows.size())
