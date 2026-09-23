@@ -738,6 +738,27 @@ function Invoke-FtmSelfTest {
     # Negative control: the comparison must be able to fail.
     Add-Case 'negative control (deliberate mismatch is detected)' ((ConvertTo-FtmHex -Bytes ([byte[]]@(1))) -ne (ConvertTo-FtmHex -Bytes ([byte[]]@(2)))) 'detected' 'detected'
 
+    # The local-source predicate decides between SKIP and a device verdict, so it is pinned here:
+    # it must catch BOTH client wordings and must not claim a target error is a missing source.
+    $srcHost = "FTC: cannot open source '/ftm-state-probe.bin' -- aborting (file not found?)"
+    $srcDev = "FTC: cannot open source '/ftm-state-probe2.bin' -- aborting (NOT sending a test pattern; is the file on sd/ or efc/?)"
+    $srcNoBe = 'FTC: no file backend -- aborting'
+    $srcUnkBe = "FTC: cannot upload '/x.bin': unknown backend -- use sd/ or efc/ (or / for internal flash). Aborting."
+    $srcNoCard = "FTC: backend 'sd/' not available (no card / not mounted) -- aborting"
+    $tgtOpen = 'FTC: open rejected (0x43): target: file not open'
+    $tgtSpace = 'FTC: NOT ENOUGH SPACE: need 500000 B + 4096 margin, target free 120000 B'
+    $tgtInfo = 'FTC: info: file not found / error 0x42'
+    $tgtApply = 'FTC: file not found on target -- not triggering (0x42)'
+    Add-Case 'local source missing - host wording' (Test-FtmLocalSourceMissing $srcHost) 'true' 'true'
+    Add-Case 'local source missing - embedded wording' (Test-FtmLocalSourceMissing $srcDev) 'true' 'true'
+    Add-Case 'local abort - no file backend' (Test-FtmLocalSourceMissing $srcNoBe) 'true' 'true'
+    Add-Case 'local abort - unknown backend' (Test-FtmLocalSourceMissing $srcUnkBe) 'true' 'true'
+    Add-Case 'local abort - backend not mounted' (Test-FtmLocalSourceMissing $srcNoCard) 'true' 'true'
+    Add-Case 'target refusal is NOT a missing local source' (-not (Test-FtmLocalSourceMissing $tgtOpen)) 'true' 'true'
+    Add-Case 'target out of space is NOT a missing local source' (-not (Test-FtmLocalSourceMissing $tgtSpace)) 'true' 'true'
+    Add-Case 'target info "file not found" is NOT a missing local source' (-not (Test-FtmLocalSourceMissing $tgtInfo)) 'true' 'true'
+    Add-Case 'target apply "not found" is NOT a missing local source' (-not (Test-FtmLocalSourceMissing $tgtApply)) 'true' 'true'
+
     $failed = @($cases | Where-Object { -not $_.Ok })
     if (-not $Quiet) {
         Write-Host ''

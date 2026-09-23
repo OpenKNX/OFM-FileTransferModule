@@ -75,6 +75,9 @@ function Invoke-FtmSuiteState {
         if (-not $Ctx.IncludeDestructive) { Set-FtmTestSkip 'starts a real transfer - run with -IncludeDestructive' }
         # Start a transfer, interleave directory work, then check the transfer result.
         $out = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs 3000 -QuietMs 400
+        # Without this the case passed while no transfer was running at all - it then listed during
+        # nothing and called that "the sink survived a listing".
+        if (Test-FtmLocalSourceMissing $out) { Set-FtmTestSkip 'no state-probe source staged on the client device - see the README' }
         $ll = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ll" -TimeoutMs 15000
         Add-FtmEvidence -Output $ll
         Assert-FtmNotMatch $ll '(?i)(guru|panic|hardfault|watchdog)' 'the device crashed when a listing was requested during a transfer'
@@ -85,11 +88,20 @@ function Invoke-FtmSuiteState {
 
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-S-4' -Title 'A second transfer while one is running is refused cleanly' -Reference 'FTC-Reference: the provider store is stateful, one transfer at a time' -Body {
         if (-not $Ctx.IncludeDestructive) { Set-FtmTestSkip 'starts a real transfer - run with -IncludeDestructive' }
-        [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs 3000 -QuietMs 400)
-        $second = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe2.bin" -TimeoutMs 15000
-        Add-FtmEvidence -Output $second
-        Assert-FtmMatch $second '(?i)(busy|in progress|already|refus|error)' 'a second concurrent transfer was not refused - both would write into the same sink'
-        [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t cancel" -TimeoutMs 15000)
+        $first = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs 3000 -QuietMs 400
+        if (Test-FtmLocalSourceMissing $first) { Set-FtmTestSkip 'no state-probe source staged on the client device - see the README' }
+        # From here a real transfer is running, so every exit has to cancel it: both the skip and a
+        # failing assert throw, and a plain cancel line after them is never reached - the next case
+        # would inherit a busy client and blame the device for it.
+        try {
+            $second = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe2.bin" -TimeoutMs 15000
+            Add-FtmEvidence -Output $second
+            # Without this the case judged a refusal that never happened: the second source was missing,
+            # so no transfer started and the "cannot open source" abort was read as a device defect.
+            if (Test-FtmLocalSourceMissing $second) { Set-FtmTestSkip 'no second state-probe source staged on the client device - see the README' }
+            Assert-FtmMatch $second '(?i)(busy|in progress|already|refus|error)' 'a second concurrent transfer was not refused - both would write into the same sink'
+        }
+        finally { [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t cancel" -TimeoutMs 15000) }
         $still = Test-FtmStillWorks -Console $con -Target $t
         Assert-FtmTrue $still.Ok 'the server no longer works after a rejected concurrent transfer'
     }
@@ -101,7 +113,9 @@ function Invoke-FtmSuiteState {
         # Cancel early, mid and late. The sink must be released each time, which is only
         # visible by the NEXT transfer being able to start.
         foreach ($delayMs in @(300, 1500, 4000)) {
-            [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs $delayMs -QuietMs 200)
+            $started = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs $delayMs -QuietMs 200
+            # A cancel of nothing releases nothing, and the case would report a released sink it never took.
+            if (Test-FtmLocalSourceMissing $started) { Set-FtmTestSkip 'no state-probe source staged on the client device - see the README' }
             Start-Sleep -Milliseconds 200
             $c = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t cancel" -TimeoutMs 15000
             Add-FtmEvidence -Note "cancel after ${delayMs}ms -> $(($c -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1))"
@@ -120,7 +134,9 @@ function Invoke-FtmSuiteState {
         # distinguishes the two.
         $failures = @()
         foreach ($i in 1..10) {
-            [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs 2000 -QuietMs 200)
+            $started = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t send ftm-state-probe.bin" -TimeoutMs 2000 -QuietMs 200
+            # Ten cycles over a source that never opens leak nothing and prove nothing.
+            if ($i -eq 1 -and (Test-FtmLocalSourceMissing $started)) { Set-FtmTestSkip 'no state-probe source staged on the client device - see the README' }
             [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t cancel" -TimeoutMs 12000)
             $probe = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t df" -TimeoutMs 15000
             if ($probe.Trim().Length -eq 0 -or $probe -match '(?i)(busy|in progress|error|timeout)') { $failures += $i }
