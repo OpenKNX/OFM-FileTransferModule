@@ -315,6 +315,84 @@ class DevMgmtSession
     }
 
     /**
+     * @brief Write `noe` element(s) of a property at `startIdx` (one exchange).
+     * @details Mirrors readEx: paces before the request, retransmits with the SAME sequence on silence and
+     *          matches the .con to OUR channel + IOT/inst/PID so a stale answer cannot be consumed as this
+     *          one's. A refused write answers M_PropWrite.con with NoE=0 plus a cEMI error code
+     *          (03_06_03 §4.1.7.3.7.3 p.109); *propErr then holds that code. Returns Data on a positive con.
+     */
+    DmRead writeEx(uint16_t iot, uint8_t inst, uint8_t pid, uint16_t startIdx, uint8_t noe,
+                   const uint8_t* data, size_t dataLen, uint8_t* propErr = nullptr)
+    {
+        using namespace detail;
+        if (propErr) *propErr = 0;
+        if (!_open) return DmRead::NotOpen;
+        if (dataLen > 32) return DmRead::NotOpen; // keep the request inside req[]
+
+        if (_gapMs) std::this_thread::sleep_for(std::chrono::milliseconds(_gapMs));
+
+        const uint8_t iotHi = (uint8_t)(iot >> 8), iotLo = (uint8_t)(iot & 0xFF);
+        const int total = 17 + (int)dataLen;
+        unsigned char req[64];
+        int m = 0;
+        req[m++] = 0x06;
+        req[m++] = 0x10;
+        req[m++] = 0x03;
+        req[m++] = 0x10;
+        req[m++] = (unsigned char)((total >> 8) & 0xFF);
+        req[m++] = (unsigned char)(total & 0xFF);
+        req[m++] = 0x04;
+        req[m++] = _chId;
+        req[m++] = _seq;
+        req[m++] = 0x00;
+        req[m++] = 0xF6; // M_PropWrite.req
+        req[m++] = iotHi;
+        req[m++] = iotLo;
+        req[m++] = inst;
+        req[m++] = pid;
+        req[m++] = (unsigned char)(((noe & 0x0F) << 4) | ((startIdx >> 8) & 0x0F));
+        req[m++] = (unsigned char)(startIdx & 0xFF);
+        for (size_t i = 0; i < dataLen; ++i) req[m++] = data[i];
+
+        unsigned char buf[1024];
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            send(req, m);
+            const uint64_t deadline = nowMs() + 500;
+            while (nowMs() < deadline)
+            {
+                const int n = recvSvc(buf, sizeof(buf), 0, (int)(deadline - nowMs()));
+                if (n < 0) break;
+                const uint16_t svc = (uint16_t)((buf[2] << 8) | buf[3]);
+                if (svc != 0x0310) continue;
+                if (n < 17 || buf[7] != _chId) continue;
+                const uint8_t srvSeq = buf[8];
+                unsigned char ack[10] = {0x06, 0x10, 0x03, 0x11, 0x00, 0x0A, 0x04, _chId, srvSeq, 0x00};
+                send(ack, 10);
+                if (buf[10] != 0xF5) continue; // not an M_PropWrite.con
+                if (buf[11] != iotHi || buf[12] != iotLo || buf[13] != inst || buf[14] != pid) continue;
+                _seq = (uint8_t)(_seq + 1);
+                if ((uint8_t)(buf[15] >> 4) == 0) // negative con: NoE==0, data byte (if present) = error code
+                {
+                    if (propErr && n >= 18) *propErr = buf[17];
+                    return DmRead::Negative;
+                }
+                return DmRead::Data;
+            }
+        }
+        return DmRead::NoAnswer;
+    }
+
+    /**
+     * @brief Convenience: write one element (NoE=1) at startIdx. true iff the server confirmed positively.
+     */
+    bool write(uint16_t iot, uint8_t inst, uint8_t pid, uint16_t startIdx,
+               const uint8_t* data, size_t dataLen, uint8_t* propErr = nullptr)
+    {
+        return writeEx(iot, inst, pid, startIdx, 1, data, dataLen, propErr) == DmRead::Data;
+    }
+
+    /**
      * @brief Best-effort DISCONNECT and socket teardown; safe to call on an already-closed session.
      */
     void close()
