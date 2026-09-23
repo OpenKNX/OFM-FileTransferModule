@@ -5450,7 +5450,61 @@ int main(int argc, char** argv)
         if (v == "fwupdate" && fwupdateVerb == pos.size()) fwupdateVerb = i;
     }
     ftc::FwFile knxotaFw;
-    const bool knxotaActive = knxotaVerb + 1 < pos.size();
+    bool knxotaActive = knxotaVerb + 1 < pos.size();
+    bool knxotaHeaderShown = false;
+    // `ftc knxota` with nothing behind it. The firmware file is the ONE thing this command cannot work out
+    // for itself -- the interface is discovered and the device is searched for, both without being asked
+    // for on the command line. Answering the file with an error while asking for everything else was the
+    // wrong way round, so it opens the same chooser the base picker uses.
+    if (!knxotaActive && knxotaVerb < pos.size())
+    {
+        ftc::I18n& L = g_i18n;
+        if (!g_term.isTty() || quiet)
+        {
+            if (!quiet) g_ui.banner();
+            std::fflush(stdout);
+            g_ui.errorBlock(false, L.tr("knxOTA needs a firmware file", "knxOTA braucht eine Firmware-Datei"),
+                            {L.tr("there is no terminal here to pick one in",
+                                  "hier ist kein Terminal, um eine auszuwählen")},
+                            "ftc knxota <firmware.uf2|.bin|.gz>");
+            socketCleanup();
+            return 2;
+        }
+        g_ui.banner();
+        g_tpl.section(L.tr("knxOTA · firmware update over the KNX bus",
+                           "knxOTA · Firmware-Update über den KNX-Bus"));
+        knxotaHeaderShown = true;
+        // Short on purpose: this sits above the chooser, and a line that wraps on an 80-column terminal
+        // pushes the table it introduces out of view.
+        g_tpl.status(ftc::Tpl::Stat::Idle, L.tr("which firmware file?", "welche Firmware-Datei?"),
+                     {L.tr("RP2040/RP2350 -> .uf2 · ESP32 -> .bin", "RP2040/RP2350 -> .uf2 · ESP32 -> .bin")});
+        ftc::BrowseSpec spec;
+        spec.title = "knxOTA";
+        spec.suffixes.push_back(".uf2");
+        spec.suffixes.push_back(".bin"); // ESP application image, and the .factory.bin beside its .image.txt
+        spec.suffixes.push_back(".gz");  // an image already packed for the bus
+        spec.allowFilePick = true;
+        spec.allowDirPick = false; // a folder holds several variants; which one is the update is a decision
+        spec.roots = ftc::driveRoots();
+        spec.note = [](const std::string& path, bool isDir) -> std::string {
+            if (isDir) return ftc::countAppImages(std::filesystem::path(path)) > 0
+                                  ? g_i18n.tr("release images inside", "Release-Images darin")
+                                  : std::string();
+            return (path.size() > 4 && path.compare(path.size() - 4, 4, ".uf2") == 0)
+                       ? g_i18n.tr("RP2040/RP2350 firmware", "RP2040/RP2350-Firmware")
+                       : g_i18n.tr("firmware image", "Firmware-Image");
+        };
+        std::string picked;
+        if (!ftc::browse(g_term, g_theme, L, spec, picked) || picked.empty())
+        {
+            std::fprintf(stderr, "  %s\n", g_theme.dim(L.tr("nothing picked - nothing was changed",
+                                                            "nichts gewählt - es wurde nichts verändert")).c_str());
+            socketCleanup();
+            return 130;
+        }
+        pos.insert(pos.begin() + (long)knxotaVerb + 1, picked); // the rest of the flow reads pos[knxotaVerb+1]
+        knxotaActive = true;
+    }
 
     // `fwupdate` pointed at a file that lives here cannot mean the remote trigger — say which word does it.
     if (!knxotaActive && fwupdateVerb + 1 < pos.size())
@@ -5532,9 +5586,12 @@ int main(int argc, char** argv)
     {
         ftc::I18n& L = g_i18n;
         ftc::Theme& c = g_theme;
-        if (!quiet) g_ui.banner();
-        g_tpl.section(L.tr("knxOTA · firmware update over the KNX bus",
-                           "knxOTA · Firmware-Update über den KNX-Bus"));
+        if (!knxotaHeaderShown) // the chooser above already opened with both, do not repeat them
+        {
+            if (!quiet) g_ui.banner();
+            g_tpl.section(L.tr("knxOTA · firmware update over the KNX bus",
+                               "knxOTA · Firmware-Update über den KNX-Bus"));
+        }
         if (!ftc::readFirmware(pos[knxotaVerb + 1], knxotaFw, L))
         {
             g_ui.errorBlock(false, L.tr("this file cannot be used", "diese Datei ist nicht verwendbar"),
