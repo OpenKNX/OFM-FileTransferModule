@@ -457,7 +457,11 @@ function Assert-FtmMatch {
     .SYNOPSIS
         Fails unless console output matches a pattern, recording the output as evidence.
     #>
-    param([Parameter(Mandatory)][string]$Output, [Parameter(Mandatory)][string]$Pattern, [Parameter(Mandatory)][string]$Message)
+    # AllowEmptyString: a Mandatory [string] REJECTS "", so a silent device produced a parameter-binding
+    # crash ("Cannot bind argument to parameter 'Output'") instead of a verdict - seven cases reported the
+    # test framework where they should have reported that the device said nothing.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Output, [Parameter(Mandatory)][string]$Pattern, [Parameter(Mandatory)][string]$Message)
+    if (-not $Output) { throw "FTMTEST_FAIL::$Message (the device produced no output at all)" }
     if ($Output -notmatch $Pattern) {
         Add-FtmEvidence -Output $Output
         throw "FTMTEST_FAIL::$Message (no match for /$Pattern/)"
@@ -465,7 +469,12 @@ function Assert-FtmMatch {
 }
 
 function Assert-FtmNotMatch {
-    param([Parameter(Mandatory)][string]$Output, [Parameter(Mandatory)][string]$Pattern, [Parameter(Mandatory)][string]$Message)
+    # See Assert-FtmMatch on AllowEmptyString. The verdict is deliberately NOT changed here: "the forbidden
+    # pattern was not seen" has always passed on empty output, and some commands legitimately print nothing.
+    # It is only recorded, because "nothing was seen at all" is a weak basis for a pass and the case that
+    # cares about liveness checks it separately (Test-FtmStillWorks).
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Output, [Parameter(Mandatory)][string]$Pattern, [Parameter(Mandatory)][string]$Message)
+    if (-not $Output) { Add-FtmEvidence -Note 'the device produced no output - this case passed on silence' }
     if ($Output -match $Pattern) {
         Add-FtmEvidence -Output $Output
         throw "FTMTEST_FAIL::$Message (unexpected match for /$Pattern/)"
