@@ -381,6 +381,47 @@ function Invoke-FtmConsoleCommand {
     return ($lines -join "`n")
 }
 
+function Invoke-FtmRemoteConsole {
+    <#
+    .SYNOPSIS
+        Runs one line on the TARGET's console through the console tunnel and leaves the session again.
+    .DESCRIPTION
+        `ftc <pa> con [maxbytes]` takes no command: the argument is a per-drain byte cap, and the call
+        ENTERS an interactive session (FileTransferClientConsole.cpp, "con"). Cases written as
+        `ftc <pa> con version` therefore opened a session and never left it, and every later line of the
+        run was typed into the REMOTE device instead of the local client - df fell silent, free space
+        could not be read, and every responsiveness probe read empty and was booked as a full-timeout
+        stall. Eight failures, one cause. Enter, run, leave - and leave even when the command throws.
+    #>
+    param($Console, [Parameter(Mandatory)][string]$Target, [Parameter(Mandatory)][string]$Command,
+          [int]$TimeoutMs = 25000, [int]$QuietMs = 600)
+    [void](Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target con" -TimeoutMs 15000 -QuietMs 500)
+    try {
+        return Invoke-FtmConsoleCommand -Console $Console -Command $Command -TimeoutMs $TimeoutMs -QuietMs $QuietMs
+    }
+    finally {
+        # 'quit' outside a session is just an unknown local command, so this is safe either way.
+        [void](Invoke-FtmConsoleCommand -Console $Console -Command 'quit' -TimeoutMs 10000 -QuietMs 500)
+    }
+}
+
+function Test-FtmLocalSourceMissing {
+    <#
+    .SYNOPSIS
+        True when the client could not open the LOCAL source file of a transfer.
+    .DESCRIPTION
+        Enumerated from FileTransferClient.cpp: five wordings end the send before a transfer starts -
+        two "cannot open source" variants, "no file backend", "unknown backend" and "backend ... not
+        available". The earlier guards matched "not found" instead, which was blind to the embedded
+        wording (so F-S-4 called a missing file a device defect) AND would have caught the target's
+        own "file not found" replies, which are a different question entirely. "no such" is never
+        emitted anywhere in the sources, so it is gone.
+    #>
+    param([string]$Output)
+    if (-not $Output) { return $false }
+    return ($Output -match '(?i)(cannot open source|no file backend|unknown backend|backend .* not available)')
+}
+
 function Test-FtmConsoleAlive {
     <#
     .SYNOPSIS

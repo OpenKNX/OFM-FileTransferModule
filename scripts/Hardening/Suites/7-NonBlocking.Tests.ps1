@@ -94,7 +94,7 @@ function Invoke-FtmSuiteNonBlocking {
     }
 
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-N-4' -Title 'Device stays responsive while the console ring is drained' -Reference 'FTC-Console: conLoop() runs under freeLoopTime()' -Body {
-        [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t con help" -TimeoutMs 2500 -QuietMs 200)
+        [void](Invoke-FtmRemoteConsole -Console $con -Target $t -Command 'help' -TimeoutMs 2500 -QuietMs 200)
         $m = Measure-FtmResponsiveness -Console $con -Seconds 10
         Add-FtmEvidence -Note "during console drain: worst $($m.Worst) ms, average $($m.Average) ms over $($m.Samples) probes"
         Assert-FtmTrue ($m.Samples -gt 0) 'the console became unusable while draining the ring'

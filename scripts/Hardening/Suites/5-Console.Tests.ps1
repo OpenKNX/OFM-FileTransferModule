@@ -59,7 +59,7 @@ function Invoke-FtmSuiteConsole {
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-C-3' -Title 'Ring overflow is reported, not silently truncated' -Reference "FTC-Console: shared $($F.Limit.CONSOLE_RING) octet log ring, _conOverflow reports once" -Body {
         # `help` is the documented way to exceed the ring. What must NOT happen is output
         # that simply stops with no indication - a reader cannot tell that from the end.
-        $out = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t con help" -TimeoutMs 40000 -QuietMs 2500
+        $out = Invoke-FtmRemoteConsole -Console $con -Target $t -Command 'help' -TimeoutMs 40000 -QuietMs 2500
         Add-FtmEvidence -Output $out -Note "captured $($out.Length) characters"
         Assert-FtmTrue ($out.Trim().Length -gt 0) 'no console output at all for help over the tunnel'
         if ($out.Length -ge $F.Limit.CONSOLE_RING) {
@@ -89,7 +89,7 @@ function Invoke-FtmSuiteConsole {
     }
 
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-C-6' -Title 'A remote console session ends cleanly and releases the tunnel' -Reference 'FTC-Console: the session is separate from the file transfer' -Body {
-        $open = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t con version" -TimeoutMs 25000
+        $open = Invoke-FtmRemoteConsole -Console $con -Target $t -Command 'version' -TimeoutMs 25000
         Add-FtmEvidence -Output $open
         # After a console session the FILE transfer path must still work - the two sessions
         # are separate, and one must not consume the other's state.
@@ -102,7 +102,7 @@ function Invoke-FtmSuiteConsole {
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-C-7' -Title 'Rapid console commands do not starve the device' -Reference 'FTC-Console: conLoop() runs under freeLoopTime()' -Body {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         foreach ($i in 1..15) {
-            [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t con version" -TimeoutMs 8000 -QuietMs 300)
+            [void](Invoke-FtmRemoteConsole -Console $con -Target $t -Command 'version' -TimeoutMs 8000 -QuietMs 300)
         }
         $sw.Stop()
         Add-FtmEvidence -Note "15 console round trips in $([Math]::Round($sw.Elapsed.TotalSeconds,1)) s"
