@@ -3979,6 +3979,116 @@ static void forgetSessionPasswords()
  */
 static bool refreshWriteWindow(uint16_t pa);
 
+/**
+ * @brief Until when a target refuses further sign-ins, kept across runs (<config-dir>/auth_backoff).
+ * @details The device states the wait when it turns an attempt away -- and then the process ends, and the
+ *          next one asks for a password again that cannot possibly work for another minute. Writing the
+ *          deadline down is what lets the next run say "wait 44 s" instead of taking a secret it will
+ *          throw away. It is a NOTE, not a rule: the device stays the authority, and a reboot or another
+ *          client's successful login clears the lock without telling us -- hence the offer to try anyway.
+ */
+static std::string authBackoffPath() { return configSidecar("auth_backoff"); }
+
+/** @brief Seconds this target still refuses logins for, 0 when nothing is known or it has expired. */
+static uint32_t authBackoffRemaining(uint16_t pa)
+{
+    std::FILE* f = std::fopen(authBackoffPath().c_str(), "rb");
+    if (f == nullptr) return 0;
+    char line[128];
+    long long until = 0;
+    while (std::fgets(line, sizeof(line), f))
+    {
+        unsigned p = 0;
+        long long u = 0;
+        if (std::sscanf(line, "%u\t%lld", &p, &u) == 2 && p == pa) until = u;
+    }
+    std::fclose(f);
+    const long long now = (long long)std::time(nullptr);
+    return (until > now) ? (uint32_t)(until - now) : 0;
+}
+
+/** @brief Write the deadline down (seconds == 0 clears it, which is what a successful login does). */
+static void authBackoffRemember(uint16_t pa, uint32_t seconds)
+{
+    const std::string path = authBackoffPath();
+    std::vector<std::string> keep;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb"))
+    {
+        char line[128];
+        const long long now = (long long)std::time(nullptr);
+        while (std::fgets(line, sizeof(line), f))
+        {
+            unsigned p = 0;
+            long long u = 0;
+            if (std::sscanf(line, "%u\t%lld", &p, &u) != 2) continue;
+            if (p == pa || u <= now) continue; // replaced, or long expired -- the file stays small
+            char b[128];
+            std::snprintf(b, sizeof(b), "%u\t%lld", p, u);
+            keep.push_back(b);
+        }
+        std::fclose(f);
+    }
+    std::FILE* o = std::fopen(path.c_str(), "wb");
+    if (o == nullptr) return;
+    for (const auto& k : keep) std::fprintf(o, "%s\n", k.c_str());
+    if (seconds)
+        std::fprintf(o, "%u\t%lld\n", (unsigned)pa, (long long)std::time(nullptr) + (long long)seconds);
+    std::fclose(o);
+}
+
+/** @brief "44 s" / "2 Min." -- the wait, in the unit a person would use. */
+static std::string waitText(uint32_t seconds)
+{
+    ftc::I18n& L = g_i18n;
+    char b[48];
+    if (seconds < 60) std::snprintf(b, sizeof(b), "%u s", (unsigned)seconds);
+    else std::snprintf(b, sizeof(b), L.tr("%u min", "%u Min."), (unsigned)((seconds + 59) / 60));
+    return b;
+}
+
+/** @brief What a sign-in ended with: the device's own answer, plus how long it refuses further tries. */
+struct SignInResult
+{
+    FileTransferClient::FtcAuthOutcome outcome = FileTransferClient::FtcAuthNone;
+    uint16_t backoffS = 0;
+    bool ok() const { return outcome == FileTransferClient::FtcAuthOk ||
+                             outcome == FileTransferClient::FtcAuthNotNeeded; }
+};
+
+/**
+ * @brief THE sign-in of this client. Every path that needs a write window goes through here.
+ * @details There is exactly one login in ftc: the interactive prompt, the silent refresh before a
+ *          transfer and the retry after a refusal all call this. Anything else would mean two places
+ *          deciding what "signed in" means, and they would drift.
+ *
+ *          A lost frame is not an answer about the password, so an unanswered exchange is repeated once
+ *          before anyone is asked to type again -- the challenge is fresh each time, so a repeat is
+ *          harmless. A wrong password or a back-off comes back on the first try and is never repeated:
+ *          the device counts guesses, and spending them silently is how a correct password ends up
+ *          locked out.
+ */
+static SignInResult signIn(uint16_t pa, const char* pw)
+{
+    SignInResult r;
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        // The shared client narrates on the device logger, in English -- it is the same source that runs
+        // on an RP2040. The outcome is reported here, in one voice and in the user's language.
+        g_ftcSuppress = true;
+        openknxFileTransferClient.requestLogin(pa, pw);
+        runOneShotToQuiescence();
+        g_ftcSuppress = false;
+        r.outcome = openknxFileTransferClient.authOutcome();
+        r.backoffS = openknxFileTransferClient.authBackoffSeconds();
+        if (r.outcome != FileTransferClient::FtcAuthNoAnswer) break;
+    }
+    // The one place that learns the lock is the one place that records it -- and clears it, because a
+    // login that went through proves the device is taking them again.
+    if (r.ok()) authBackoffRemember(pa, 0);
+    else if (r.outcome == FileTransferClient::FtcAuthBadPw && r.backoffS) authBackoffRemember(pa, r.backoffS);
+    return r;
+}
+
 static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, bool quiet, bool askOnly = false)
 {
     ftc::I18n& L = g_i18n;
@@ -3993,21 +4103,77 @@ static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, 
     ad.nowMs = []() { return nowMs(); };
     ad.aborted = []() { return g_abort != 0; };
     ad.clientBusy = []() { return openknxFileTransferClient.isBusy(); };
-    ad.login = [pa](const char* pw) {
-        // The shared client narrates the login on the device logger, in English — it is the same code that
-        // runs on an RP2040 and has no translations. We report the outcome ourselves, in one voice.
-        g_ftcSuppress = true;
-        openknxFileTransferClient.requestLogin(pa, pw);
-        runOneShotToQuiescence();
-        g_ftcSuppress = false;
-    };
 
     ftc::AccessState acc = ftc::readAccess(g_knxTunnel, pa, ad);
+    // The login's own answer settles whether we are signed in; a second feature probe is only ever used to
+    // REFRESH the capability bits. Merging it this way is what keeps one unanswered probe from turning a
+    // correct password into "not accepted" -- and from dropping the delta/gzip bits on the floor with it.
+    auto signedIn = [&](const ftc::AccessState& before) {
+        ftc::AccessState s = before;
+        s.stage = ftc::Access::Open;
+        s.answered = true;
+        s.bits = (uint8_t)(before.bits & ~ftc::FEAT_WRITES_DISABLED);
+        const ftc::AccessState re = ftc::readAccess(g_knxTunnel, pa, ad);
+        if (re.answered && re.stage == ftc::Access::Open) return re; // fresh and agreeing -> take it whole
+        if (re.answered) s.bits = re.bits;                           // capabilities yes, its verdict no
+        return s;
+    };
+
     for (int attempt = 0; !askOnly && attempt < 3 && acc.stage != ftc::Access::Open; ++attempt)
     {
         if (acc.stage == ftc::Access::NeedPassword)
         {
+            // Typed once this run and accepted then: use it before asking again. The window closes on an
+            // idle timeout, which is not a reason to make someone retype what they already answered.
+            const auto known = g_sessionPw.find(pa);
+            if (attempt == 0 && known != g_sessionPw.end() && !known->second.empty())
+            {
+                if (signIn(pa, known->second.c_str()).ok())
+                {
+                    acc = signedIn(acc);
+                    g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
+                                 {L.tr("with the password from this run", "mit dem Passwort aus diesem Lauf")});
+                    continue;
+                }
+            }
             if (!g_term.isTty()) break; // nobody there to type it — the caller reports the refusal
+            // It told us last time how long it would turn attempts away. Asking for a secret we would
+            // then throw away is the one thing not to do with that knowledge.
+            uint32_t locked = authBackoffRemaining(pa);
+            if (locked)
+            {
+                g_tpl.status(ftc::Tpl::Stat::Err,
+                             L.tr("this device is still holding logins off", "dieses Gerät blockt Anmeldungen noch"),
+                             {waitText(locked) + L.tr(" to go", " übrig"),
+                              L.tr("its brute-force protection; an attempt before that neither helps nor hurts",
+                                   "sein Brute-Force-Schutz; ein Versuch davor schadet nicht, bringt aber nichts")});
+                // Short enough to sit out: offer it, with the clock running, instead of sending the user away.
+                if (locked <= 90 &&
+                    ftc::confirm(g_term, c, L, L.tr("Wait for it?", "Darauf warten?"), true))
+                {
+                    const uint64_t until = nowMs() + (uint64_t)locked * 1000ull + 500;
+                    uint32_t drawn = 0xFFFFFFFFu;
+                    while (nowMs() < until && !g_abort)
+                    {
+                        const uint32_t left = (uint32_t)((until - nowMs()) / 1000);
+                        if (left != drawn)
+                        {
+                            g_tpl.waitTick(L.tr("waiting for the device", "warte auf das Gerät"), left,
+                                           L.tr("ctrl-C stops", "Strg-C bricht ab"));
+                            drawn = left;
+                        }
+                        g_knxTunnel.pump(); // the tunnel has to stay alive across the wait
+                        openknxFileTransferClient.loop(true);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    }
+                    if (g_term.isTty()) std::printf("\r\x1b[K");
+                    if (g_abort) break;
+                    authBackoffRemember(pa, 0);
+                    locked = 0;
+                }
+                else if (!ftc::confirm(g_term, c, L, L.tr("Try anyway?", "Trotzdem versuchen?"), false))
+                    break; // the caller reports the refusal -- no password was asked for
+            }
             g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("this device is password protected",
                                                     "dieses Gerät ist passwortgeschützt"), {});
             if (!quiet)
@@ -4017,19 +4183,75 @@ static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, 
                                 "nicht dein ETS-Passwort und kein KNX-Secure-Schlüssel"));
             std::string pw;
             if (!ftc::readSecret(g_term, c, L.tr("password", "Passwort"), pw)) break;
-            ad.login(pw.c_str());
-            acc = ftc::readAccess(g_knxTunnel, pa, ad);
-            if (acc.stage == ftc::Access::Open) g_sessionPw[pa] = pw; // only a password that WORKED
-            pw.assign(pw.size(), '\0'); // do not leave the local copy lying around
-            if (acc.stage == ftc::Access::Open)
+            const SignInResult si = signIn(pa, pw.c_str());
+            const FileTransferClient::FtcAuthOutcome out = si.outcome;
+            const uint16_t backS = si.backoffS;
+            if (out == FileTransferClient::FtcAuthOk)
+            {
+                g_sessionPw[pa] = pw; // remembered because the DEVICE said yes, not because a probe agreed
+                pw.assign(pw.size(), '\0');
+                acc = signedIn(acc);
                 g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
                              {L.tr("writes stay allowed until the device goes idle",
                                    "Schreibzugriff gilt, bis das Gerät in Ruhe fällt")});
-            else if (acc.stage == ftc::Access::NeedPassword)
+                continue;
+            }
+            pw.assign(pw.size(), '\0'); // do not leave the local copy lying around
+            if (out == FileTransferClient::FtcAuthBadPw && backS > 0)
+            {
+                // The device throttles guessing: 3 free tries, then 1, 2, 4 ... minutes. Saying only "not
+                // accepted" here sends the user typing again into a window that refuses every attempt.
+                char w[96];
+                if (backS < 60)
+                    std::snprintf(w, sizeof(w), L.tr("next attempt in %u s", "nächster Versuch in %u s"),
+                                  (unsigned)backS);
+                else
+                    std::snprintf(w, sizeof(w), L.tr("next attempt in %u min", "nächster Versuch in %u Min."),
+                                  (unsigned)((backS + 59) / 60));
+                g_tpl.status(ftc::Tpl::Stat::Err, L.tr("too many attempts — the device is holding them off",
+                                                       "zu viele Versuche — das Gerät blockt sie ab"),
+                             {w, L.tr("this is the device's brute-force protection, not a fault",
+                                      "das ist der Brute-Force-Schutz des Geräts, kein Fehler")});
+                break; // waiting out a doubling lock inside this loop helps nobody
+            }
+            if (out == FileTransferClient::FtcAuthBadPw)
                 g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("that password was not accepted",
                                                         "dieses Passwort wurde nicht angenommen"),
                              {L.tr("the device slows down repeated attempts on purpose",
                                    "das Gerät bremst wiederholte Versuche absichtlich aus")});
+            else if (out == FileTransferClient::FtcAuthNotNeeded)
+            {
+                // It no longer asks for one -- the stage was changed between the two readings.
+                acc = signedIn(acc);
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("this device does not ask for a password",
+                                                      "dieses Gerät verlangt kein Passwort"), {});
+                continue;
+            }
+            else
+            {
+                // Which of the three frames stayed unanswered. "No answer" on its own cannot be acted
+                // on; the step names the suspect -- a silent capability probe is an old or busy target,
+                // a silent challenge or verdict is an exchange that broke off mid-way.
+                const char* step = L.tr("no step reached", "kein Schritt erreicht");
+                switch (openknxFileTransferClient.authStage())
+                {
+                    case FileTransferClient::FtcAuthStageProbe:
+                        step = L.tr("it did not answer the capability question (CheckFeatures)",
+                                    "es hat die Fähigkeitsabfrage nicht beantwortet (CheckFeatures)");
+                        break;
+                    case FileTransferClient::FtcAuthStageChallenge:
+                        step = L.tr("it did not send the challenge", "es hat die Challenge nicht geschickt");
+                        break;
+                    case FileTransferClient::FtcAuthStageResponse:
+                        step = L.tr("it did not answer the response", "es hat die Antwort nicht quittiert");
+                        break;
+                    default: break;
+                }
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("the device did not answer the login",
+                                                        "das Gerät hat auf die Anmeldung nicht geantwortet"),
+                             {step, L.tr("that says nothing about the password — it was tried twice",
+                                         "das sagt nichts über das Passwort — es wurde zweimal versucht")});
+            }
             continue;
         }
         if (acc.stage == ftc::Access::Blocked || acc.stage == ftc::Access::LockedOff)
@@ -4068,21 +4290,19 @@ static bool refreshWriteWindow(uint16_t pa)
     const auto it = g_sessionPw.find(pa);
     if (it == g_sessionPw.end() || it->second.empty()) return false;
 
-    ftc::AccessDeps ad;
-    ad.pump = []() {
-        g_knxTunnel.pump();
-        openknxFileTransferClient.loop(true);
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    };
-    ad.nowMs = []() { return nowMs(); };
-    ad.aborted = []() { return g_abort != 0; };
-    ad.clientBusy = []() { return openknxFileTransferClient.isBusy(); };
-
-    g_ftcSuppress = true;
-    openknxFileTransferClient.requestLogin(pa, it->second.c_str());
-    runOneShotToQuiescence();
-    g_ftcSuppress = false;
-    return ftc::readAccess(g_knxTunnel, pa, ad).stage == ftc::Access::Open;
+    // The device's own answer, not a second probe: a lost CheckFeatures used to report a perfectly good
+    // login as failed, and the caller then asked for a password that was already accepted.
+    const SignInResult r = signIn(pa, it->second.c_str());
+    if (r.ok()) return true;
+    const FileTransferClient::FtcAuthOutcome out = r.outcome;
+    // A stored password the device now rejects is worse than none: every silent re-use spends one of the
+    // three free tries and walks the target into its doubling lock-out. Drop it.
+    if (out == FileTransferClient::FtcAuthBadPw)
+    {
+        it->second.assign(it->second.size(), '\0');
+        g_sessionPw.erase(it);
+    }
+    return false;
 }
 
 
@@ -7966,6 +8186,73 @@ int main(int argc, char** argv)
         if (openSessionLog(pos.empty() ? std::string("ftc") : pos[0], logPathArg).empty())
             std::fprintf(stderr, "could not open log file%s%s\n",
                          logPathArg.empty() ? "" : " ", logPathArg.c_str());
+    }
+
+    // `ftc <pa> login [pw]` is served HERE, not handed to the shared console parser. That parser would
+    // call requestLogin a second time, from a second place -- and the two would have to agree on what
+    // "signed in" means, on the retry, and on remembering the device's lock-out. One sign-in, one set of
+    // rules. Without a password on the line it is asked for: a secret typed into a shell ends up in the
+    // history, and this way it never does.
+    if (reachHasPa && pos.size() >= 2 && (pos[1] == "login" || pos[1] == "li"))
+    {
+        ftc::I18n& L = g_i18n;
+        const uint16_t lpa = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
+        std::string pw = (pos.size() >= 3) ? pos[2] : std::string();
+        const uint32_t locked = authBackoffRemaining(lpa);
+        if (locked)
+            g_tpl.status(ftc::Tpl::Stat::Err,
+                         L.tr("this device is still holding logins off", "dieses Gerät blockt Anmeldungen noch"),
+                         {waitText(locked) + L.tr(" to go", " übrig"),
+                          L.tr("trying before that neither helps nor hurts",
+                               "ein Versuch davor schadet nicht, bringt aber nichts")});
+        if (pw.empty())
+        {
+            if (!g_term.isTty())
+            {
+                std::fprintf(stderr, "%s\n", L.tr("usage: ftc <pa> login <password>",
+                                                  "Aufruf: ftc <pa> login <Passwort>"));
+                socketCleanup();
+                return 2;
+            }
+            if (!ftc::readSecret(g_term, g_theme, L.tr("password", "Passwort"), pw)) { socketCleanup(); return 130; }
+        }
+        const SignInResult si = signIn(lpa, pw.c_str());
+        pw.assign(pw.size(), '\0');
+        int rc = 3;
+        switch (si.outcome)
+        {
+            case FileTransferClient::FtcAuthOk:
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
+                             {L.tr("writes stay allowed until the device goes idle",
+                                   "Schreibzugriff gilt, bis das Gerät in Ruhe fällt")});
+                rc = 0;
+                break;
+            case FileTransferClient::FtcAuthNotNeeded:
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("this device does not ask for a password",
+                                                      "dieses Gerät verlangt kein Passwort"), {});
+                rc = 0;
+                break;
+            case FileTransferClient::FtcAuthBadPw:
+                if (si.backoffS)
+                    g_tpl.status(ftc::Tpl::Stat::Err, L.tr("too many attempts — the device is holding them off",
+                                                           "zu viele Versuche — das Gerät blockt sie ab"),
+                                 {L.tr("next attempt in ", "nächster Versuch in ") + waitText(si.backoffS),
+                                  L.tr("this is the device's brute-force protection, not a fault",
+                                       "das ist der Brute-Force-Schutz des Geräts, kein Fehler")});
+                else
+                    g_tpl.status(ftc::Tpl::Stat::Err, L.tr("that password was not accepted",
+                                                           "dieses Passwort wurde nicht angenommen"), {});
+                break;
+            default:
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("the device did not answer the login",
+                                                        "das Gerät hat auf die Anmeldung nicht geantwortet"),
+                             {L.tr("that says nothing about the password — it was tried twice",
+                                   "das sagt nichts über das Passwort — es wurde zweimal versucht")});
+                rc = 6;
+                break;
+        }
+        socketCleanup();
+        return rc;
     }
 
     // Submit the command through the same Module entry the console uses.
