@@ -295,6 +295,13 @@ static constexpr uint8_t FTC_FEAT_AUTH = 0x10; // server requires a password (st
 // Dedicated SHORT probe window -- NOT the 6 s FTC_TIMEOUT. An old server never answers cmd102, so a
 // fast request must give up fast and fall back to classic instead of stalling for seconds.
 static constexpr uint32_t FTC_FEATURE_TIMEOUT = 800;
+    #ifdef OPENKNX_FTC_SECURITY
+// The SAME probe ahead of a login gets a longer window. There the cost of giving up early is not a slower
+// transfer but a login that is never attempted: the challenge is only sent when the auth bit is seen, so an
+// answer lost to a busy bus turns a correct password into "target not password-protected" -- and the user
+// types it again. A round trip is ~0.35 s on a quiet bus, so this is a wide margin, still bounded.
+static constexpr uint32_t FTC_AUTH_PROBE_TIMEOUT = 2500;
+    #endif
 // Console robustness on a CONGESTED bus: all FTC frames are low priority, so a bulk transfer starves the small
 // console control frames (verified by busmon: console 114 frames vs bulk 1325 over the same window). The
 // pre-flight probe is an idempotent read -> resend it a few times before declaring "no answer"; the in-session
@@ -2304,9 +2311,13 @@ void FileTransferClient::requestLogin(uint16_t pa, const char *pw)
     // the wire -- only the nonce + 4-byte MAC travel. Empty password fails closed (the server does too).
     memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
     const size_t n = pw ? strlen(pw) : 0;
-    memcpy(_ftcAuthKey, pw, n > 16 ? 16 : n);
+    if (n) memcpy(_ftcAuthKey, pw, n > 16 ? 16 : n);
+    _ftcAuthOutcome = FtcAuthNone;
+    _ftcAuthBackoff = 0;
+    _ftcAuthStage = FtcAuthStageProbe;
     if (_ftcAuthKey[0] == 0)
     {
+        _ftcAuthOutcome = FtcAuthBadPw; // the server fails an empty password closed as well
         openknx.logger.logWithPrefix("FTC", "login: empty password -- nothing sent");
         return;
     }
@@ -2319,17 +2330,16 @@ void FileTransferClient::requestLogin(uint16_t pa, const char *pw)
     _ftcTarget = pa;
     ftcStatusReset(FtcPhase::Ping, pa, "login");
     // Probe first: only challenge a target that is actually password-protected (feature bit 0x10). Against an
-    // old / non-auth device this gives a clear message instead of a 6 s timeout. Use the cache if fresh.
-    if (_ftcFeatValid && _ftcFeatPa == pa)
-    {
-        authAfterProbe(_ftcFeatBits, true);
-        return;
-    }
+    // old / non-auth device this gives a clear message instead of a timeout. Always asked, never taken from
+    // the cache: the cached byte may predate an ETS download, and challenging a device that has since left
+    // the password stage answers 0xA1 against its stored password -- reported as a wrong password while
+    // writes were in fact open.
     if (ftcSend(FTC_CMD_CHECK_FEATURES, 0)) // obj 159, pid 102
         _ftcState = FtcAuthProbe;
     else
     {
         memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+        _ftcAuthOutcome = FtcAuthNoAnswer;
         openknx.logger.logWithPrefix("FTC", "login: cannot probe the target");
     }
 }
@@ -2339,6 +2349,7 @@ void FileTransferClient::authAfterProbe(uint8_t features, bool answered)
 {
     if (!answered)
     {
+        _ftcAuthOutcome = FtcAuthNoAnswer;
         openknx.logger.logWithPrefix("FTC", "login: target did not answer -- old firmware or no password protection");
         memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
         ftcFinish();
@@ -2346,15 +2357,18 @@ void FileTransferClient::authAfterProbe(uint8_t features, bool answered)
     }
     if (!(features & FTC_FEAT_AUTH))
     {
+        _ftcAuthOutcome = FtcAuthNotNeeded;
         openknx.logger.logWithPrefix("FTC", "login: target is not password-protected -- login not needed");
         memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
         ftcFinish();
         return;
     }
+    _ftcAuthStage = FtcAuthStageChallenge;
     if (ftcSend(FTC_CMD_AUTH_CHALLENGE, 0)) // request the nonce (obj 159, pid 103)
         _ftcState = FtcAuthChallenge;
     else
     {
+        _ftcAuthOutcome = FtcAuthNoAnswer;
         memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
         ftcFinish();
     }
@@ -2363,6 +2377,10 @@ void FileTransferClient::authAfterProbe(uint8_t features, bool answered)
 void FileTransferClient::requestLogout(uint16_t pa)
 {
     _ftcLogout = true;
+    // A logout is not a login result. Leaving the previous "signed in" standing would let a front-end
+    // that polls the outcome report a window as open that was just closed.
+    _ftcAuthOutcome = FtcAuthNone;
+    _ftcAuthBackoff = 0;
     _ftcFeatValid = false; // same reason as in requestLogin(): the access state just changed
     knx.bau().ftcSetResponseCallback(ftcOnResponse);
     _ftcTarget = pa;
@@ -6186,9 +6204,9 @@ void FileTransferClient::loopSecurity()
                 _ftcFeatValid = true;
                 authAfterProbe(feat, true);
             }
-            else if (millis() - _ftcSince > FTC_FEATURE_TIMEOUT)
+            else if (millis() - _ftcSince > FTC_AUTH_PROBE_TIMEOUT)
             {
-                authAfterProbe(0, false); // no answer in the short window -> old / non-auth device
+                authAfterProbe(0, false); // still nothing -> old / non-auth device
             }
             return;
         }
@@ -6203,6 +6221,7 @@ void FileTransferClient::loopSecurity()
                 if (_ftcRespProp != FTC_CMD_AUTH_CHALLENGE) return; // stale mirror -> keep waiting
                 if (_ftcRespLen < 17 || _ftcResp[0] != 0x00)
                 {
+                    _ftcAuthOutcome = FtcAuthNoAnswer; // it answered, but not with a usable challenge
                     openknx.logger.logWithPrefix("FTC", "login: target sent no nonce");
                     memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
                     ftcFinish();
@@ -6215,13 +6234,18 @@ void FileTransferClient::loopSecurity()
                 AES_ECB_encrypt(&c, mac);
                 memcpy(_ftcTx, mac, SEC_MAC_LEN);
                 memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
+                _ftcAuthStage = FtcAuthStageResponse;
                 if (ftcSend(FTC_CMD_AUTH_RESPONSE, SEC_MAC_LEN))
                     _ftcState = FtcAuthResponse;
                 else
+                {
+                    _ftcAuthOutcome = FtcAuthNoAnswer;
                     ftcFinish();
+                }
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
+                _ftcAuthOutcome = FtcAuthNoAnswer;
                 openknx.logger.logWithPrefix("FTC", "login: no answer within 6s");
                 memset(_ftcAuthKey, 0, sizeof(_ftcAuthKey));
                 ftcFinish();
@@ -6241,12 +6265,20 @@ void FileTransferClient::loopSecurity()
                 if (_ftcLogout)
                     openknx.logger.logWithPrefix("FTC", "logged out");
                 else if (r == 0x00)
+                {
+                    _ftcAuthOutcome = FtcAuthOk;
                     openknx.logger.logWithPrefix("FTC", "login OK -- writes allowed until the target's idle timeout");
+                }
                 else
                 {
                     // 0xA1 auth failed. Bytes 1..2 (if present) carry the remaining brute-force back-off in
                     // seconds: 0 = still within the 3 free tries, else "too many tries, wait N".
                     const uint16_t backSec = (_ftcRespLen >= 3) ? (uint16_t)((_ftcResp[1] << 8) | _ftcResp[2]) : 0;
+                    _ftcAuthOutcome = FtcAuthBadPw;
+                    _ftcAuthBackoff = backSec;
+                    // A front-end that only sees the phase must not read a refused login as a done one.
+                    _status.phase = FtcPhase::Failed;
+                    ftcStatusMsg(backSec ? "login refused: too many tries" : "login refused: wrong password");
                     if (backSec == 0)
                         openknx.logger.logWithPrefix("FTC", "login FAILED -- wrong password, try again");
                     else if (backSec < 60)
@@ -6258,6 +6290,7 @@ void FileTransferClient::loopSecurity()
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
+                if (!_ftcLogout) _ftcAuthOutcome = FtcAuthNoAnswer;
                 openknx.logger.logWithPrefix("FTC", _ftcLogout ? "logout: no answer within 6s" : "login: no answer within 6s");
                 ftcFinish();
             }

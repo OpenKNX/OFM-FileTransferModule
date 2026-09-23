@@ -292,6 +292,30 @@ class FileTransferClient : public OpenKNX::Module
     // into the AES key HERE and never leaves this process on the wire (only nonce + 4-byte MAC travel).
     void requestLogin(uint16_t pa, const char *pw);
     void requestLogout(uint16_t pa); // `ftc <pa> logout`: close the target's write window immediately
+    // The outcome of the last requestLogin(), for callers that must act on it (the desktop client stores
+    // the password only on success, the web page answers the browser). Without this a front-end can only
+    // guess by re-reading CheckFeatures, and one unanswered probe then looks like a wrong password.
+    enum FtcAuthOutcome : uint8_t
+    {
+        FtcAuthNone = 0,   // no login attempted since the last reset
+        FtcAuthOk,         // target answered 0x00 -- the write window is open
+        FtcAuthBadPw,      // target answered 0xA1; authBackoffSeconds() says how long it refuses further tries
+        FtcAuthNotNeeded,  // target is not password-protected (feature bit 0x10 clear)
+        FtcAuthNoAnswer,   // nothing came back in time -- says nothing about the password
+    };
+    FtcAuthOutcome authOutcome() const { return _ftcAuthOutcome; }
+    uint16_t authBackoffSeconds() const { return _ftcAuthBackoff; } // 0 unless the target reported a wait
+    // Which of the three frames went unanswered. "No answer" alone cannot be acted on -- a silent
+    // capability probe means an old or busy target, a silent challenge means the exchange broke off
+    // mid-way. Named here so the next occurrence is a diagnosis instead of a guess.
+    enum FtcAuthStage : uint8_t
+    {
+        FtcAuthStageNone = 0,
+        FtcAuthStageProbe,     // CheckFeatures(102) -- is this target password-protected at all?
+        FtcAuthStageChallenge, // AuthChallenge(103) -- waiting for the nonce
+        FtcAuthStageResponse,  // AuthResponse(104)  -- waiting for the verdict
+    };
+    FtcAuthStage authStage() const { return _ftcAuthStage; }
     #endif
     // mode: 0 = safe/classic (default), 1 = fast/windowed. A non-zero mode negotiates the
     // server's FAST capability first and silently falls back to classic if missing (ftcBeginFeatureProbe).
@@ -537,6 +561,9 @@ class FileTransferClient : public OpenKNX::Module
     // The password itself is never stored beyond this and never leaves the process on the wire.
     uint8_t _ftcAuthKey[16] = {};
     bool _ftcLogout = false; // distinguishes the logout flow (cmd 105) from login (103/104) in FtcAuthResponse
+    FtcAuthOutcome _ftcAuthOutcome = FtcAuthNone; // set on every exit of the login flow, read by authOutcome()
+    FtcAuthStage _ftcAuthStage = FtcAuthStageNone; // which frame the flow was waiting for when it ended
+    uint16_t _ftcAuthBackoff = 0;                 // seconds the target said it will refuse further attempts
     // CheckFeatures result for a login: only send the challenge if the target is password-protected (0x10);
     // otherwise report clearly instead of timing out against an old / non-auth device.
     void authAfterProbe(uint8_t features, bool answered);
