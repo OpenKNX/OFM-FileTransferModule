@@ -41,7 +41,6 @@ struct AccessDeps
     std::function<uint64_t()> nowMs;         ///< monotonic clock
     std::function<bool()> aborted;           ///< true once the user pressed Ctrl-C
     std::function<bool()> clientBusy;        ///< the shared client owns the response callback while busy
-    std::function<void(const char*)> login;  ///< requestLogin(pa, password) + pump to quiescence
 };
 
 namespace detail
