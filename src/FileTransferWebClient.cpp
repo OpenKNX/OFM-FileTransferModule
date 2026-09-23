@@ -202,6 +202,27 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
              (unsigned)s.crcErrors);
     out += buf;
 
+#ifdef OPENKNX_FTC_SECURITY
+    // What became of a login. The page cannot learn this from the POST -- that one only ARMS the
+    // exchange, and answering it later would hold a web handler open across three bus round trips.
+    // So the answer travels the way every other result does: through the status the page already polls.
+    // The PA rides along, so a block left over from an earlier target is inert instead of misleading.
+    {
+        const char *as = "none";
+        switch (c->authOutcome())
+        {
+            case FileTransferClient::FtcAuthOk: as = "ok"; break;
+            case FileTransferClient::FtcAuthBadPw: as = "badpw"; break;
+            case FileTransferClient::FtcAuthNotNeeded: as = "nopw"; break;
+            case FileTransferClient::FtcAuthNoAnswer: as = "noanswer"; break;
+            default: break;
+        }
+        snprintf(buf, sizeof(buf), ",\"auth\":{\"state\":\"%s\",\"wait\":%u,\"pa\":\"%s\"}", as,
+                 (unsigned)c->authBackoffSeconds(), paText(_authPa).c_str());
+        out += buf;
+    }
+#endif
+
     // What the target answered about itself. Only reported while it still belongs to the PA the page
     // asked for -- any other operation in between makes it stale, and a stale feature byte would put a
     // wrong answer on the password question.
@@ -515,11 +536,14 @@ void FileTransferWebClient::handleAuth(WebRequest &req, WebResponse &res)
     }
     std::string pw;
     if (req.body() && req.bodyLength()) pw.assign((const char *)req.body(), req.bodyLength());
+    _authPa = pa; // which target the outcome in the status belongs to
     if (pw.empty()) FileTransferClient::instance()->requestLogout(pa);
     else FileTransferClient::instance()->requestLogin(pa, pw.c_str());
     pw.assign(pw.size(), '\0'); // do not leave it in the heap block this string hands back
     res.setContentType("text/plain");
-    res.send("OK");
+    // Armed, not done: the challenge-response is three bus round trips and the answer cannot be waited
+    // for here without blocking the web server. The page reads the outcome from /knxota/status.
+    res.send("armed");
 }
 #endif
 

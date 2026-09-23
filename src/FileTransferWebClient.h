@@ -61,6 +61,9 @@ class FileTransferWebClient
     std::vector<ScanHit> _scanHits;      // what the running/last sweep found
     static constexpr size_t SCAN_HIT_MAX = 64;
     uint16_t _featPa = 0;                // PA the last "Gerät lesen" was asked for
+#ifdef OPENKNX_FTC_SECURITY
+    uint16_t _authPa = 0;                // PA the login outcome reported in the status belongs to
+#endif
 
     /**
      * @brief Pick up the answer of a finished FilesystemInfo, because only the page knows which drive it asked for.

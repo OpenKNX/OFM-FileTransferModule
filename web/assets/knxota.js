@@ -392,9 +392,30 @@ function otaFinished(s) {
     if (n) _o("otaGaBox").open = true;
     return;
   }
-  if (who === "otaUnlock" || who === "otaLock") {
-    otaLog(who === "otaLock" ? "Abgemeldet — lese zurück"
-                : "Angemeldet — lese zurück");
+  if (who === "otaLock") {
+    otaLog("Abgemeldet — lese zurück");
+    if (!otaChain.length) setTimeout(() => otaArm("otaRead", "feat", { pa: _o("otaPa").value }), 300);
+    return;
+  }
+  if (who === "otaUnlock") {
+    // Was die Anmeldung wirklich ergeben hat, sagt das Gerät -- nicht die Antwort auf das POST, das die
+    // Anmeldung nur anstößt. Ohne diese Auskunft stand hier "Angemeldet", auch bei falschem Passwort.
+    const a = (s.auth && (!s.auth.pa || s.auth.pa === otaNorm(_o("otaPa").value))) ? s.auth : null;
+    const st = a ? a.state : "none";
+    if (st === "ok") otaLog("Angemeldet — lese zurück", "ota-ok");
+    else if (st === "nopw") otaLog("Dieses Gerät verlangt kein Passwort", "ota-ok");
+    else if (st === "badpw") {
+      const w = a.wait || 0;
+      otaLog(w ? ("Passwort abgelehnt — zu viele Versuche, nächster in "
+                  + (w < 60 ? w + " s" : Math.ceil(w / 60) + " Min."))
+               : "Passwort abgelehnt", "ota-err");
+      otaChain = [];                       // nicht weiter in ein Auslösen laufen, das sicher scheitert
+      return;
+    } else if (st === "noanswer") {
+      otaLog("Keine Antwort auf die Anmeldung — das sagt nichts über das Passwort", "ota-warn");
+      otaChain = [];
+      return;
+    } else otaLog("Anmeldung ohne Rückmeldung — lese den Zustand zurück", "ota-warn");
     if (!otaChain.length) setTimeout(() => otaArm("otaRead", "feat", { pa: _o("otaPa").value }), 300);
     return;
   }
