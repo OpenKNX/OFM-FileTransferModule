@@ -93,6 +93,21 @@ static ftc::Tpl g_tpl(g_term, g_theme, &g_i18n);
 static ftc::Watch g_watch(g_theme, g_i18n); // auto/recurring console commands (/every), cached per target PA
 static ftc::Config g_cfg;
 
+// `busprop` answer sink: the tunnel property callback is a plain function pointer, so the one pending
+// request is matched here against its own PA / object index / PID and everything else is ignored.
+static volatile bool g_bpSeen = false;
+static uint16_t g_bpPa = 0;
+static uint8_t g_bpObj = 0, g_bpPid = 0, g_bpLen = 0;
+static uint8_t g_bpData[64] = {0};
+
+static void busPropAnswer(uint16_t pa, uint8_t objectIndex, uint8_t propertyId, const uint8_t* data, uint8_t length)
+{
+    if (pa != g_bpPa || objectIndex != g_bpObj || propertyId != g_bpPid) return;
+    g_bpLen = (uint8_t)(length > sizeof(g_bpData) ? sizeof(g_bpData) : length);
+    if (data != nullptr && g_bpLen > 0) std::memcpy(g_bpData, data, g_bpLen);
+    g_bpSeen = true;
+}
+
 // ── ftc-cli throughput-graph width, in % of the terminal width (100 = full). ──
 // Live shows a sliding window of the last <width> samples (older ones scroll off
 // the left); the end recap shows the whole run downsampled to <width>. Tune here.
@@ -5734,6 +5749,266 @@ int main(int argc, char** argv)
     if (pos.size() == 1 && pos[0] == "info")
     {
         const int rc = renderInterfaceInfo(ip, port, quiet);
+        socketCleanup();
+        return rc;
+    }
+
+    // `ftc -i <ip> prop dump [maxIot] [maxPid]` (no PA) — sweep every readable property of the interface
+    // over ONE device-management session and print a stable, diffable line per value. Objects are probed
+    // with PID 1 first (present on every interface object), so absent object types cost one request.
+    if (pos.size() >= 2 && pos[0] == "prop" && pos[1] == "dump")
+    {
+        const uint16_t maxIot = pos.size() >= 3 ? (uint16_t)std::strtoul(pos[2].c_str(), nullptr, 0) : 20;
+        const uint8_t maxPid = pos.size() >= 4 ? (uint8_t)std::strtoul(pos[3].c_str(), nullptr, 0) : 120;
+
+        ftc::DevMgmtSession dm;
+        std::string err;
+        if (!dm.open(ip, port, &err))
+        {
+            std::fprintf(stderr, "prop dump: connect failed: %s\n", err.c_str());
+            socketCleanup();
+            return 1;
+        }
+
+        uint8_t out[256];
+        size_t outLen = 0;
+        int objects = 0, values = 0;
+        for (uint16_t iot = 0; iot <= maxIot; ++iot)
+        {
+            if (dm.readEx(iot, 1, 1, 1, 1, out, sizeof(out), outLen) != ftc::DmRead::Data)
+                continue; // no PID 1 -> object type not present
+            ++objects;
+            for (uint8_t pid = 1; pid <= maxPid; ++pid)
+            {
+                if (dm.readEx(iot, 1, pid, 1, 1, out, sizeof(out), outLen) != ftc::DmRead::Data)
+                    continue;
+                std::printf("IOT=%-3u PID=%-4u len=%-3zu ", iot, pid, outLen);
+                for (size_t i = 0; i < outLen; ++i) std::printf("%02X", out[i]);
+                std::printf("\n");
+                ++values;
+            }
+        }
+        std::printf("# objects=%d values=%d\n", objects, values);
+        dm.close();
+        socketCleanup();
+        return 0;
+    }
+
+    // `ftc -i <ip> busprop dump <pa> [maxObj] [maxPid]` — sweep a TP device's readable properties over ONE
+    // tunnel session and print a diffable line per value. Object 0 (device) always exists; a missing object
+    // answers nothing on PID 1, so it costs one request.
+    if (pos.size() >= 3 && pos[0] == "busprop" && pos[1] == "dump")
+    {
+        unsigned pa_a = 0, pa_l = 0, pa_d = 0;
+        if (std::sscanf(pos[2].c_str(), "%u.%u.%u", &pa_a, &pa_l, &pa_d) != 3)
+        {
+            std::fprintf(stderr, "busprop dump: <pa> must look like 5.0.11\n");
+            socketCleanup();
+            return 2;
+        }
+        const uint16_t pa = (uint16_t)((pa_a << 12) | (pa_l << 8) | pa_d);
+        const uint8_t maxObj = pos.size() >= 4 ? (uint8_t)std::strtoul(pos[3].c_str(), nullptr, 0) : 12;
+        const uint8_t maxPid = pos.size() >= 5 ? (uint8_t)std::strtoul(pos[4].c_str(), nullptr, 0) : 90;
+
+        KnxIpTunnel tun;
+        if (!tun.connect(ip, port))
+        {
+            std::fprintf(stderr, "busprop dump: tunnel connect failed (status %d)\n", tun.lastConnectStatus());
+            socketCleanup();
+            return 1;
+        }
+        tun.setPropertyCallback(&busPropAnswer);
+        g_bpPa = pa;
+
+        int objects = 0, values = 0;
+        for (uint8_t obj = 0; obj <= maxObj; ++obj)
+        {
+            bool objSeen = false;
+            for (uint8_t pid = 1; pid <= maxPid; ++pid)
+            {
+                g_bpObj = obj; g_bpPid = pid; g_bpSeen = false; g_bpLen = 0;
+                if (!tun.sendPropertyValueRead(pa, obj, pid, 1, 1)) continue;
+                const uint64_t until = ftc::detail::nowMs() + 600;
+                while (!g_bpSeen && ftc::detail::nowMs() < until)
+                    tun.pump();
+                // A_PropertyValue_Response with zero elements is the bus answer for "no such property";
+                // it is not a value, and on PID 1 it means the object index itself is not populated.
+                if (!g_bpSeen || g_bpLen == 0) { if (pid == 1) break; else continue; }
+                if (!objSeen) { objSeen = true; ++objects; }
+                std::printf("OBJ=%-3u PID=%-4u len=%-3u ", obj, pid, (unsigned)g_bpLen);
+                for (uint8_t i = 0; i < g_bpLen; ++i) std::printf("%02X", g_bpData[i]);
+                std::printf("\n");
+                ++values;
+            }
+        }
+        std::printf("# objects=%d values=%d\n", objects, values);
+        tun.setPropertyCallback(nullptr);
+        tun.disconnect();
+        socketCleanup();
+        return 0;
+    }
+
+    // `ftc -i <ip> busprop read|write <pa> <objIdx> <pid> …` — A_PropertyValue_Read/Write over the BUS via a
+    // self-owned tunnel, so it reaches any TP device, not just the interface. Note the addressing difference
+    // from `prop`: the bus service takes an object INDEX (0 = device object), the management channel takes an
+    // object TYPE. Diagnostic tool; prints exactly what came back.
+    if (pos.size() >= 5 && pos[0] == "busprop" && (pos[1] == "read" || pos[1] == "write"))
+    {
+        const bool doWrite = pos[1] == "write";
+        unsigned pa_a = 0, pa_l = 0, pa_d = 0;
+        if (std::sscanf(pos[2].c_str(), "%u.%u.%u", &pa_a, &pa_l, &pa_d) != 3)
+        {
+            std::fprintf(stderr, "busprop: <pa> must look like 5.0.7\n");
+            socketCleanup();
+            return 2;
+        }
+        const uint16_t pa = (uint16_t)((pa_a << 12) | (pa_l << 8) | pa_d);
+        const uint8_t objIdx = (uint8_t)std::strtoul(pos[3].c_str(), nullptr, 0);
+        const uint8_t pid = (uint8_t)std::strtoul(pos[4].c_str(), nullptr, 0);
+
+        uint16_t startIdx = doWrite ? 0 : 1;
+        uint8_t noe = 1;
+        std::vector<uint8_t> payload;
+        if (doWrite)
+        {
+            if (pos.size() < 7)
+            {
+                std::fprintf(stderr, "usage: busprop write <pa> <objIdx> <pid> <startIdx> <hex...>\n");
+                socketCleanup();
+                return 2;
+            }
+            startIdx = (uint16_t)std::strtoul(pos[5].c_str(), nullptr, 0);
+            std::string hex;
+            for (size_t i = 6; i < pos.size(); ++i) hex += pos[i];
+            for (size_t i = 0; i + 1 < hex.size(); i += 2)
+                payload.push_back((uint8_t)std::strtoul(hex.substr(i, 2).c_str(), nullptr, 16));
+        }
+        else
+        {
+            if (pos.size() >= 6) startIdx = (uint16_t)std::strtoul(pos[5].c_str(), nullptr, 0);
+            if (pos.size() >= 7) noe = (uint8_t)std::strtoul(pos[6].c_str(), nullptr, 0);
+        }
+
+        KnxIpTunnel tun;
+        if (!tun.connect(ip, port))
+        {
+            std::fprintf(stderr, "busprop: tunnel connect failed (status %d)\n", tun.lastConnectStatus());
+            socketCleanup();
+            return 1;
+        }
+        g_bpPa = pa; g_bpObj = objIdx; g_bpPid = pid; g_bpSeen = false; g_bpLen = 0;
+        tun.setPropertyCallback(&busPropAnswer);
+
+        const bool sent = doWrite
+            ? tun.sendPropertyValueWrite(pa, objIdx, pid, noe, startIdx, payload.data(), (uint8_t)payload.size())
+            : tun.sendPropertyValueRead(pa, objIdx, pid, noe, startIdx);
+        std::printf("busprop %s pa=%u.%u.%u objIdx=%u PID=%u startIdx=%u noe=%u",
+                    doWrite ? "write" : "read ", pa_a, pa_l, pa_d, objIdx, pid, startIdx, noe);
+        if (doWrite) { std::printf(" data="); for (uint8_t b : payload) std::printf("%02X", b); }
+        std::printf("\n");
+
+        int rc = 0;
+        if (!sent) { std::printf("  -> SEND FAILED\n"); rc = 4; }
+        else
+        {
+            const uint64_t until = ftc::detail::nowMs() + 3000;
+            while (!g_bpSeen && ftc::detail::nowMs() < until)
+                tun.pump();
+            if (g_bpSeen)
+            {
+                std::printf("  -> %u byte: ", (unsigned)g_bpLen);
+                for (uint8_t i = 0; i < g_bpLen; ++i) std::printf("%02X", g_bpData[i]);
+                std::printf("\n");
+            }
+            else { std::printf("  -> NO ANSWER\n"); rc = 4; }
+        }
+        tun.setPropertyCallback(nullptr);
+        tun.disconnect();
+        socketCleanup();
+        return rc;
+    }
+
+    // `ftc -i <ip> prop read|write <iot> <inst> <pid> …` (no PA) — raw Local Device Management on the
+    // interface itself (cEMI M_PropRead / M_PropWrite, 03_06_03 §4.1.7.3). Diagnostic access by number:
+    // it prints what the server actually answered, including the cEMI error code behind a refusal.
+    //   read   <iot> <inst> <pid> [startIdx=1] [noe=1]
+    //   write  <iot> <inst> <pid> <startIdx> <hex…>      startIdx 0 addresses the array element count
+    if (pos.size() >= 5 && pos[0] == "prop" && (pos[1] == "read" || pos[1] == "write"))
+    {
+        const bool doWrite = pos[1] == "write";
+        const uint16_t iot = (uint16_t)std::strtoul(pos[2].c_str(), nullptr, 0);
+        const uint8_t inst = (uint8_t)std::strtoul(pos[3].c_str(), nullptr, 0);
+        const uint8_t pid = (uint8_t)std::strtoul(pos[4].c_str(), nullptr, 0);
+
+        uint16_t startIdx = doWrite ? 0 : 1;
+        uint8_t noe = 1;
+        std::vector<uint8_t> payload;
+        if (doWrite)
+        {
+            if (pos.size() < 7)
+            {
+                std::fprintf(stderr, "usage: prop write <iot> <inst> <pid> <startIdx> <hex...>\n");
+                socketCleanup();
+                return 2;
+            }
+            startIdx = (uint16_t)std::strtoul(pos[5].c_str(), nullptr, 0);
+            std::string hex;
+            for (size_t i = 6; i < pos.size(); ++i) hex += pos[i];
+            for (size_t i = 0; i + 1 < hex.size(); i += 2)
+                payload.push_back((uint8_t)std::strtoul(hex.substr(i, 2).c_str(), nullptr, 16));
+        }
+        else
+        {
+            if (pos.size() >= 6) startIdx = (uint16_t)std::strtoul(pos[5].c_str(), nullptr, 0);
+            if (pos.size() >= 7) noe = (uint8_t)std::strtoul(pos[6].c_str(), nullptr, 0);
+        }
+
+        ftc::DevMgmtSession dm;
+        std::string err;
+        if (!dm.open(ip, port, &err))
+        {
+            std::fprintf(stderr, "prop: connect failed: %s\n", err.c_str());
+            socketCleanup();
+            return 1;
+        }
+
+        uint8_t propErr = 0;
+        int rc = 0;
+        if (doWrite)
+        {
+            const ftc::DmRead r = dm.writeEx(iot, inst, pid, startIdx, 1, payload.data(), payload.size(), &propErr);
+            std::printf("prop write IOT=%u inst=%u PID=%u startIdx=%u noe=1 data=", iot, inst, pid, startIdx);
+            for (uint8_t b : payload) std::printf("%02X", b);
+            std::printf("\n");
+            if (r == ftc::DmRead::Data)
+                std::printf("  -> POSITIVE con (accepted)\n");
+            else if (r == ftc::DmRead::Negative)
+            {
+                std::printf("  -> NEGATIVE con  error=0x%02X (%s)\n", propErr, ftc::dmPropErrorName(propErr));
+                rc = 3;
+            }
+            else { std::printf("  -> NO ANSWER\n"); rc = 4; }
+        }
+        else
+        {
+            uint8_t out[256];
+            size_t outLen = 0;
+            const ftc::DmRead r = dm.readEx(iot, inst, pid, (uint8_t)startIdx, noe, out, sizeof(out), outLen, &propErr);
+            std::printf("prop read  IOT=%u inst=%u PID=%u startIdx=%u noe=%u\n", iot, inst, pid, startIdx, noe);
+            if (r == ftc::DmRead::Data)
+            {
+                std::printf("  -> %zu byte: ", outLen);
+                for (size_t i = 0; i < outLen; ++i) std::printf("%02X", out[i]);
+                std::printf("\n");
+            }
+            else if (r == ftc::DmRead::Negative)
+            {
+                std::printf("  -> NEGATIVE con  error=0x%02X (%s)\n", propErr, ftc::dmPropErrorName(propErr));
+                rc = 3;
+            }
+            else { std::printf("  -> NO ANSWER\n"); rc = 4; }
+        }
+        dm.close();
         socketCleanup();
         return rc;
     }
