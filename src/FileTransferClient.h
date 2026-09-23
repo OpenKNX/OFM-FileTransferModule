@@ -912,6 +912,7 @@ class FileTransferClient : public OpenKNX::Module
     uint32_t _ftcFsTotal = 0, _ftcFsUsed = 0; // last FilesystemInfo answer (total, used bytes)
     uint8_t _ftcFsPurpose = 0;                // 0 = df, 1 = pre-upload space check, 2 = ll footer
     bool _ftcFsKb = false;                    // last answer was in KB (provider, status 0x01) vs bytes (LittleFS)
+    bool _ftcFsDriveAsked = false;            // request named sd//efc/ -> status 0x00 means the target ignored it
     uint32_t _ftcTargetHave = 0;              // existing target file's size (FtcResumeInfo) -> overwrite credit for the space check
     // Cooperative prefix-CRC (FtcCrcPrefix) state -- CRC a chunk per loop() pass, never one blocking read:
     uint32_t _crcOff = 0;             // bytes CRC'd so far

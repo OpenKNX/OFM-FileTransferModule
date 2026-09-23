@@ -2275,7 +2275,14 @@ void FileTransferModule::cmdFilesystemInfo(uint8_t length, uint8_t *data, uint8_
     uint8_t status = 0x00;
 #if defined(OPENKNX_SDCARD) || defined(OPENKNX_EXTFLASH)
     const char *rel;
-    const uint8_t drive = (length > 0 && data && data[0]) ? ftmDrive((const char *)data, &rel) : FD_INT;
+    // This command names a DRIVE, so a bare "sd" can only mean the drive. ftmDrive() keeps requiring the
+    // slash, because in a path "sd" is the file named sd.
+    const char *req = (length > 0 && data && data[0]) ? (const char *)data : "";
+    const size_t reqLen = strnlen(req, length);
+    char norm[8] = {0};
+    if (reqLen == 2 && memcmp(req, "sd", 2) == 0) { memcpy(norm, "sd/", 4); req = norm; }
+    else if (reqLen == 3 && memcmp(req, "efc", 3) == 0) { memcpy(norm, "efc/", 5); req = norm; }
+    const uint8_t drive = (*req) ? ftmDrive(req, &rel) : FD_INT;
     if (drive != FD_INT)
     {
         uint64_t t = 0, f = 0;

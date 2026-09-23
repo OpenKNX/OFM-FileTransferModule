@@ -444,7 +444,9 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
     if (strcmp(sub, "df") == 0)
     {
-        _client.requestFsInfo(pa, argc >= 3 ? arg : ""); // "sd/" / "efc/" -> that provider; else LittleFS
+        // requestFsInfo() accepts the bare drive name. In PATH commands the slash stays load-bearing:
+        // "rm sd" must keep meaning the file named sd on the internal filesystem.
+        _client.requestFsInfo(pa, arg); // "sd" / "sd/" / "efc" / "efc/" -> that provider; else LittleFS
         return true;
     }
     if (strcmp(sub, "info") == 0 || strcmp(sub, "i") == 0)

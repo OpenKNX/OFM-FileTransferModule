@@ -2920,6 +2920,10 @@ void FileTransferClient::requestFsInfo(uint16_t pa, const char *path)
     _fsInfo.valid = false;
     knx.bau().ftcSetResponseCallback(ftcOnResponse);
     _ftcTarget = pa;
+    // df names a DRIVE, never a path, so the bare form is valid. Normalised here because the device
+    // console, the host CLI and the web client all come through this one function.
+    if (path && strcmp(path, "sd") == 0) path = "sd/";
+    else if (path && strcmp(path, "efc") == 0) path = "efc/";
     openknx.logger.logWithPrefixAndValues("FTC", "df -> %u.%u.%u", FTC_PA_ARGS(pa));
     ftcSendFsInfo(0, path); // 0 = standalone df
 }
@@ -2978,6 +2982,9 @@ void FileTransferClient::ftcRetryCmd(const char *sub, const char *val)
 void FileTransferClient::ftcSendFsInfo(uint8_t purpose, const char *path)
 {
     _ftcFsPurpose = purpose;
+    // Only a provider prefix counts as a named drive: "/" is the documented prefix for the INTERNAL
+    // filesystem, so treating any non-empty path as a drive reported "unknown drive" for `df /`.
+    _ftcFsDriveAsked = (path && (strncmp(path, "sd/", 3) == 0 || strncmp(path, "efc/", 4) == 0));
     _ftcTxLen = 0;
     uint8_t payloadLen = 0;
     if (path && *path) // "sd/…" / "efc/…" -> the server routes to that provider; empty -> LittleFS (unchanged)
@@ -7033,6 +7040,16 @@ void FileTransferClient::loop(bool configured)
                     }
                     if (_ftcFsPurpose == 0)
                         openknx.logger.logWithPrefix("FTC", "df: target did not report filesystem size (old server?)");
+                    ftcFinish();
+                    return;
+                }
+
+                // Status 0x00 is set only when the server resolved NO drive, so a named drive plus 0x00
+                // means it did not route the request. Printing the internal figures under the drive's name
+                // reported an SD card on every device without one. df only: the space check must not block.
+                if (_ftcFsDriveAsked && !_ftcFsKb && _ftcFsPurpose == 0)
+                {
+                    openknx.logger.logWithPrefix("FTC", "df: the target did not route that drive -- it answered for its internal filesystem (no such provider, or an FTM too old to read the drive)");
                     ftcFinish();
                     return;
                 }

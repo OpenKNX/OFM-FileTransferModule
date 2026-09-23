@@ -1053,6 +1053,7 @@ static bool ftcLineHook(const std::string& in, uint8_t color)
                              low.find("session expired") != std::string::npos ||
                              low.find("apply skipped") != std::string::npos ||
                              low.find("apply aborted") != std::string::npos ||
+                             low.find("did not route that drive") != std::string::npos ||
                              low.find("refuses writes") != std::string::npos;
         if (!mustSee) return true;
     }
