@@ -185,7 +185,18 @@ function Invoke-FtmSuiteResponse {
         # After a timeout the next command must work immediately. If the previous state was
         # not finished, the next one either blocks or reports the previous result.
         $first = Invoke-FtmConsoleCommand -Console $con -Command "ftc 15.15.254 info x" -TimeoutMs 60000
-        Add-FtmEvidence -Note 'first command aimed at an unreachable target'
+        Add-FtmEvidence -Output $first -Note 'first command aimed at an unreachable target'
+        # The console falls silent while the lookup still runs against its own deadline, so the quiet
+        # window is not the end of the operation. Without this wait the case asks the next question
+        # mid-operation and reads the correct "busy" as a defect - it was red and green on alternate
+        # runs of the same firmware.
+        # Never returning to idle IS the defect this case looks for, so a timeout here fails rather
+        # than skips. The bound is derived, not picked: an unanswered info ends on FTC_TIMEOUT, 6 s
+        # (FileTransferClient.cpp), so 20 s leaves room for the poll interval without tolerating a
+        # deadline that regressed - a 90 s bound would let a 60 s client pass.
+        $idle = Wait-FtmClientIdle -Console $con -Target $t -TimeoutMs 20000
+        Add-FtmEvidence -Note "client idle again after the unreachable-target lookup: $idle"
+        Assert-FtmTrue $idle 'the client was still busy 20 s after a lookup to an unreachable target - the operation never reached a terminal state (FTC_TIMEOUT is 6 s)'
         $second = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ping" -TimeoutMs 20000
         Add-FtmEvidence -Output $second
         Assert-FtmTrue ($second.Trim().Length -gt 0) 'the command after a timed-out one produced no output - the client is still busy'
