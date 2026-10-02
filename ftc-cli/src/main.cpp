@@ -1072,6 +1072,7 @@ static bool ftcLineHook(const std::string& in, uint8_t color)
                              low.find("existence check") != std::string::npos ||
                              low.find("session expired") != std::string::npos ||
                              low.find("apply skipped") != std::string::npos ||
+                             low.find("version probe") != std::string::npos ||
                              low.find("apply aborted") != std::string::npos ||
                              low.find("did not route that drive") != std::string::npos ||
                              low.find("refuses writes") != std::string::npos;
@@ -2502,12 +2503,12 @@ static std::vector<std::pair<std::string, std::string>> xferReportRows(const Ftc
     static const char* WS_EN[4] = {"probing", "settled", "pinned", "backing off"};
     const uint8_t ws = st.windowState < 4 ? st.windowState : 0;
 
-    static const char* DENIED_EN[5] = {"", "no CheckFeatures answer", "target has no fast", "chunk cap", "target refused"};
-    static const char* DENIED_DE[5] = {"", "keine CheckFeatures-Antwort", "Ziel kann kein fast", "Chunk-Grenze", "Ziel lehnte ab"};
+    static const char* DENIED_EN[6] = {"", "no CheckFeatures answer", "target has no fast", "chunk cap", "target refused", "not on this server version"};
+    static const char* DENIED_DE[6] = {"", "keine CheckFeatures-Antwort", "Ziel kann kein fast", "Chunk-Grenze", "Ziel lehnte ab", "gibt es auf dieser Server-Version nicht"};
     if (r.mode == 1)
         std::snprintf(b, sizeof(b), "fast · %s %u (%s)", L.tr("window", "Fenster"), (unsigned)st.window,
                       L.tr(WS_EN[ws], WS_DE[ws]));
-    else if (setup.fastDenied && setup.fastDenied < 5)
+    else if (setup.fastDenied && setup.fastDenied < 6)
         std::snprintf(b, sizeof(b), "safe · %s: %s", L.tr("fast refused", "fast abgelehnt"),
                       L.tr(DENIED_EN[setup.fastDenied], DENIED_DE[setup.fastDenied]));
     else
@@ -4435,18 +4436,32 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             const FtcDeviceInfo& d = openknxFileTransferClient.deviceInfo();
             rc = d.valid ? 0 : 1;
             const unsigned maj = (d.ftmVersion >> 8) & 0xFF, min = (d.ftmVersion >> 4) & 0x0F, rev = d.ftmVersion & 0x0F;
+            // A legacy server has no CheckFeatures, so its feature byte is 0 because it cannot SAY.
+            // Printing "(none)" there reads as "this device can nothing" -- it is shown as derived instead.
+            const uint32_t fb = d.ftmLegacy ? d.ftmCan : d.features;
             std::string feat;
-            if (d.features & ftc::FEAT_RESUME) feat += "Resume ";
-            if (d.features & ftc::FEAT_UPDATE) feat += "Update ";
-            if (d.features & ftc::FEAT_FAST) feat += "Fast ";
-            if (d.features & ftc::FEAT_CONSOLE) feat += "Console ";
-            if (d.features & ftc::FEAT_GZIP_UPDATE) feat += "Gzip ";
-            if (d.features & ftc::FEAT_DELTA) feat += "Delta ";
-            if (d.features & ftc::FEAT_AUTH_REQUIRED) feat += "Password ";
-            if (d.features & ftc::FEAT_WRITES_DISABLED) feat += "Locked ";
-            if (feat.empty()) feat = "(none)";
-            else
-                feat.pop_back();
+            if (fb & ftc::FEAT_RESUME) feat += "Resume ";
+            // Derived (no CheckFeatures answer on a legacy server): FwUpdate exists on the RP2040 builds of
+            // those versions and not on their ESP32 builds, and the MCU is not readable here -- so the bit
+            // is shown with a question mark, never as a fact.
+            if (fb & ftc::FEAT_UPDATE) feat += "Update ";
+            if (fb & ftc::FEAT_FAST) feat += "Fast ";
+            if (fb & ftc::FEAT_CONSOLE) feat += "Console ";
+            if (fb & ftc::FEAT_GZIP_UPDATE) feat += "Gzip ";
+            if (fb & ftc::FEAT_DELTA) feat += "Delta ";
+            if (fb & ftc::FEAT_AUTH_REQUIRED) feat += "Password ";
+            if (fb & ftc::FEAT_WRITES_DISABLED) feat += "Locked ";
+            if (!feat.empty()) feat.pop_back();
+            const std::string featTokens = feat.empty() ? "(none)" : feat; // the quiet form stays machine-readable
+            if (d.ftmDerived && (fb & ftc::FEAT_UPDATE)) feat.replace(feat.find("Update"), 6, "Update?"); // the panel's question mark
+            if (d.ftmLegacy)
+                feat = feat.empty() ? L.tr("FTM before 0.2.0 - upload only", "FTM vor 0.2.0 - nur Upload")
+                                    : feat + (d.ftmDerived ? L.tr("  (FTM before 0.2.0, derived from its version; resume withheld by this client; ? = RP2040/2350 builds only, unconfirmed)",
+                                                                   "  (FTM vor 0.2.0, aus seiner Version abgeleitet; Fortsetzen von diesem Client zurückgehalten; ? = nur RP2040/2350-Builds, unbestätigt)")
+                                                           : L.tr("  (FTM before 0.2.0; resume withheld by this client)",
+                                                                  "  (FTM vor 0.2.0; Fortsetzen von diesem Client zurückgehalten)"));
+            else if (feat.empty())
+                feat = "(none)";
             char vbuf[16];
             std::snprintf(vbuf, sizeof(vbuf), "%u.%u.%u", maj, min, rev);
             if (quiet)
@@ -4463,7 +4478,8 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 if (d.haveHw) std::printf("hardware\t%02X%02X%02X%02X%02X%02X\n", d.hardware[0], d.hardware[1], d.hardware[2], d.hardware[3], d.hardware[4], d.hardware[5]);
                 if (d.haveVersion) std::printf("version\t[%u] %u.%u\n", (d.version >> 11) & 0x1F, (d.version >> 6) & 0x1F, d.version & 0x3F);
                 if (d.ftmVersion) std::printf("ftm_version\t%s\n", vbuf);
-                std::printf("features\t%s\n", feat.c_str());
+                std::printf("features\t%s\n", featTokens.c_str());
+                if (d.ftmLegacy) std::printf("ftm_legacy\t1\nftm_derived\t%d\n", d.ftmDerived ? 1 : 0);
                 std::printf("progmode\t%d\n", d.progMode ? 1 : 0);
                 if (d.appState != 0xFF) std::printf("app_state\t%s\n", ftcLoadNameH(d.appState));
                 if (d.addrTableState != 0xFF) std::printf("addr_table\t%s\n", ftcLoadNameH(d.addrTableState));
@@ -7067,16 +7083,28 @@ int main(int argc, char** argv)
         // The Update bit is the device's own statement that it can install a firmware. Absent, we do not
         // guess why: a silent file-transfer server and an old one look identical from here, and saying
         // "too old" when the device simply did not answer would send the user after the wrong problem.
-        const bool canSelfApply = (di.features & 0x02) != 0;
-        if (!canSelfApply)
+        // On a legacy server the feature byte does not exist, so "absent" means it cannot SAY, not that it
+        // cannot act: FwUpdate has been there since 0.0.4 and its frame never moved. ftmCan carries what
+        // the version implies, in the same bit numbering, so this one test covers both kinds of target.
+        const bool canSelfApply = (di.ftmCan & 0x02) != 0;
+        if (canSelfApply && di.ftmDerived)
+            // Derived from the version, not reported: no feature byte arrived from this legacy server (a
+            // 0.0.4 build has none to give, a 0.1.x answer was lost). Those versions carry FwUpdate on their
+            // RP2040/2350 builds only, so the apply is sent unconfirmed and the restart is watched.
+            g_tpl.status(ftc::Tpl::Stat::Warn,
+                         L.tr("FTM before 0.2.0, no feature byte arrived: self-apply exists on its RP2040/2350 builds only",
+                              "FTM vor 0.2.0, kein Merkmalsbyte erhalten: Selbst-Einspielen gibt es nur in seinen RP2040/2350-Builds"),
+                         {L.tr("the apply is sent unconfirmed and the restart is watched",
+                               "das Einspielen wird unbestätigt gesendet und der Neustart beobachtet")});
+        else if (!canSelfApply)
             g_tpl.status(ftc::Tpl::Stat::Warn,
                          L.tr("this device did not offer to install a firmware itself",
                               "dieses Gerät hat nicht angeboten, eine Firmware selbst einzuspielen"),
                          {di.ftmVersion == 0
                               ? L.tr("its file-transfer server did not answer",
                                      "sein Dateitransfer-Server hat nicht geantwortet")
-                              : L.tr("its file-transfer server is too old for this",
-                                     "sein Dateitransfer-Server ist dafür zu alt"),
+                              : L.tr("its file-transfer server reports no self-apply (not an RP2040/2350 build, or the feature is off)",
+                                     "sein Dateitransfer-Server meldet kein Selbst-Einspielen (kein RP2040/2350-Build, oder abgeschaltet)"),
                           L.tr("the firmware would be transferred but not installed",
                                "die Firmware würde übertragen, aber nicht eingespielt")});
 
@@ -7110,9 +7138,16 @@ int main(int argc, char** argv)
                                    "der Dateitransfer ist auf diesem Gerät abgeschaltet")});
                 break;
             default:
-                g_tpl.status(ftc::Tpl::Stat::Idle, L.tr("access", "Zugriff"),
-                             {L.tr("this device did not answer the access question",
-                                   "dieses Gerät hat die Zugriffsfrage nicht beantwortet")});
+                // Access control arrived with FTM 0.2.0 (packed version: maj<<8 | min<<4 | rev). An older
+                // server has nothing to answer, and saying "did not answer" would send the user after a fault.
+                if (di.ftmVersion != 0 && di.ftmVersion < 0x0020)
+                    g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("access", "Zugriff"),
+                                 {L.tr("this file-transfer server has no access control (it arrived with FTM 0.2.0)",
+                                       "dieser Dateitransfer-Server hat keine Zugriffskontrolle (kam erst mit FTM 0.2.0)")});
+                else
+                    g_tpl.status(ftc::Tpl::Stat::Idle, L.tr("access", "Zugriff"),
+                                 {L.tr("this device did not answer the access question",
+                                       "dieses Gerät hat die Zugriffsfrage nicht beantwortet")});
                 break;
         }
 
@@ -7121,9 +7156,18 @@ int main(int argc, char** argv)
         // byte used to read as "cannot do anything" -- so a device that supports differences quietly
         // received the full image, an hour instead of two minutes, with nothing said. The capability half
         // is stable, so the device-info reading of the same byte stands in for it.
-        const bool capAnswered = acc.answered || di.features != 0;
-        const uint8_t capBits = acc.answered ? acc.bits : di.features;
-        if (!capAnswered && !knxotaCheck)
+        // A legacy server is a THIRD case: it answers nothing because it has no CheckFeatures, and what it
+        // can is known from its version. Saying "it did not say" there would send the user after a fault
+        // that does not exist -- it is simply an older server, and the reasons below are exact, not a guess.
+        const bool capAnswered = acc.answered || di.features != 0 || di.ftmLegacy;
+        const uint8_t capBits = acc.answered ? acc.bits : (di.ftmLegacy ? di.ftmCan : (uint8_t)di.features);
+        if (di.ftmLegacy && !knxotaCheck)
+            g_tpl.status(ftc::Tpl::Stat::Warn,
+                         L.tr("FTM before 0.2.0 - sending the full image, uncompressed",
+                              "FTM vor 0.2.0 - es geht das Voll-Image, unkomprimiert"),
+                         {L.tr("a difference and compression both arrived with FTM 0.2.0",
+                               "Differenz und Komprimierung kamen beide erst mit FTM 0.2.0")});
+        else if (!capAnswered && !knxotaCheck)
             g_tpl.status(ftc::Tpl::Stat::Warn,
                          L.tr("the device did not say what it can do - sending the full image, uncompressed",
                               "das Gerät hat nicht gesagt, was es kann - es geht das Voll-Image, unkomprimiert"),
@@ -8239,13 +8283,16 @@ int main(int argc, char** argv)
             std::snprintf(mb, sizeof(mb), "0x%04X", d.mask);
             char fw[16] = "";
             if (d.haveVersion) std::snprintf(fw, sizeof(fw), "%u.%u", (d.version >> 6) & 0x1F, d.version & 0x3F);
+            // Same rule as the info block: a legacy server reports nothing, so what it CAN is derived.
+            const uint32_t hb = d.ftmLegacy ? d.ftmCan : d.features;
             std::string feat;
-            if (d.features & ftc::FEAT_FAST) feat += "Fast ";
-            if (d.features & ftc::FEAT_CONSOLE) feat += "Console ";
-            if (d.features & ftc::FEAT_RESUME) feat += "Resume ";
-            if (d.features & ftc::FEAT_UPDATE) feat += "Update ";
-            if (d.features & ftc::FEAT_DELTA) feat += "Delta ";
+            if (hb & ftc::FEAT_FAST) feat += "Fast ";
+            if (hb & ftc::FEAT_CONSOLE) feat += "Console ";
+            if (hb & ftc::FEAT_RESUME) feat += "Resume ";
+            if (hb & ftc::FEAT_UPDATE) feat += d.ftmDerived ? "Update? " : "Update "; // ? = derived, see the info block
+            if (hb & ftc::FEAT_DELTA) feat += "Delta ";
             if (!feat.empty()) feat.pop_back();
+            if (d.ftmLegacy) feat += std::string(feat.empty() ? "" : " ") + g_i18n.tr("(FTM before 0.2.0)", "(FTM vor 0.2.0)");
             tgtOrder = d.haveOrder ? d.order : std::string();
             tgtMask = mb;
             tgtCls = d.cls;
@@ -8659,15 +8706,65 @@ int main(int argc, char** argv)
         {
             ftc::I18n& L = g_i18n;
             std::fflush(stdout);
+            // The client's status says WHY: a legacy server without the tunnel (shown as "from FTM 0.2.0"), a
+            // current one built without the feature, one older than 0.0.4, or a lost CheckFeatures after a
+            // good ModuleVersion. Only true silence earns "check the address".
+            // Exit codes here: 6 = the target never answered (as everywhere else), 5 = it answered and the
+            // console is not available on it.
+            // Three classes: `local` = our own send failed (nothing reached the bus), `silent` = the target
+            // never answered anything, everything else = it answered and the reason is named (the known ones
+            // translated, the rest verbatim). Exit 6 covers local + silent, 5 the answered ones.
+            const std::string why = openknxFileTransferClient.status().message;
+            const bool local = why.find("cannot probe") != std::string::npos ||      // our own send failed:
+                               why.find("could not send") != std::string::npos;      // nothing reached the bus
+            const bool silent = why.empty() || why.find("no module version answer") != std::string::npos;
+            const bool legacyCon = why.find("no console tunnel") != std::string::npos;
+            const bool noFeature = why.find("no console feature") != std::string::npos;
+            const bool tooOld = why.find("not supported on this legacy") != std::string::npos;
+            const bool lostFeat = why.find("no CheckFeatures answer") != std::string::npos ||
+                                  why.find("no version answer after") != std::string::npos; // CheckFeatures answered, ModuleVersion lost
+            const bool unexpected = why.find("unexpected answer") != std::string::npos;
+            const bool openLost = why.find("console open unanswered") != std::string::npos;
+            const bool needLogin = why.find("login required") != std::string::npos;
+            const bool locked = why.find("console locked") != std::string::npos;
+            const bool inUse = why.find("console in use") != std::string::npos;
+            const bool answered = !silent && !local; // it is there; the console is not available right now / at all
+            const std::string reason =
+                legacyCon ? L.tr("this file-transfer server has no console tunnel - available from FTM 0.2.0",
+                                 "dieser Dateitransfer-Server hat keinen Konsolentunnel - gibt es erst ab FTM 0.2.0")
+                : noFeature ? L.tr("the device answers, but its firmware was built without the console",
+                                   "das Gerät antwortet, seine Firmware wurde aber ohne Konsole gebaut")
+                : tooOld ? L.tr("this file-transfer server is older than 0.0.4 - not supported",
+                                "dieser Dateitransfer-Server ist älter als 0.0.4 - nicht unterstützt")
+                : lostFeat ? L.tr("the device answers, but one probe answer was lost - try again",
+                                  "das Gerät antwortet, eine Antwort ging aber verloren - noch einmal versuchen")
+                : unexpected ? L.tr("the device answered the console open with something unexpected",
+                                    "das Gerät hat auf das Öffnen der Konsole unerwartet geantwortet")
+                : openLost ? L.tr("the device answers, but not the console open - try again",
+                                  "das Gerät antwortet, aber nicht auf das Öffnen der Konsole - noch einmal versuchen")
+                : needLogin ? L.tr("the console is password protected - log in first",
+                                   "die Konsole ist passwortgeschützt - erst anmelden")
+                : locked ? L.tr("the console is locked - programming mode, or ETS access is off",
+                                "die Konsole ist gesperrt - Programmiermodus, oder der ETS-Zugriff ist aus")
+                : inUse ? L.tr("the console is in use by another client - try again later",
+                               "die Konsole wird von einem anderen Client benutzt - später noch einmal")
+                : local ? L.tr("the probe could not be sent - no tunnel to the interface, or the send queue is full",
+                               "die Anfrage ging nicht raus - kein Tunnel zur Schnittstelle, oder der Sendepuffer ist voll")
+                : answered ? why
+                : L.tr("the target never answered", "das Ziel hat nicht geantwortet");
+            const std::string hint =
+                legacyCon || noFeature ? L.tr("update the device firmware to use the console",
+                                              "für die Konsole die Gerätefirmware aktualisieren")
+                : needLogin ? L.tr("run: ftc ", "ausführen: ftc ") + pos[0] + " login <pw>"
+                : answered || local ? std::string()
+                : L.tr("check the address, or whether the device is on the bus",
+                       "Adresse prüfen, oder ob das Gerät am Bus ist");
             if (quiet)
-                std::fprintf(stderr, "%s\n", L.tr("console: the target never answered",
-                                                  "Konsole: das Ziel hat nicht geantwortet"));
+                std::fprintf(stderr, "%s: %s\n", L.tr("console", "Konsole"), reason.c_str());
             else
                 g_ui.errorBlock(false, L.tr("the console did not open", "die Konsole ist nicht zustande gekommen"),
-                                {L.tr("the target never answered", "das Ziel hat nicht geantwortet")},
-                                L.tr("check the address, or whether the device is on the bus",
-                                     "Adresse prüfen, oder ob das Gerät am Bus ist"));
-            exitCode = 6; // 6 = no answer, as everywhere else
+                                {reason}, hint);
+            exitCode = answered ? 5 : 6;
         }
     }
     else if (isXferCmd)

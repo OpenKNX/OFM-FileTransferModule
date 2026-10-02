@@ -191,11 +191,12 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
     char buf[512];
     std::string out = "{";
     snprintf(buf, sizeof(buf),
-             "\"phase\":\"%s\",\"busy\":%s,\"ok\":%s,\"message\":\"%s\","
+             "\"phase\":\"%s\",\"busy\":%s,\"ok\":%s,\"unconfirmed\":%s,\"message\":\"%s\","
              "\"done\":%u,\"total\":%u,\"bps\":%u,\"chunk\":%u,\"chunks\":%u,"
              "\"window\":%u,\"windowState\":%u,\"target\":\"%s\","
              "\"resends\":%u,\"verifies\":%u,\"crcErrors\":%u",
-             ph, c->isBusy() ? "true" : "false", s.ok ? "true" : "false", jsonEsc(s.message).c_str(),
+             ph, c->isBusy() ? "true" : "false", s.ok ? "true" : "false", s.unconfirmed ? "true" : "false",
+             jsonEsc(s.message).c_str(),
              (unsigned)s.done, (unsigned)s.total, (unsigned)s.bps, (unsigned)s.chunk,
              (unsigned)s.chunks, (unsigned)s.window, (unsigned)s.windowState,
              paText(s.target).c_str(), (unsigned)s.resends, (unsigned)s.verifies,
@@ -231,10 +232,16 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
     if (devFresh)
     {
         snprintf(buf, sizeof(buf),
+                 // `feat` stays what the device REPORTED; `can` is what it can, which on a legacy server
+                 // is derived from its version because it has no CheckFeatures to answer with. The page
+                 // greys out on `can` and shows `legacy` -- otherwise a zero byte reads as "can nothing".
                  ",\"dev\":{\"pa\":\"%s\",\"cls\":\"%s\",\"mask\":%u,\"ftm\":%u,\"feat\":%u,"
+                 "\"can\":%u,\"legacy\":%s,\"derived\":%s,"
                  "\"prog\":%s,\"mfr\":%u,\"apdu\":%u,\"router\":%s",
                  paText(_featPa).c_str(), jsonEsc(d.cls).c_str(), (unsigned)d.mask,
-                 (unsigned)d.ftmVersion, (unsigned)d.features, d.progMode ? "true" : "false",
+                 (unsigned)d.ftmVersion, (unsigned)d.features,
+                 (unsigned)d.ftmCan, d.ftmLegacy ? "true" : "false", d.ftmDerived ? "true" : "false",
+                 d.progMode ? "true" : "false",
                  (unsigned)d.manufacturer, (unsigned)d.maxApdu, d.isRouter ? "true" : "false");
         out += buf;
         if (d.haveOrder) { out += ",\"order\":\""; out += jsonEsc(d.order); out += "\""; }

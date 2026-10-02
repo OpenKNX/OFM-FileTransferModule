@@ -48,6 +48,30 @@ details.log > summary:hover { color:#555; }
 .steps .fm-tab .n.green { background:#449841; }
 .steps .fm-tab.locked { opacity:.5; cursor:not-allowed; }
 .steps .fm-tab.locked:hover { background:transparent; }
+/* locked = a job the target cannot do: dimmed, still clickable so the step-2 light can name the reason.
+   dead (below) = FTM before 0.2.0: not selectable, the tag on the tab says why. A legacy tab carries both;
+   dead wins. */
+#pane2 .fm-tabs .fm-tab.locked { opacity:.45; }
+/* The notice for a target with an old FTM: one look, above the steps, with a symbol -- grey text sank. */
+.warnbox { display:flex; gap:12px; align-items:flex-start; background:#fff8e6; border:1px solid #e8c36a;
+           border-left:4px solid #c98a00; padding:10px 14px; margin:0 0 10px; color:#5a3d00; font-size:.9em; line-height:1.45; }
+.warnbox b { color:#8a5a00; }
+.warnbox svg { flex:0 0 20px; margin-top:1px; }
+/* Tag on a control the target lacks: the reason, right where the control is. */
+.na { display:inline-block; font-size:.74em; color:#8a5a00; background:#fff3d6; border:1px solid #e8c36a;
+      border-radius:3px; padding:1px 6px; margin-left:8px; vertical-align:middle; font-weight:400; }
+/* Every disabled control on the page, dimmed the same way; #otaStart keeps its own disabled look. */
+#ota button:disabled:not(#otaStart), #ota select:disabled { opacity:.45; cursor:not-allowed; }
+/* A switch is dimmed as a whole (box + text), once -- dimming the box on its own would stack two opacities. */
+#ota .ota-sw label:has(input:disabled) { opacity:.45; cursor:not-allowed; }
+#ota button:disabled:not(#otaStart):hover { border-color:#d0d0d0; }
+#pane2 .fm-tabs .fm-tab.dead { pointer-events:none; opacity:.42; }
+/* Capability list: one sign per feature, not a sentence. */
+.caps { display:flex; flex-wrap:wrap; gap:6px 20px; font-size:.85em; margin-top:8px; color:#555; }
+.caps span { display:inline-flex; align-items:center; gap:6px; }
+.caps .ci { width:14px; height:14px; flex:0 0 14px; }
+.caps .cap-no { color:#777; } .caps .cap-ok { color:#2e7d32; } .caps .cap-q { color:#8a5a00; }
+.caps .caps-hint { flex:0 0 100%; color:#888; font-size:.9em; }
 .steps .fm-tab .st { font-size:.8em; color:#888; font-weight:400; }
 .steps .fm-tab.active .st { color:#555; }
 @media (max-width:620px){ .steps .fm-tab .st { display:none; } }
@@ -64,8 +88,6 @@ details.log > summary:hover { color:#555; }
 
 .ota-hint { font-size:.82em; color:#888; margin:6px 0 0; }
 .ota-hint.warn { color:#8a5a00; } .ota-hint.err { color:#c62828; }
-.caps { font-size:.85em; margin-top:8px; color:#555; }
-.caps .no { color:#999; }
 .ota-sw { display:flex; flex-wrap:wrap; gap:6px 24px; margin-top:10px; }
 .ota-sw label { display:flex; align-items:center; gap:7px; font-size:.88em; color:#333; cursor:pointer; }
 .ota-sw input { accent-color:#449841; margin:0; }

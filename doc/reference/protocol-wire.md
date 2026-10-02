@@ -308,10 +308,15 @@ CHUNK req : [seqLo][seqHi]                   seq LITTLE-endian
 ```
 DirList  req : [dir\0]     ans : [00][type][name...]   type 0=no more, 1=file, 2=dir   (FileTransferModule.cpp:669-701; decode :3670)
 ModuleVer ans : [majHi][majLo][minHi][minLo][revHi][revLo]   6 B, each field BIG-endian   (:513-522; decode :4311-4313)
-CheckFeat ans : [flags]   bit0(0x01)=Resume, bit1(0x02)=Update, bit2(0x04)=FAST, bit3(0x08)=Console  (:1010-1023)
+CheckFeat ans : [flags]   0x01=Resume 0x02=Update 0x04=FAST 0x08=Console 0x10=AuthRequired
+                          0x20=WritesDisabled 0x40=GzipUpdate 0x80=Delta          (cmdCheckFeatures)
 ```
-- CheckFeatures flags built `FileTransferModule.cpp:1012-1021`: `0x01` always; `0x02` on RP2040/ESP32;
-  `0x04` always (server understands cmd44/45); `0x08` only if `OPENKNX_FTC_CONSOLE`. Decode `FileTransferClient.cpp:3050,3600`.
+- CheckFeatures flags, built in `cmdCheckFeatures`: `0x01` always; `0x02` on RP2040/ESP32 **and** only when
+  `otaSlotAvailable()`; `0x04` with `OPENKNX_FTC_FASTUPLOAD`; `0x08` with `OPENKNX_FTC_CONSOLE`; `0x10` when
+  the access stage is Password and `0x20` while writes are refused (both `OPENKNX_FTC_SECURITY`, and both
+  re-read per call -- they are state, not capability); `0x40` on ESP32 with `OPENKNX_FTC_GZIP_UPDATE` + a
+  slot; `0x80` with `OPENKNX_FTC_DELTA_UPDATE` + a slot. Take the list from the function, not from here:
+  four of these bits were missing from this table until 2026-09.
 
 ---
 

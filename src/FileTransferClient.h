@@ -107,6 +107,7 @@ struct FtcStatus
     uint16_t crcErrors = 0;        // CRC mismatches encountered (a retry is made for each)
     uint16_t resends = 0;          // chunk/window retransmits fired
     bool ok = false;
+    bool unconfirmed = false;      // ok, but the target could not confirm the apply (legacy FTM): watch for its restart
     uint32_t crc = 0;              // last verify / info CRC-32
     char path[FTC_PATH_MAX] = {0};
     char message[40] = {0};        // short human status ("resuming", "up to date", "fs full?" ...)
@@ -154,6 +155,12 @@ struct FtcDeviceInfo
     uint8_t hardware[6] = {0}; bool haveHw = false;
     uint16_t version = 0;      bool haveVersion = false; // PDT_VERSION [magic:5][ver:5][rev:6]
     uint16_t ftmVersion = 0;
+    // Resolved from ftmVersion once, so the CLI, the web page and the transfer paths cannot disagree
+    // about what this target can do. A legacy server reports NO features at all -- its zero feature byte
+    // means "cannot say", never "cannot do", and every surface has to show that difference.
+    bool ftmLegacy = false;    // served, but older than the current wire generation
+    bool ftmDerived = false;   // ftmCan was INFERRED from the version (hand-maintained era, no CheckFeatures)
+    uint8_t ftmCan = 0;        // what it can, as the FEAT_* bits -- derived, not reported, on a legacy target
     uint16_t maxApdu = 0;      // PID_MAX_APDU_LENGTH of the TARGET (0 = it did not report one)
     uint8_t devControl = 0;    bool haveDevControl = false; // bit0 safe state · bit2 verify mode · bit1 own addr sent
     bool isRouter = false;                                  // a Router Object was found -> the two rows below apply
@@ -198,7 +205,7 @@ struct FtcTransferSetup
     uint32_t size = 0;                   // total bytes to transfer (0 = unknown yet, e.g. download pre-open)
     bool hasCrc = false; uint32_t crc = 0; // source CRC32 known up-front (perf deterministic pattern)
     uint8_t mode = 0;                    // FtcMode: 0 safe · 1 fast -- the NEGOTIATED mode, not the requested one
-    uint8_t fastDenied = 0;              // why fast fell back: 0 none · 1 no answer · 2 no FAST bit · 3 chunk cap · 4 target refused
+    uint8_t fastDenied = 0;              // why fast fell back: 0 none · 1 no answer · 2 no FAST bit · 3 chunk cap · 4 target refused · 5 not on this server version
     bool modeSettled = false;            // the fast probe has answered -> `mode` is final and safe to render
     uint16_t chunkSize = 0;              // payload bytes per chunk
     uint16_t chunks = 0;
@@ -287,6 +294,56 @@ class FileTransferClient : public OpenKNX::Module
     void requestMkdir(uint16_t pa, const char *dir);
     void requestRmdir(uint16_t pa, const char *dir);
     void requestRename(uint16_t pa, const char *oldPath, const char *newPath);
+    /**
+     * @brief Which wire generation the target's file-transfer server speaks.
+     * @details Keyed on the version the target REPORTS (cmd 100). From 0.1.0 on that value is generated
+     *          and every break bumped it, so the table is exact there. Below 0.1.0 it was hand-maintained
+     *          and stuck at 0.0.4 across the open's name-offset break, so that one thing is settled by the
+     *          open's answer instead. A front-end must say so: a legacy target has an FTM, but not the
+     *          features this client offers on a current one.
+     */
+    enum FtcWireGen : uint8_t
+    {
+        FtcGenUnknown = 0,      ///< no usable version: nothing answered, or a value below 0.0.4
+        FtcGenHandMaintained,   ///< reports 0.0.4: every build of the hand-maintained era says so, whether
+                                ///< its open reads the name at data+3 or at data+4 -- the version cannot tell.
+                                ///< Only its last build (7c2f91c) answers CheckFeatures
+        FtcGenLegacy,           ///< 0.1.0 .. 0.1.4 (generated version): name at data+4, data[2] still the FRAME
+        FtcGenCurrent,          ///< 0.1.5 and up: what this client speaks natively
+    };
+    /**
+     * @brief What a server of a given version speaks, as ONE table.
+     * @details Every entry is a version threshold (one commit each, from 0.1.0 on), so adding a future
+     *          capability is one field plus one line in ftcProfileOf() -- never another comparison spread
+     *          through the transfer code. The transfer paths read these flags, never the version.
+     */
+    struct FtcWireProfile
+    {
+        FtcWireGen gen = FtcGenUnknown;
+        bool served = false;        ///< this client will talk to it at all
+        bool openPathAt4 = false;   ///< name at data+4 with the resume flag at data[3], else at data+3. In the
+                                    ///< hand-maintained era this starts as a guess (+4) and is corrected once
+                                    ///< the open answers 0x42 or nothing; see ftcRetryOpenLayout
+        bool sizeIsPayload = false; ///< 0.1.5: data[2] is the payload (else the whole frame, stride data[2]-3)
+        bool hasFeatures = false;   ///< CheckFeatures (102) certain from 0.1.0; in the hand-maintained era it is
+                                    ///< asked with the short window, never assumed (7c2f91c answers, the rest stay silent)
+        bool dlSizeIsPayload = false; ///< 0.1.5: the download reads data[2] bytes (else data[2]-6)
+        bool hasFwUpdate = false;   ///< 0.0.4: FwUpdate (101) exists; whether the BOARD can is unknowable there
+        bool hasFsInfo = false;     ///< 0.1.6: FilesystemInfo (46) -- the free-space gate
+        bool hasFast = false;       ///< 0.1.6: FileUploadFast (44/45)
+        bool hasConsole = false;    ///< 0.1.6: the object-160 console tunnel
+        bool hasDelta = false;      ///< 0.2.0: FwProbe (106) and the OKD1 patch format
+        bool hasGzip = false;       ///< 0.2.0: a staged image may be sent compressed
+        bool hasSecurity = false;   ///< 0.2.0: access control and password login
+    };
+    static FtcWireProfile ftcProfileOf(uint16_t maj, uint16_t min, uint16_t rev);
+    // PA-checked, like ftcWireForTarget(): a served profile left over from a PREVIOUS target must not
+    // make this one look legacy -- that is how FwUpdate once went out blind to a device that never answered.
+    bool wireGenLegacy() const
+    { return _ftcVerPa == _ftcTarget && _ftcWire.served && _ftcWire.gen != FtcGenCurrent; }
+    /** @brief What a legacy target cannot do, as a fixed list a front-end can print. Empty when current. */
+    static const char *wireGenLimits(const FtcWireProfile &p);
+    static const char *wireGenMissing(const FtcWireProfile &p); // the list alone, without the "classic upload only" head
     #ifdef OPENKNX_FTC_SECURITY
     // `ftc <pa> login <pw>`: open the target's write window via a challenge-response. The password is turned
     // into the AES key HERE and never leaves this process on the wire (only nonce + 4-byte MAC travel).
@@ -416,6 +473,7 @@ class FileTransferClient : public OpenKNX::Module
         FtcVerify,           // FileInfo(43) sent right after an upload -- compare against _ftcSrcCrc
         FtcInfoSend,         // verify FileInfo(43) could not be queued (TX congested) -- retry the send until the queue drains
         FtcApduProbe,        // up/download pre-flight: target PID_MAX_APDU_LENGTH read, caps the frame size
+        FtcVerProbe,         // pre-flight: ModuleVersion(100) sent -- decides the wire generation of the open
         FtcFeatShow,         // `feat`: CheckFeatures(102) sent, answer decoded for the user
         FtcFeatureProbe,     // fast only: CheckFeatures(102) sent, short 800ms gate before start
         FtcFastOpen,         // fast: cmd44 open sent, waiting for the open ack (0x00 / 0x42 / 0x4A)
@@ -522,6 +580,22 @@ class FileTransferClient : public OpenKNX::Module
     // Read the target's PID_MAX_APDU_LENGTH (03_05_03 2.6.2 step 2) before the frame size is committed.
     // True = probe in flight (-> FtcApduProbe, resumes at `next`), false = resolved from cache, caller continues.
     bool ftcBeginApduProbe(FtcState next);
+    // Read the target's module version (cmd 100) before the first frame is built: it decides the wire
+    // generation. The request continues in FtcVerProbe at `next` (frame size probe, then pre-flight); a
+    // probe that cannot be queued ends the request as failed.
+    void ftcBeginVersionProbe(FtcState next);
+    void ftcApplyWireGen(); // apply the profile: switch off what this target never had
+    // Write profile + PA + validity together. The ONLY writer of _ftcWire, so the slot can never end up
+    // describing one target while _ftcVerPa names another.
+    void ftcSetWire(const FtcWireProfile &p, bool cache);
+    void ftcForgetTargetCaches();
+    bool ftcRetryOpenLayout();   // hand-maintained era: resend the open with the other name offset, once
+    void ftcRestoreOpenLayout(); // ... and undo that flip when the retry was not accepted either
+    // The profile to build a frame from: _ftcWire only when it belongs to the current target.
+    FtcWireProfile ftcWireForTarget() const;
+    // The step after a pre-flight probe resolves. Shared, so the version and the APDU probe cannot drift.
+    void ftcPreflightContinue(FtcState next);
+    void ftcBeginResumeInfo(); // the pre-upload FileInfo, or straight to the open on a legacy target
     void ftcApplyTargetApdu(); // clamp _ftcPayloadSize/_ftcChunks (upload) and _dlPayload (download) to the link
     // Decide fast vs classic from the probed feature byte and gate on the chunk cap. Downgrades
     // _ftcMode to 0 (and logs once) on any miss; otherwise keeps the mode and logs the negotiation.
@@ -594,6 +668,19 @@ class FileTransferClient : public OpenKNX::Module
     uint16_t _tgtApduPa = 0;
     uint16_t _tgtApdu = 0;
     FtcState _apduNext = FtcIdle; // state to enter once the probe resolves
+
+    // The last module-version answer, one slot: it names the target for the login/console wording and
+    // carries the open layout the hand-maintained era settled by answer -- for the PA it last answered
+    // for; a request to another PA in between costs that PA one refused open again. The version itself
+    // is asked on every request (a device can be reflashed at the same PA in between).
+    bool _ftcVerValid = false;
+    uint16_t _ftcVerPa = 0;
+    uint16_t _ftcFtmVer = 0;                 // (major<<8)|(minor<<4)|revision; 0 = the target never answered
+    FtcWireProfile _ftcWire;                 // what that version speaks -- the transfer paths read this
+    FtcState _ftcVerNext = FtcIdle;          // state to enter once the version probe resolves
+    bool _ftcOpenRetried = false;            // hand-maintained era: the second open layout was tried once
+    bool _ftcOpenFirstRefused = false;       // ... after the first layout was ANSWERED 0x42: a silent retry is then a refusal
+    bool _ftcApplyUnconfirmed = false;       // FwUpdate went to a target that cannot confirm it
 
     bool _ftcUpload = false;           // false = ping (ModuleVersion round trip only)
     bool _ftcTestSource = false;
@@ -736,7 +823,7 @@ class FileTransferClient : public OpenKNX::Module
     void conSend(uint8_t pid, const uint8_t *payload, uint8_t len); // A_FunctionProperty_Command on obj 160 (arms _ftcRespPending)
     void conAfterProbe(uint8_t features, bool answered);
     void conOpen();
-    void conRefuse(const char *reason);                             // OPEN refused (auth/locked/busy) -> one-line note, no session
+    void conRefuse(const char *reason, const char *status); // OPEN refused (auth/locked/busy) -> one-line note, no session; status <= 39 chars
     void conClose(const char *reason, bool sendClose);
     #endif
 
@@ -808,6 +895,10 @@ class FileTransferClient : public OpenKNX::Module
     uint16_t _devMask = 0; // 0 = no DeviceDescriptor answer
     uint16_t _devVerMaj = 0, _devVerMin = 0, _devVerRev = 0;
     uint8_t _devFeat = 0; // bit0 Resume, bit1 Update
+    bool _devFeatAnswered = false; // CheckFeatures answered during info: a hand-maintained 0.0.4 may (7c2f91c) or may not
+#ifdef OPENKNX_FTC_CONSOLE
+    bool _conFeatSeen = false;     // console: CheckFeatures answered (bit clear) before the version detour
+#endif
     bool _devHasMask = false, _devHasVer = false;
     void ftcDevInfoBegin(uint16_t pa, bool fromScan);
     void ftcDevReport();        // print the assembled device-info block
