@@ -1033,7 +1033,7 @@ class FileTransferClient : public OpenKNX::Module
     void ftcStatusReset(FtcPhase phase, uint16_t pa, const char *path);
     void ftcStatusMsg(const char *msg);
 
-    void ftcDlSendOpen();  // FileDownload open: [00][00][pkg][path]
+    bool ftcDlSendOpen();  // FileDownload open: [00][00][pkg][path]; false = the frame was not queued
     void ftcDlSendChunk();
     void ftcCloseSink();
     // FtcDownloadCrcPrefix finished: resume-open the sink at keepBytes and start chunks, or fall back to fresh.

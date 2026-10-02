@@ -1203,7 +1203,7 @@ void FileTransferClient::ftcApplyWireGen()
     // pre-empted here: doing so silently disabled fast mode on servers that advertise it.
     if (w.hasFeatures) return;
 
-    // Hand-maintained era: FileUploadFast does not exist (it arrived with dd0829c, wire 0.1.5), so the
+    // Hand-maintained era: FileUploadFast does not exist (dd0829c; certain from FTM_VER_EXTRAS), so the
     // mode is classic -- settled here the way ftcGateFast settles it, or the UI would keep waiting for a
     // mode that never becomes final. The feature byte is NOT fabricated: 7c2f91c answers CheckFeatures
     // and the +3 builds stay silent, so every consumer asks with its short window and reads the silence
@@ -1214,7 +1214,7 @@ void FileTransferClient::ftcApplyWireGen()
         _xferSetup.mode = 0;
         _xferSetup.fastDenied = 5;
         _xferSetup.modeSettled = true;
-        openknx.logger.logWithPrefix("FTC", "fast -> classic: no fast mode on this FTM (available from 0.2.0)");
+        openknx.logger.logWithPrefix("FTC", "fast -> classic: no fast mode on this FTM (available from 0.1.6)");
     }
 }
 
@@ -1285,7 +1285,12 @@ void FileTransferClient::ftcPreflightContinue(FtcState next)
     // broken once).
     if (next == FtcDownloadOpen)
     {
-        ftcDlSendOpen(); // the frame comes from ftcWireForTarget(); what the open answers is read there
+        // The frame comes from ftcWireForTarget(); what the open answers is read in FtcDownloadOpen.
+        if (!ftcDlSendOpen())
+        {
+            ftcAbort("download: open send failed"); // transient -> auto-retry, not a 6 s silence
+            return;
+        }
         _ftcState = FtcDownloadOpen;
         return;
     }
@@ -1509,7 +1514,7 @@ const char *FileTransferClient::ftcResultName(uint8_t result)
         case 0x46: return "target: seek failed";
         case 0x47: return "target: short write -- filesystem full?";
     #ifdef OPENKNX_FTC_SECURITY
-        case 0xA0: return "target: auth required -- run: ftc <pa> login <pw>";
+        case 0xA0: return "target: auth required -- run: " FTC_CMD_RUN " <pa> login <pw>";
         case 0xA1: return "target: auth failed -- wrong password?";
         case 0xA2: return "target: writes disabled (stage Off / not in prog mode)";
     #endif
@@ -2819,7 +2824,7 @@ void FileTransferClient::ftcApplyDecide()
     // up front and refuse cleanly -- never print a false "TRIGGERED" while the device did nothing.
     if (_ftcFeatBits & 0x20) // WRITES_DISABLED (locked / login required)
     {
-        openknx.logger.logWithPrefix("FTC", "target refuses writes (locked / login required) -- fwupdate NOT triggered; run: ftc <pa> login <pw>");
+        openknx.logger.logWithPrefix("FTC", "target refuses writes (locked / login required) -- fwupdate NOT triggered; run: " FTC_CMD_RUN " <pa> login <pw>");
         // Into the status, not only the log -- a log-only refusal reads as success to every front-end.
         _status.ok = false; // the transfer stands; only the apply did not go through
         ftcStatusMsg("apply refused: locked / login");
@@ -3164,13 +3169,20 @@ void FileTransferClient::conAfterProbe(uint8_t features, bool answered)
         const bool featAnswered = answered || _conFeatSeen;
         if (!_ftcWire.hasConsole)
         {
-            // The version predates the console tunnel (FTM 0.1.6): a fact, whether the feature byte was
-            // silent (0.0.4) or answered without the bit (0.1.0..0.1.5) -- in the status too, so a
-            // front-end can say it instead of "check the address".
-            openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u: FTM %u.%u.%u has no console tunnel (available from 0.2.0)",
-                                                  FTC_PA_ARGS(_ftcTarget), (unsigned)(_ftcFtmVer >> 8),
-                                                  (unsigned)((_ftcFtmVer >> 4) & 0x0F), (unsigned)(_ftcFtmVer & 0x0F));
-            ftcStatusMsg("no console tunnel (from FTM 0.2.0)"); // 34 chars
+            // Below FTM_VER_EXTRAS the tunnel is not served -- except at 0.1.5, which is AMBIGUOUS:
+            // dd0829c shipped the console while the wire still reported 0.1.5, so devices exist that
+            // report 0.1.5 and have it. That case is named as unproven, never as absent.
+            const bool ambiguous = (_ftcFtmVer == 0x015); // packed maj<<8 | min<<4 | rev
+            if (ambiguous)
+                openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u: FTM %u.%u.%u may or may not have the console tunnel (certain from 0.1.6) -- try again",
+                                                      FTC_PA_ARGS(_ftcTarget), (unsigned)(_ftcFtmVer >> 8),
+                                                      (unsigned)((_ftcFtmVer >> 4) & 0x0F), (unsigned)(_ftcFtmVer & 0x0F));
+            else
+                openknx.logger.logWithPrefixAndValues("FTC", "%u.%u.%u: FTM %u.%u.%u has no console tunnel (available from 0.1.6)",
+                                                      FTC_PA_ARGS(_ftcTarget), (unsigned)(_ftcFtmVer >> 8),
+                                                      (unsigned)((_ftcFtmVer >> 4) & 0x0F), (unsigned)(_ftcFtmVer & 0x0F));
+            ftcStatusMsg(ambiguous ? "console tunnel unproven -- try again" // 36 chars
+                                   : "no console tunnel (from FTM 0.1.6)"); // 34 chars
         }
         else if (featAnswered)
         {
@@ -3349,7 +3361,7 @@ void FileTransferClient::ftcRetryCmd(const char *sub, const char *val)
                                      (unsigned)_cfgBackoffMs, (unsigned)FTC_RETRY_BACKOFF_MS_DEF);
         openknx.logger.logWithValues("  autoresume %s   [on]  master switch: auto re-trigger + resume an aborted up/download",
                                      _cfgAutoResume ? "on " : "off");
-        openknx.logger.log("  set: ftc retry <max|transfer|backoff> <value>  |  ftc retry autoresume <on|off>");
+        openknx.logger.log("  set: " FTC_CMD_RUN " retry <max|transfer|backoff> <value>  |  " FTC_CMD_RUN " retry autoresume <on|off>");
         return;
     }
     const bool set = (val && *val);
@@ -3378,7 +3390,7 @@ void FileTransferClient::ftcRetryCmd(const char *sub, const char *val)
         openknx.logger.logWithValues("FTC retry autoresume = %s", _cfgAutoResume ? "on" : "off");
     }
     else
-        openknx.logger.logWithValues("FTC retry: unknown '%s' -- try max|transfer|backoff|autoresume (or 'ftc retry' for help)", sub);
+        openknx.logger.logWithValues("FTC retry: unknown '%s' -- try max|transfer|backoff|autoresume (or '" FTC_CMD_RUN " retry' for help)", sub);
 }
 
 void FileTransferClient::ftcSendFsInfo(uint8_t purpose, const char *path)
@@ -3729,39 +3741,8 @@ void FileTransferClient::ftcDevReport()
         if (_devLoadHas[3]) ftcOut(0, "  Object table:   %s", ftcLoadName(_devLoad[3]));
     }
 
-    // --- File-Transfer section: is there a KnxFileTransfer server, and what can it do ---
-    if (_devHasVer)
-    {
-        // Every bit the server can set, or the reader is told a device cannot do something it just
-        // offered. Sized for all of them at once: the four names added here take the longest possible
-        // line from 27 to 55 characters, which the previous 32-byte buffer would not have survived.
-        char feat[72] = {0};
-        if (_devFeat & 0x01) strcat(feat, "Resume ");
-        if (_devFeat & 0x02) strcat(feat, "Update ");
-        if (_devFeat & 0x04) strcat(feat, "Fast ");
-        if (_devFeat & 0x08) strcat(feat, "Console ");
-        if (_devFeat & 0x40) strcat(feat, "Gzip ");
-        if (_devFeat & 0x80) strcat(feat, "Delta ");
-        if (_devFeat & 0x10) strcat(feat, "Password ");
-        if (_devFeat & 0x20) strcat(feat, "Locked ");
-        if (!feat[0]) strcpy(feat, "(none)");
-        ftcOut(CONSOLE_HEADLINE_COLOR, "File-Transfer");
-        ftcOut(0, "  Module version: %u.%u.%u", _devVerMaj, _devVerMin, _devVerRev);
-        ftcOut(0, "  Features:       %s", feat);
-    }
-    else
-    {
-        ftcOut(0, "File-Transfer:    no answer (not a KnxFileTransfer device)");
-    }
-    ftcOut(0, "%s", RULE_SECTION);
-
-    _status.ok = _devHasMask || _devHasVer || _devHasSerial;
-    ftcStatusMsg(_devHasVer ? "device info complete" : "device info (partial)");
-
-    // Publish the structured result (same values the text above prints).
-    _deviceInfo.mask = _devMask;
-    strncpy(_deviceInfo.cls, ftcMaskName(_devMask), sizeof(_deviceInfo.cls) - 1);
-    _deviceInfo.cls[sizeof(_deviceInfo.cls) - 1] = '\0';
+    // The generation is resolved BEFORE the text uses it: the console block and the structured result
+    // must not read the feature byte differently (the text used to print the raw byte).
     _deviceInfo.ftmVersion = _devHasVer ? (uint16_t)(((_devVerMaj & 0xFF) << 8) | ((_devVerMin & 0x0F) << 4) | (_devVerRev & 0x0F)) : 0;
     _deviceInfo.features = _devHasVer ? _devFeat : 0;
     {
@@ -3792,6 +3773,45 @@ void FileTransferClient::ftcDevReport()
         // would contradict both wireGenLimits() and what the transfer actually does.
         if (_deviceInfo.ftmLegacy) _deviceInfo.ftmCan &= (uint8_t)~0x01;
     }
+
+    // --- File-Transfer section: is there a KnxFileTransfer server, and what can it do ---
+    if (_devHasVer)
+    {
+        // A legacy server's byte is 0 because it cannot SAY, not because it can nothing -- so the same
+        // ftmCan the structured result carries is printed here, and a derived bit is marked as derived.
+        // Buffer: every name at once is 55 characters plus the NUL, which the 72 bytes hold.
+        const uint8_t fb = _deviceInfo.ftmLegacy ? _deviceInfo.ftmCan : _devFeat;
+        char feat[72] = {0};
+        if (fb & 0x01) strcat(feat, "Resume ");
+        // Derived: the command exists on the RP2040 builds of that version and not on their ESP32
+        // builds, and the MCU is not readable here -- shown with a question mark, never as a fact.
+        if (fb & 0x02) strcat(feat, _deviceInfo.ftmDerived ? "Update? " : "Update ");
+        if (fb & 0x04) strcat(feat, "Fast ");
+        if (fb & 0x08) strcat(feat, "Console ");
+        if (fb & 0x40) strcat(feat, "Gzip ");
+        if (fb & 0x80) strcat(feat, "Delta ");
+        if (fb & 0x10) strcat(feat, "Password ");
+        if (fb & 0x20) strcat(feat, "Locked ");
+        if (!feat[0]) strcpy(feat, "(none)");
+        ftcOut(CONSOLE_HEADLINE_COLOR, "File-Transfer");
+        ftcOut(0, "  Module version: %u.%u.%u", _devVerMaj, _devVerMin, _devVerRev);
+        ftcOut(0, "  Features:       %s", feat);
+        if (_deviceInfo.ftmDerived)
+            ftcOut(0, "                  derived from the version (no CheckFeatures here; ? = unconfirmed)");
+    }
+    else
+    {
+        ftcOut(0, "File-Transfer:    no answer (not a KnxFileTransfer device)");
+    }
+    ftcOut(0, "%s", RULE_SECTION);
+
+    _status.ok = _devHasMask || _devHasVer || _devHasSerial;
+    ftcStatusMsg(_devHasVer ? "device info complete" : "device info (partial)");
+
+    // The rest of the structured result (same values the text above prints).
+    _deviceInfo.mask = _devMask;
+    strncpy(_deviceInfo.cls, ftcMaskName(_devMask), sizeof(_deviceInfo.cls) - 1);
+    _deviceInfo.cls[sizeof(_deviceInfo.cls) - 1] = '\0';
     _deviceInfo.progMode = _devProgMode != 0;
     _deviceInfo.maxApdu = _devHasApdu ? _devApdu : 0;
     _deviceInfo.devControl = _devCtrl;       _deviceInfo.haveDevControl = _devHasCtrl;
@@ -4167,7 +4187,7 @@ void FileTransferClient::requestUpload(uint16_t pa, const char *src, unsigned pk
     if (!_ftcTestSource)
     {
     #if !defined(ARDUINO_ARCH_RP2040) && !defined(ARDUINO_ARCH_ESP32) && !defined(ARDUINO_ARCH_ESP8266)
-        // Native ftc-cli: local source and remote name are SEPARATE namespaces. `src` is a host path
+        // Native oknx: local source and remote name are SEPARATE namespaces. `src` is a host path
         // (relative or absolute) that must be opened verbatim; the remote target name is derived from its
         // basename -> a deep host build path like ../build/x/firmware.bin.gz uploads to the target as
         // /firmware.bin.gz (never an invalid nested path on the target's flat filesystem). `fwupdate`/`apply`
@@ -4368,7 +4388,8 @@ void FileTransferClient::ftcCloseSink()
 
 #ifdef OPENKNX_FTC_CLIENT
 // FileDownload open: [0x00][0x00][pkg][path\0]. The answer is [0x00][size:4 BE][0x00].
-void FileTransferClient::ftcDlSendOpen()
+// Returns what ftcSend returned: a frame that could not be queued has no answer to wait for.
+bool FileTransferClient::ftcDlSendOpen()
 {
     const size_t np = strlen(_ftcPath) + 1; // path incl. NUL
     _ftcTx[0] = 0x00;
@@ -4378,7 +4399,7 @@ void FileTransferClient::ftcDlSendOpen()
     const FtcWireProfile w = ftcWireForTarget();
     _ftcTx[2] = w.dlSizeIsPayload ? _dlPayload : (uint8_t)(_dlPayload + 6);
     memcpy(_ftcTx + 3, _ftcPath, np); // the download open never moved: the path is at data+3 everywhere
-    ftcSend(FTC_CMD_FILE_DOWNLOAD, (uint8_t)(3 + np));
+    return ftcSend(FTC_CMD_FILE_DOWNLOAD, (uint8_t)(3 + np));
 }
 
 // FileDownload chunk request: [seqLo][seqHi] (the server reads it little-endian).
@@ -4622,7 +4643,9 @@ void FileTransferClient::loopDownload()
                         _xferSetup.chunkSize = _dlPayload;
                         openknx.logger.logWithPrefixAndValues("FTC", "download open refused the frame size -- retrying with %u-byte chunks",
                                                               (unsigned)_dlPayload);
-                        ftcDlSendOpen();
+                        // ftcSend re-arms _ftcSince, so the smaller open gets a full window. A frame that
+                        // was never queued has no answer coming: say so instead of waiting out FTC_TIMEOUT.
+                        if (!ftcDlSendOpen()) ftcAbort("download: open send failed"); // transient -> auto-retry
                         return;
                     }
                     if (rc == 0x04 && ftcWireForTarget().gen == FtcGenHandMaintained)
@@ -6537,7 +6560,7 @@ void FileTransferClient::loopConsole()
                         _conStartMs = 0;
                         _status.phase = FtcPhase::Failed;
                         ftcStatusMsg("console: login required"); // named, so a front-end does not say "check the address"
-                        ftcOut(CONSOLE_HEADLINE_COLOR, "%u.%u.%u: password-protected -- run: ftc %u.%u.%u login <pw>, then retry",
+                        ftcOut(CONSOLE_HEADLINE_COLOR, "%u.%u.%u: password-protected -- run: " FTC_CMD_RUN " %u.%u.%u login <pw>, then retry",
                                FTC_PA_ARGS(_ftcTarget),
                                FTC_PA_ARGS(_ftcTarget));
                         ftcFinish();
@@ -6833,6 +6856,14 @@ void FileTransferClient::loop(bool configured)
             {
                 _ftcRespPending = false;
                 if (_ftcRespProp != FTC_CMD_MODULE_VERSION) return; // a mirrored answer to something else
+                // A 1-byte answer is a STATUS, not a version: at access stage Off the server answers every
+                // command but CheckFeatures with ST_WRITES_DISABLED. Checking the length first reported a
+                // reachable device as absent ("older than 0.0.3"); name the reason it actually gave.
+                if (_ftcRespLen == 1)
+                {
+                    ftcAbort(ftcResultName(_ftcResp[0]));
+                    return;
+                }
                 if (_ftcRespLen >= 6)
                 {
                     vmaj = (uint16_t)((_ftcResp[0] << 8) | _ftcResp[1]);
@@ -6892,12 +6923,14 @@ void FileTransferClient::loop(bool configured)
             const bool transfer = (_ftcVerNext == FtcResumeInfo || _ftcVerNext == FtcApplyCheck || _ftcVerNext == FtcDownloadOpen);
             if (wireGenLegacy() && transfer)
             {
-                openknx.logger.logWithPrefixAndValues("FTC", "target FTM %u.%u.%u is before 0.2.0 -- %s",
+                // 0.1.5 = FTM_VER_SIZE_IS_PAYLOAD, the gate wireGenLegacy() actually tests; the list that
+                // follows is built from the profile, so it stays right whatever the boundary is.
+                openknx.logger.logWithPrefixAndValues("FTC", "target FTM %u.%u.%u is before 0.1.5 -- %s",
                                                       (unsigned)vmaj, (unsigned)vmin, (unsigned)vrev,
                                                       wireGenLimits(_ftcWire));
                 // Two console lines: FtcOutLine::text holds 128 characters and the whole sentence was
                 // longer -- the one word that fell off was "console".
-                ftcOut(0, "  version    FTM %u.%u.%u -- before 0.2.0, classic upload only", (unsigned)vmaj, (unsigned)vmin, (unsigned)vrev);
+                ftcOut(0, "  version    FTM %u.%u.%u -- before 0.1.5, classic upload only", (unsigned)vmaj, (unsigned)vmin, (unsigned)vrev);
                 ftcOut(0, "  without    %s", wireGenMissing(_ftcWire));
             }
             ftcApplyWireGen();
@@ -7427,7 +7460,7 @@ void FileTransferClient::loop(bool configured)
                 if (wireGenLegacy())
                 {
                     _ftcApplyUnconfirmed = true;
-                    openknx.logger.logWithPrefix("FTC", "FTM before 0.2.0 gave no feature byte: FwUpdate sent unconfirmed (RP2040/2350 builds only). "
+                    openknx.logger.logWithPrefix("FTC", "FTM before 0.1.5 gave no feature byte: FwUpdate sent unconfirmed (RP2040/2350 builds only). "
                                                         "No restart within a few seconds means this build has no FwUpdate");
                     ftcTriggerFwUpdate(); // the feature cache stays untouched: silence is not a byte
                     return;
@@ -7770,10 +7803,12 @@ void FileTransferClient::loop(bool configured)
                 // frame that can exceed the APDU and never arrive. Silence gets the same single retry.
                 if (ftcRetryOpenLayout()) return;
                 ftcRestoreOpenLayout();
-                // A first 0x42 followed by a silent retry is what a data+4 build answers to a bad path (its
-                // 0x42 for the +3 frame never arrives): that is a refusal, permanent -- not an absent target
-                // to be retried against three times.
-                ftcAbort(_ftcOpenFirstRefused ? "target refused FileUpload/open" : "no answer to FileUpload/open");
+                // A first 0x42 followed by a SILENT retry has two causes that look identical here: a data+4
+                // build answering a bad path (its 0x42 for the +3 frame never arrives), or the answer being
+                // lost. Only an answered second refusal (above) proves a refusal, so this stays transient --
+                // a permanent verdict here threw away a layout that one lost frame would have confirmed.
+                ftcAbort(_ftcOpenFirstRefused ? "no answer to the retried upload open" // 36 chars
+                                              : "no answer to FileUpload/open");
             }
             return;
         }
@@ -8005,7 +8040,7 @@ void FileTransferClient::loop(bool configured)
 
 void FileTransferClient::showHelp()
 {
-    openknx.console.printHelpLine("ftc", "KNX file transfer client, PA->PA. Type 'ftc ?' for usage.");
+    openknx.console.printHelpLine(FTC_CMD_NAME, "KNX file transfer client, PA->PA. Type '" FTC_CMD_NAME " ?' for usage.");
 }
 
 bool FileTransferClient::processCommand(const std::string cmd, bool diagnoseKo)
