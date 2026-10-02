@@ -1439,6 +1439,22 @@ static void usage()
                                    "die EIGENE Konsole des Interfaces über dessen Webconsole (WebSocket, kein Tunnel)"));
     std::printf("\n");
 
+    U.section(L.tr("PROPERTIES", "PROPERTIES"), L.tr("(interface objects)", "(Interface-Objekte)"));
+    U.cmdRow("prop read|write <iot> <inst> <pid> [start] [hex]",
+             L.tr("the INTERFACE's own objects (local device management, by object TYPE + instance)",
+                  "die EIGENEN Objekte des Interfaces (lokales Device Management, nach Objekt-TYP + Instanz)"));
+    U.cmdRow("busprop read|write <pa> <objIdx> <pid> [start] [hex]",
+             L.tr("a REMOTE device's objects over the bus, by object INDEX (A_PropertyValue_Read/Write)",
+                  "die Objekte eines ENTFERNTEN Geräts über den Bus, nach Objekt-INDEX (A_PropertyValue_Read/Write)"));
+    U.cmdRow("<pa> runstate [start|stop]",
+             L.tr("read or control the application: 0 halted · 1 running · 3 terminated (03_05_01 4.24)",
+                  "Applikation lesen oder steuern: 0 angehalten · 1 laeuft · 3 beendet (03_05_01 4.24)"));
+    U.cmdRow("", L.tr("stop holds GROUP communication only - properties, memory and restart stay reachable",
+                      "stop haelt nur die GRUPPEN-Kommunikation an - Properties, Speicher und Neustart bleiben erreichbar"));
+    U.cmdRow("", L.tr("the state lives in RAM: a device reset brings the application back",
+                      "der Zustand liegt im RAM: ein Geraete-Reset holt die Applikation zurueck"));
+    std::printf("\n");
+
     U.section(L.tr("INFO", "INFO"), L.tr("(read-only)", "(nur lesen)"));
     U.cmdRow("<pa> ping", L.tr("is the target there? round-trip + ms", "ist das Ziel da? Round-Trip + ms"));
     U.cmdRow("", L.tr("send/get/perf/fwupdate/con ask this first, in one frame; a silent target is reported "
@@ -6144,6 +6160,119 @@ int main(int argc, char** argv)
         tun.disconnect();
         socketCleanup();
         return 0;
+    }
+
+    // `ftc -i <ip> <pa> runstate [start|stop]` — the Run State Machine of the application program object
+    // (PID 6). 03_05_01 clause 4.24: reading gives the state (Table 95 p.299), writing
+    // takes an event (Table 96 p.299: 0 NOP, 1 Restart, 2 Stop). Stop holds GROUP communication only -
+    // management stays reachable - and the state lives in RAM, so a device reset undoes it.
+    // A decoded front end for `busprop <pa> <objIdx> 6`; the index is looked up, never assumed.
+    if (pos.size() >= 2 && pos.size() <= 3 && pos[1] == "runstate")
+    {
+        uint8_t pa_a = 0, pa_l = 0, pa_d = 0;
+        if (std::sscanf(pos[0].c_str(), "%hhu.%hhu.%hhu", &pa_a, &pa_l, &pa_d) != 3)
+        {
+            std::fprintf(stderr, "usage: <pa> runstate [start|stop]\n");
+            socketCleanup();
+            return 2;
+        }
+        const uint16_t pa = (uint16_t)((pa_a << 12) | (pa_l << 8) | pa_d);
+
+        int event = -1; // -1 = read only
+        if (pos.size() == 3)
+        {
+            if (pos[2] == "start" || pos[2] == "restart") event = 1;
+            else if (pos[2] == "stop") event = 2;
+            else
+            {
+                std::fprintf(stderr, "runstate: expected start or stop, got '%s'\n", pos[2].c_str());
+                socketCleanup();
+                return 2;
+            }
+        }
+
+        KnxIpTunnel tun;
+        if (!tun.connect(ip, port))
+        {
+            std::fprintf(stderr, "runstate: tunnel connect failed (status %d)\n", tun.lastConnectStatus());
+            socketCleanup();
+            return 1;
+        }
+        tun.setPropertyCallback(&busPropAnswer);
+
+        // The application program object is OT 3, but its INDEX is device specific. Measured
+        // 2026-09-27 on 5.0.3 and 5.0.8: index 3 is the GROUP OBJECT TABLE (OT 9) and the application
+        // program sits at 4. A hard-coded 3 asks the wrong object and reports "not implemented" for a
+        // property that is there, so the index is looked up through PID 1 (PID_OBJECT_TYPE).
+        auto readProp = [&](uint8_t obj, uint8_t pid) -> int {
+            g_bpPa = pa; g_bpObj = obj; g_bpPid = pid; g_bpSeen = false; g_bpLen = 0;
+            if (!tun.sendPropertyValueRead(pa, obj, pid, 1, 1)) return -2;
+            const uint64_t until = ftc::detail::nowMs() + 3000;
+            while (!g_bpSeen && ftc::detail::nowMs() < until) tun.pump();
+            if (!g_bpSeen) return -2;
+            if (g_bpLen == 0) return -3;
+            return 0;
+        };
+        int appIdx = -1;
+        for (uint8_t i = 0; i <= 12 && appIdx < 0; ++i)
+            if (readProp(i, 1) == 0 && g_bpLen >= 2 && g_bpData[0] == 0x00 && g_bpData[1] == 0x03)
+                appIdx = (int)i;
+        if (appIdx < 0)
+        {
+            std::printf("  runstate %u.%u.%u  -> no application program object (type 3) on this device\n",
+                        pa_a, pa_l, pa_d);
+            tun.setPropertyCallback(nullptr);
+            tun.disconnect();
+            socketCleanup();
+            return 4;
+        }
+        std::printf("  application program object at index %d\n", appIdx);
+
+        auto readState = [&]() -> int {
+            g_bpPa = pa; g_bpObj = (uint8_t)appIdx; g_bpPid = 6; g_bpSeen = false; g_bpLen = 0;
+            if (!tun.sendPropertyValueRead(pa, (uint8_t)appIdx, 6, 1, 1)) return -2;
+            const uint64_t until = ftc::detail::nowMs() + 3000;
+            while (!g_bpSeen && ftc::detail::nowMs() < until) tun.pump();
+            if (!g_bpSeen) return -2;
+            if (g_bpLen == 0) return -3;   // answered, but the property carries nothing: not implemented
+            return (int)g_bpData[0];
+        };
+        auto name = [](int st) -> const char* {
+            switch (st) { case 0: return "halted"; case 1: return "running"; case 2: return "ready";
+                          case 3: return "terminated"; case 4: return "starting"; case 5: return "shutting down";
+                          default: return "?"; }
+        };
+
+        int rc = 0;
+        const int before = readState();
+        if (before == -2) { std::printf("  runstate %u.%u.%u  -> no answer\n", pa_a, pa_l, pa_d); rc = 4; }
+        else if (before == -3)
+        {
+            // Exactly what a device without the property answers: a response with zero elements.
+            std::printf("  runstate %u.%u.%u  -> PID_RUN_STATE_CONTROL is not implemented on this device\n",
+                        pa_a, pa_l, pa_d);
+            rc = 4;
+        }
+        else
+        {
+            std::printf("  runstate %u.%u.%u  -> %d (%s)\n", pa_a, pa_l, pa_d, before, name(before));
+            if (event >= 0)
+            {
+                const uint8_t ev = (uint8_t)event;
+                if (!tun.sendPropertyValueWrite(pa, (uint8_t)appIdx, 6, 1, 1, &ev, 1)) { std::printf("  -> SEND FAILED\n"); rc = 4; }
+                else
+                {
+                    const int after = readState();
+                    if (after < 0) { std::printf("  -> %s sent, but the state could not be read back\n", pos[2].c_str()); rc = 4; }
+                    else std::printf("  %-8s -> %d (%s)\n", pos[2].c_str(), after, name(after));
+                }
+            }
+        }
+
+        tun.setPropertyCallback(nullptr);
+        tun.disconnect();
+        socketCleanup();
+        return rc;
     }
 
     // `ftc -i <ip> busprop read|write <pa> <objIdx> <pid> …` — A_PropertyValue_Read/Write over the BUS via a

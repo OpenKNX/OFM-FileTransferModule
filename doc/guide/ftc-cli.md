@@ -52,6 +52,16 @@ ever disagree, the binary is right.
 | `scan … openknx` / `details` | read identities while scanning: OpenKNX candidates only, or every device |
 | `install` / `uninstall` · `config <key> <value>` | put `ftc` on the PATH · persistent defaults |
 
+**KNX properties** — the interface objects of a device, independent of the file transfer. Which objects and
+PIDs exist, and how to read the answers: [knx-properties.md](../reference/knx-properties.md).
+
+| | |
+|---|---|
+| `prop read\|write <iot> <inst> <pid> [start] [hex]` | the interface's **own** objects, by object type + instance |
+| `busprop read\|write <pa> <objIdx> <pid> [start] [hex]` | the objects of a **remote** device over the bus, by object index |
+| `busprop dump <pa>` | walk every index and known PID and print what answers |
+| `<pa> runstate [start\|stop]` | read the run state machine of the application program; `stop` halts group communication |
+
 **Reading a device** — never gated by the access control.
 
 | | |

@@ -46,6 +46,7 @@ guide is the shorter one.
 | Why is it not faster, and what would make it faster? | [bottleneck.md](reference/bottleneck.md) |
 | What is genuinely open, what is settled? | [limits.md](reference/limits.md) |
 | How do I compare two bus monitors? | [busmon-compare.md](reference/busmon-compare.md) |
+| Which KNX objects and PIDs can I read from a device? | [knx-properties.md](reference/knx-properties.md) |
 | Which scripts exist, what do they prove? | [scripts.md](reference/scripts.md) |
 
 ## concept — why it is so
@@ -56,6 +57,7 @@ guide is the shorter one.
 | Why are the build switches cut the way they are? | [build-defines.md](concept/build-defines.md) |
 | Where are the desktop front-ends going? | [desktop-api.md](concept/desktop-api.md) |
 | Why does `info ga` fail against an IP-Interface? | [ANALYSIS-infoga-co.md](findings/2026-09-infoga-co.md) |
+| Why is the desktop tool being renamed to `oknx`, and what has to happen? | [rename-to-oknx.md](concept/rename-to-oknx.md) — German, a work order; it goes away once done |
 
 ## The four sentences that explain everything
 
