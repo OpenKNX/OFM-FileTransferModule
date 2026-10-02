@@ -10,7 +10,7 @@ FileTransferModule because that was the first thing it carried; today the same c
 discovery** and an **access-control layer** — all over standard KNX, with no extra port, no serial cable
 and no cloud.
 
-Three front ends speak the same protocol: a **desktop client** (`ftc`, macOS/Linux/Windows), the **device
+Three front ends speak the same protocol: a **desktop client** (`oknx`, macOS/Linux/Windows), the **device
 console** on any OpenKNX device, and a **web interface** in the browser.
 
 ---
@@ -74,7 +74,7 @@ implementation was established against a commercial interface.
 
 | | Runs on | Reaches | Typical use |
 |---|---|---|---|
-| **`ftc`** desktop client | macOS · Linux · Windows | any device, through a KNXnet/IP tunnel — including third-party interfaces | the PC has the files, the screen and the firmware images |
+| **`oknx`** desktop client | macOS · Linux · Windows | any device, through a KNXnet/IP tunnel — including third-party interfaces | the PC has the files, the screen and the firmware images |
 | **Device console** | any OpenKNX device with `OPENKNX_FTC_CLIENT` | any other device, PA to PA over the bus | no PC on site; one device services another |
 | **Web interface** | the device's own browser page | itself, and other devices via knxOTA | file manager, console, knxOTA, all without a tool |
 
@@ -84,10 +84,10 @@ once, and cannot drift apart.
 
 ```bash
 # from a PC, through an interface at 11.11.0.126, talking to device 5.0.3
-ftc --discover                                   # which interfaces exist on the LAN
-ftc -i 11.11.0.126 5.0.3 info                    # fingerprint the device
-ftc -i 11.11.0.126 5.0.3 send fw.bin.gz -fa      # upload fast, then flash and reboot
-ftc -i 11.11.0.126 5.0.3 con                     # open its console over the bus
+oknx --discover                                  # which interfaces exist on the LAN
+oknx -i 11.11.0.126 5.0.3 info                   # fingerprint the device
+oknx -i 11.11.0.126 5.0.3 send fw.bin.gz -fa     # upload fast, then flash and reboot
+oknx -i 11.11.0.126 5.0.3 con                    # open its console over the bus
 
 # on a device console, without any PC
 ftc 5.0.3 send /cfg.json /cfg.json               # this device -> 5.0.3
@@ -226,7 +226,7 @@ audience of every document.
 | [reference/](doc/reference/architecture.md) | building with it: architecture, integration, build flags, the protocol and its byte layout, the host shim, delta updates, the bottleneck, known limits, the KNX objects and PIDs a device exposes, the test scripts |
 | [concept/](doc/concept/access-control.md) | why it is so: the access-control rationale, the build-switch cut, where the desktop front ends are going |
 | [findings/](doc/findings/) | dated analyses of open problems — expected to disappear once they are closed |
-| [ftc-cli/README.md](ftc-cli/README.md) | building and installing the desktop client |
+| [oknx/README.md](oknx/README.md) | building and installing the desktop client |
 
 `pwsh scripts/Test-DocLinks.ps1` checks every link in the set, including the ones that resolve on a
 case-insensitive filesystem but would 404 on GitHub.
@@ -265,7 +265,7 @@ Scholl**, **Michael Geramb** and **Waldemar Porscha**.
 
 **Erkan Çolak** took it over at 0.1.5 in July 2026 and everything from **0.2.0** on is his: the client
 (`FileTransferClient*`, the same sources on the device and on a PC), the native desktop client
-(`ftc-cli/`), the windowed `fast` transfer, the console tunnel, the access control, the delta update and
+(`oknx/`), the windowed `fast` transfer, the console tunnel, the access control, the delta update and
 knxOTA — plus this documentation set.
 
 The commit history is the authority on all of it: `git shortlog -sne`.

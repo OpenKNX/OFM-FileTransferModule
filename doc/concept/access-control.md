@@ -29,7 +29,7 @@ This is deliberately a **"rough" safeguard**. The house analogy the design is bu
 
 Concretely:
 
-- **In scope:** an unauthorized user on the network who tries to use the normal FTC commands (ETS, `ftc`,
+- **In scope:** an unauthorized user on the network who tries to use the normal FTC commands (ETS, `oknx`,
   the remote console) to write to / take over the device. They are stopped — they don't have the password.
 - **Out of scope ("smashing the glass"):** an attacker who sniffs the KNXnet/IP tunnel and
   replays/brute-forces captured *challenge-response* material offline, or otherwise breaks the protocol. We
@@ -44,8 +44,8 @@ Runtime authentication **never** transmits the password. From **any** entry poin
 into a MAC **at the point of entry**, and only the challenge-response (`nonce`, 4-byte `MAC`) ever crosses
 the bus / tunnel:
 
-- **ftc-cli → device:** ftc-cli computes the MAC locally; the password never leaves the PC.
-- **ftc-cli remote console → device A → device B:** ftc-cli **does not relay** a `login` line into A's
+- **`oknx` → device:** `oknx` computes the MAC locally; the password never leaves the PC.
+- **`oknx` remote console → device A → device B:** `oknx` **does not relay** a `login` line into A's
   console. It **intercepts** `login`/`logout` locally and runs the 103/104 handshake to the target over its
   own tunnel. So there is no plaintext-password path even in the nested case ("egal von wo").
 - **Local/serial console on a device:** that device's own client computes the MAC; only nonce+MAC leave it.
@@ -164,9 +164,9 @@ All behind `#ifdef OPENKNX_FTC_SECURITY`. Products without the flag compile byte
 - Challenge: single outstanding, **30 s TTL**, single-use. Verify: back-off check → challenge validity →
   empty-password fail-closed → 4-byte const-time MAC compare → open/refresh window on success.
 
-### 4.4 Client — `OFM-FileTransferModule/src/FileTransferClient*` (shared) + `ftc-cli`
+### 4.4 Client — `OFM-FileTransferModule/src/FileTransferClient*` (shared) + `oknx`
 
-Also behind `#ifdef OPENKNX_FTC_SECURITY` (so the Router's client stays byte-identical; `ftc-cli` and the
+Also behind `#ifdef OPENKNX_FTC_SECURITY` (so the Router's client stays byte-identical; `oknx` and the
 interface define the flag). Two **standalone** console commands — the write paths are **untouched**:
 
 - `login <pw>`: `pad16(pw)` → send 103 → receive nonce (`FtcAuthChallenge`) → compute 4-byte MAC into the
@@ -175,9 +175,9 @@ interface define the flag). Two **standalone** console commands — the write pa
 - `logout`: send 105 → report.
 - Friendly surfacing on other commands: `0xA0` → "auth required — run: ftc <pa> login <pw>", `0xA1` →
   "auth failed — wrong password?", `0xA2` → "writes disabled".
-- `ftc-cli` build: add `knx/aes.c` via `build_src_filter`; the password comes through the same
-  `ftc <pa> login <pw>` console line (no separate `--password` flag). Password: ≤16 chars, no spaces.
-- **ftc-cli console mode intercepts `login`/`logout`** (does not relay them to the remote device's console):
+- `oknx` build: add `knx/aes.c` via `build_src_filter`; the password comes through the same
+  `oknx <pa> login <pw>` console line (no separate `--password` flag). Password: ≤16 chars, no spaces.
+- **`oknx` console mode intercepts `login`/`logout`** (does not relay them to the remote device's console):
   it runs the 103/104 handshake locally against the target PA over its own tunnel, so the password is never
   relayed as plaintext (see §2 invariant). All other typed lines relay as before.
 

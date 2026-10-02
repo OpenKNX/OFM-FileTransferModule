@@ -1,13 +1,13 @@
-# ftc-cli Monitor & Compare — reference and interpretation guide
+# oknx Monitor & Compare — reference and interpretation guide
 
-Three related live tools in `ftc-cli`, all built on the same KNXnet/IP tunnelling monitor:
+Three related live tools in `oknx`, all built on the same KNXnet/IP tunnelling monitor:
 
 | Command | What it does |
 |---|---|
-| `ftc -i <ip> bm` / `busmon` | Bus monitor — raw TP1 LPDUs (incl. FCS) + the ETS ACK colour |
-| `ftc -i <ip> gm` / `groupmon` | Group monitor — decoded L_Data group telegrams |
-| `ftc -i <A> bm\|gm compare <B>` | **A/B fidelity diff** of two monitors on the **same** bus |
-| `ftc -i <A> bm\|gm compare <B> --multi` | Two independent streams (interfaces on **different** lines; no diff) |
+| `oknx -i <ip> bm` / `busmon` | Bus monitor — raw TP1 LPDUs (incl. FCS) + the ETS ACK colour |
+| `oknx -i <ip> gm` / `groupmon` | Group monitor — decoded L_Data group telegrams |
+| `oknx -i <A> bm\|gm compare <B>` | **A/B fidelity diff** of two monitors on the **same** bus |
+| `oknx -i <A> bm\|gm compare <B> --multi` | Two independent streams (interfaces on **different** lines; no diff) |
 
 `compare` is a **busmonitor verification tool**: it evaluates our busmon's fidelity against another
 vendor's busmon, vendor-agnostic. Two faithful busmonitors of the same bus must see byte-exact the same
@@ -32,10 +32,10 @@ Example (rig: OpenKNX `.126` vs Siemens `.5`, traffic generated from the third i
 
 ```
 # terminal 1 — start the comparison first (normalize is ON by default):
-ftc -i 11.11.0.126 bm compare 11.11.0.5
+oknx -i 11.11.0.126 bm compare 11.11.0.5
 
 # terminal 2 — then generate bus traffic from the THIRD interface:
-ftc -i 11.11.0.210 5.0.3 perf 30 fast
+oknx -i 11.11.0.210 5.0.3 perf 30 fast
 ```
 
 Options: `--grace <ms>` (match window, default 750) · `--raw` (start with normalize OFF) ·
@@ -186,7 +186,7 @@ Two summary aids are shown automatically (not under `-q`):
 
 ## 8. XML export (`l`)
 
-`l` saves the whole run to `ftc-<mode>-<compare|multi>_<ipA>_<ipB>_<YYYYMMDD-HHMMSS>.xml` — ETS-telegram
+`l` saves the whole run to `oknx-<mode>-<compare|multi>_<ipA>_<ipB>_<YYYYMMDD-HHMMSS>.xml` — ETS-telegram
 shape plus the compare annotation, for offline analysis:
 
 ```xml

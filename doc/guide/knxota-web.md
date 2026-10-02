@@ -113,4 +113,4 @@ Different tools, different wires — and that is why the file manager feels so m
   file-manager upload in OFM-Network is the opposite — that one is a browser-side loop and dies with
   the page.
 * The page is a front-end only. Everything it can do, the console ([CONSOLE.md](console.md)) and
-  `ftc-cli` ([FTC-CLI.md](ftc-cli.md)) can do too.
+  `oknx` ([oknx.md](oknx.md)) can do too.

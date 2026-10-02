@@ -142,7 +142,7 @@ ESP32**. Its assets (`web/assets/knxota.css`, `knxota.js`) are embedded by OGM-C
 | `pio run -e release_REG2_PICO_ETH_DD` | builds; the knxOTA report from `show_flash_partitioning.py` prints at the end |
 | serial console: `ftm` | `stage: … [ETS]` · `idle window: … s` · `authorized now: …` — the command exists only with `OPENKNX_FTC_SECURITY` (`FileTransferModule.h:22-24`) |
 | serial console: `help` | an `ftc` line — registered only with `OPENKNX_FTC_CLIENT` |
-| from a *second* device or the PC binary: `ftc <pa> info` | FTM version + feature bits of the target |
+| from a *second* device (`ftc <pa> info`) or the PC binary (`oknx <pa> info`) | FTM version + feature bits of the target |
 | ETS, after `Build-knxprods.ps1` | OpenKNX ▸ Erweitert ▸ "Zugriffsschutz Service & Wartung" |
 
 You cannot test a device against itself — `ftc <own-PA>` times out by KNX design (QUICKSTART.md).

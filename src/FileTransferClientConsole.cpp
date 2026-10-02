@@ -45,9 +45,9 @@ void FileTransferClientConsole::showUsage()
     static const char RULE[] = "================================================================================";
     auto &c = _client;
     c.ftcOut(H, "%s", RULE);
-    c.ftcOut(H, "OpenKNX Embedded FileTransferClient - ftc commands");
+    c.ftcOut(H, "OpenKNX Embedded FileTransferClient - " FTC_CMD_NAME " commands");
     c.ftcOut(H, "%s", RULE);
-    c.ftcOut(H, "Per-target:  ftc <pa> <cmd> [args]");
+    c.ftcOut(H, "Per-target:  " FTC_CMD_NAME " <pa> <cmd> [args]");
     c.ftcOut(0, "");
 
     c.ftcOut(H, "Presence & info");
@@ -93,7 +93,7 @@ void FileTransferClientConsole::showUsage()
 #endif
     c.ftcOut(0, "");
 
-    c.ftcOut(H, "Global:  ftc <cmd>");
+    c.ftcOut(H, "Global:  " FTC_CMD_NAME " <cmd>");
 #ifdef OPENKNX_FTC_SCAN
     c.ftcOut(0, "  %-42s  %s", "scan [a.l | a b] [deep] [ets] [pace ms]", "Discover devices (ets = connection-oriented, finds more)");
 #endif
@@ -116,17 +116,17 @@ void FileTransferClientConsole::showUsage()
     c.ftcOut(0, "  send <src> / get <rem> [local]: the SOURCE / local-sink path takes the same prefix; send's remote name is always /<basename>");
     c.ftcOut(0, "");
     c.ftcOut(H, "Examples:");
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 send sd/app.bin.gz apply", "Upload from SD + auto-apply (RP target)");
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 u /fw.bin -fva", "Upload fast, live progress, then apply");
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 f", "Which features does it have, is it locked?");
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 receive /cfg.json sd/cfg.json", "Download a target file to SD");
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 perf 50 fast", "50 KB speed test, fast mode (no file needed)");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " 5.0.3 send sd/app.bin.gz apply", "Upload from SD + auto-apply (RP target)");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " 5.0.3 u /fw.bin -fva", "Upload fast, live progress, then apply");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " 5.0.3 f", "Which features does it have, is it locked?");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " 5.0.3 receive /cfg.json sd/cfg.json", "Download a target file to SD");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " 5.0.3 perf 50 fast", "50 KB speed test, fast mode (no file needed)");
 #ifdef OPENKNX_FTC_CONSOLE
-    c.ftcOut(0, "  %-42s  %s", "ftc 5.0.3 console", "Interactive console tunnel over KNX");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " 5.0.3 console", "Interactive console tunnel over KNX");
 #endif
 #ifdef OPENKNX_FTC_SCAN
-    c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets openknx", "Scan and discover OpenKNX devices on line 1.1 (connection-oriented)");
-    c.ftcOut(0, "  %-42s  %s", "ftc scan 1.1 ets save /scan.csv", "Discover devices on line 1.1 and write CSV to LittleFS");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " scan 1.1 ets openknx", "Scan and discover OpenKNX devices on line 1.1 (connection-oriented)");
+    c.ftcOut(0, "  %-42s  %s", FTC_CMD_NAME " scan 1.1 ets save /scan.csv", "Discover devices on line 1.1 and write CSV to LittleFS");
 #endif
     c.ftcOut(H, "%s", RULE);
 }
@@ -163,7 +163,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
 {
     if (_client.isBusy())
     {
-        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/console/scan is already running (ftc cancel to stop)");
+        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/console/scan is already running (" FTC_CMD_NAME " cancel to stop)");
         return;
     }
 
@@ -216,7 +216,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         if (strcmp(a2, "yes") != 0)
         {
             openknx.logger.logWithPrefix("FTC", "full scan sweeps the WHOLE bus (65535 addresses, can take ~40+ min).");
-            openknx.logger.logWithPrefix("FTC", "confirm with:  ftc scan full yes");
+            openknx.logger.logWithPrefix("FTC", "confirm with:  " FTC_CMD_NAME " scan full yes");
             return;
         }
         _client.requestScan(0x0001, 0xFFFF, "full bus", sw, co, okFlag, infoFlag, savePath, paceMs, drainMs, tmoMs);
@@ -230,18 +230,18 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         const int m = sscanf(cmd.c_str(), "ftc scan area %u %23s %79[^\n]", &ar, g1, grest);
         if (m < 1 || ar > 15)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc scan area <0..15> yes i really know what i am doing");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " scan area <0..15> yes i really know what i am doing");
             return;
         }
         if (m < 2 || strcmp(g1, "yes") != 0)
         {
             openknx.logger.logWithPrefixAndValues("FTC", "area %u scan = all 16 lines (~4080 addresses).", ar);
-            openknx.logger.logWithPrefixAndValues("FTC", "first confirm:  ftc scan area %u yes", ar);
+            openknx.logger.logWithPrefixAndValues("FTC", "first confirm:  " FTC_CMD_NAME " scan area %u yes", ar);
             return;
         }
         if (strcmp(grest, "i really know what i am doing") != 0)
         {
-            openknx.logger.logWithPrefixAndValues("FTC", "second confirm:  ftc scan area %u yes i really know what i am doing", ar);
+            openknx.logger.logWithPrefixAndValues("FTC", "second confirm:  " FTC_CMD_NAME " scan area %u yes i really know what i am doing", ar);
             return;
         }
         char lbl[24];
@@ -270,7 +270,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
             unsigned a2a = 0, l2 = 0, d2 = 0;
             if (sscanf(a2, "%u.%u.%u", &a2a, &l2, &d2) != 3 || a2a > 15 || l2 > 15 || d2 > 255)
             {
-                openknx.logger.logWithPrefix("FTC", "bad end address -- expected a.l.d, e.g. ftc scan 5.0.1 5.0.50");
+                openknx.logger.logWithPrefix("FTC", "bad end address -- expected a.l.d, e.g. " FTC_CMD_NAME " scan 5.0.1 5.0.50");
                 return;
             }
             end = (uint16_t)((a2a << 12) | (l2 << 8) | d2);
@@ -279,7 +279,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         return;
     }
 
-    openknx.logger.logWithPrefix("FTC", "usage: ftc scan [a.l | from to] [deep] [ets] [openknx|info] [save <path>] [pace <ms>] [drain <ms>] [tmo <ms>] | ftc scan full yes");
+    openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " scan [a.l | from to] [deep] [ets] [openknx|info] [save <path>] [pace <ms>] [drain <ms>] [tmo <ms>] | " FTC_CMD_NAME " scan full yes");
 }
 #endif
 
@@ -353,7 +353,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
 
     if (argc < 2)
     {
-        openknx.logger.logWithPrefix("FTC", "missing command -- try 'ftc ?'");
+        openknx.logger.logWithPrefix("FTC", "missing command -- try '" FTC_CMD_NAME " ?'");
         return true;
     }
     strncpy(sub, ftcCanonVerb(sub), sizeof(sub) - 1);
@@ -373,7 +373,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
 
     if (_client.isBusy())
     {
-        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/console/scan is already running (ftc cancel to stop)");
+        openknx.logger.logWithPrefix("FTC", "busy -- a transfer/console/scan is already running (" FTC_CMD_NAME " cancel to stop)");
         return true;
     }
 
@@ -391,7 +391,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> exists <path>");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> exists <path>");
             return true;
         }
         _client.requestExists(pa, arg);
@@ -402,7 +402,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3 || arg[0] == 0)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> login <password>  (max 16 chars, no spaces)");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> login <password>  (max 16 chars, no spaces)");
             return true;
         }
         _client.requestLogin(pa, arg);
@@ -468,7 +468,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> rm <remotepath>   e.g. ftc 5.0.3 rm /ftctest.bin");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> rm <remotepath>   e.g. " FTC_CMD_NAME " 5.0.3 rm /ftctest.bin");
             return true;
         }
         _client.requestDelete(pa, arg);
@@ -482,7 +482,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         const int n = sscanf(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %" FTC_PATH_SCAN "s %79s %79s", rem, a2, a3, a4);
         if (n < 1)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> receive <remotepath> [localpath] [pkg] [verbose]   e.g. ftc 5.0.3 receive fw.bin sd/fw.bin 16");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> receive <remotepath> [localpath] [pkg] [verbose]   e.g. " FTC_CMD_NAME " 5.0.3 receive fw.bin sd/fw.bin 16");
             return true;
         }
         // Order-tolerant trailing tokens: verbose/v is a flag anywhere; a pure number 16..240 is the download
@@ -519,7 +519,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         if (strcmp(arg, "yes") != 0)
         {
             openknx.logger.logWithPrefix("FTC", "format erases ALL files and folders on the target's filesystem.");
-            openknx.logger.logWithPrefixAndValues("FTC", "confirm with:  ftc %u.%u.%u format yes", FTC_PA_ARGS(pa));
+            openknx.logger.logWithPrefixAndValues("FTC", "confirm with:  " FTC_CMD_NAME " %u.%u.%u format yes", FTC_PA_ARGS(pa));
             return true;
         }
         _client.requestFormat(pa);
@@ -529,7 +529,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> mkdir <dir>   e.g. ftc 5.0.3 mkdir /logs");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> mkdir <dir>   e.g. " FTC_CMD_NAME " 5.0.3 mkdir /logs");
             return true;
         }
         _client.requestMkdir(pa, arg);
@@ -539,7 +539,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> rmdir <dir>   e.g. ftc 5.0.3 rmdir /logs");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> rmdir <dir>   e.g. " FTC_CMD_NAME " 5.0.3 rmdir /logs");
             return true;
         }
         _client.requestRmdir(pa, arg);
@@ -550,7 +550,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         char newp[80] = {0};
         if (sscanf(cmd.c_str(), "ftc %*s %*s %79s %79s", arg, newp) != 2)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> mv <old> <new>   e.g. ftc 5.0.3 mv /a.bin /b.bin");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> mv <old> <new>   e.g. " FTC_CMD_NAME " 5.0.3 mv /a.bin /b.bin");
             return true;
         }
         _client.requestRename(pa, arg, newp);
@@ -561,7 +561,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> fwupdate <remotepath>   e.g. ftc 5.0.3 fwupdate /fw.bin.gz");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> fwupdate <remotepath>   e.g. " FTC_CMD_NAME " 5.0.3 fwupdate /fw.bin.gz");
             return true;
         }
         _client.requestFwUpdate(pa, arg);
@@ -575,7 +575,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         if (argc < 3)
         {
-            openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> delta <patch> [remote]   e.g. ftc 5.0.3 delta sd/fw/1.1.0.okd");
+            openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> delta <patch> [remote]   e.g. " FTC_CMD_NAME " 5.0.3 delta sd/fw/1.1.0.okd");
             return true;
         }
         char remote[80] = {0};
@@ -656,7 +656,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
 
     if (strcmp(sub, "send") != 0 && strcmp(sub, "upload") != 0)
     {
-        openknx.logger.logWithPrefixAndValues("FTC", "unknown command '%s' -- try 'ftc ?'", sub);
+        openknx.logger.logWithPrefixAndValues("FTC", "unknown command '%s' -- try '" FTC_CMD_NAME " ?'", sub);
         return true;
     }
     // ftc <pa> send|upload <src> [<dst>] [options]. Operands are positional and typed; every modifier is
@@ -671,7 +671,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     ftcTok(p, tok, sizeof(tok), trunc); // <sub>
     if (!ftcTok(p, src, sizeof(src), trunc))
     {
-        openknx.logger.logWithPrefix("FTC", "usage: ftc <pa> send <src> [<dst>] [options]   e.g. ftc 5.0.3 send fw.bin sd/fw.bin --mode fast");
+        openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> send <src> [<dst>] [options]   e.g. " FTC_CMD_NAME " 5.0.3 send fw.bin sd/fw.bin --mode fast");
         return true;
     }
 

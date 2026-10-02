@@ -1,6 +1,18 @@
 # Changes
 
 
+## ec/v1dev -- the desktop tool is now `oknx`: 2026-09-29
+
+**Renaming of the PC tool -- breaking, without an alias**
+
+* Breaking: the desktop tool `ftc` is now `oknx`. There is no alias and no migration, so run `ftc uninstall` with the OLD binary BEFORE installing the new one -- nothing removes it later
+* The device console command stays `ftc`: what is typed ON a device (`ftc 5.0.3 send …`, `ftc <pa> con`) is unchanged, and so are the protocol name FTC, the `ftc::` namespace, the `FTC_*` / `FTM_*` / `OPENKNX_FTC_*` names and the `ftc*` methods of `knx.bau()`
+* The source directory `ftc-cli/` is now `oknx/`, the PlatformIO environments are `oknx-<os>-<arch>` (e.g. `pio run -e oknx-linux-x64`) and the built binary is `oknx` resp. `oknx.exe`
+* A product release carries the tool under `Tools/oknx/<OS>/<arch>/` instead of `Tools/ftc-cli/<OS>/<arch>/`
+* Configuration is read from `~/.config/oknx/config.toml` resp. `%APPDATA%\oknx\config.toml`, monitor exports are written to `~/.local/share/oknx` resp. `%LOCALAPPDATA%\oknx`, and `oknx install` puts the binary in `~/.local/bin` resp. `%LOCALAPPDATA%\Programs\oknx` -- the directories under the old name are neither read nor deleted
+* The language of a shell is pinned with `OKNX_LANG=de|en`; `FTC_LANG` is no longer read. Resolution order: `--lang` > the stored `config lang` > `OKNX_LANG` > the operating system > `LC_ALL` / `LC_MESSAGES` / `LANG` > English
+* Entries below this one name `ftc-cli` and `ftc`, which is what those releases shipped
+
 ## ec/v0.2.0-beta.1 -- third batch: 2026-09-15
 
 The tag was moved from `873ce01` to the head of this batch, so everything below is part of it.

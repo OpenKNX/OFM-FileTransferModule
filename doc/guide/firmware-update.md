@@ -15,7 +15,7 @@ filesystem, **apply** makes it boot from it.
 
 ```mermaid
 flowchart TD
-    A["ftc knxota &lt;file&gt;"] --> B["read the image<br/><i>which device, which version</i>"]
+    A["oknx knxota &lt;file&gt;"] --> B["read the image<br/><i>which device, which version</i>"]
     B --> C{"unfinished run<br/>for this checksum?"}
     C -->|yes| G
     C -->|no| D["pick interface and device"]
@@ -86,10 +86,10 @@ ftc 5.0.3 apply firmware.bin        apply -- target reboots
 ### PC
 
 ```bash
-ftc --ip 11.11.0.126 5.0.3 send firmware.bin fast
-ftc --ip 11.11.0.126 5.0.3 apply firmware.bin
+oknx --ip 11.11.0.126 5.0.3 send firmware.bin fast
+oknx --ip 11.11.0.126 5.0.3 apply firmware.bin
 
-ftc --ip 11.11.0.126 5.0.3 knxota firmware.bin    both in one, with checks
+oknx --ip 11.11.0.126 5.0.3 knxota firmware.bin   both in one, with checks
 ```
 
 `knxota` probes reachability first, refuses an image built for the wrong chip, and asks before it
@@ -106,7 +106,7 @@ pwsh Prepare-Firmware.ps1 -Delta       build a difference against an older firmw
 pwsh Prepare-Firmware.ps1 -All -NoMenu unattended
 ```
 
-`ftc gzip <file>` does the packing without PowerShell.
+`oknx gzip <file>` does the packing without PowerShell.
 
 ## Silence is the success case
 

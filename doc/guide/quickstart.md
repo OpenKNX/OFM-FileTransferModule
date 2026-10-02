@@ -7,7 +7,7 @@ the transfer?**
 |---|---|---|
 | a browser and an OpenKNX device with a web interface | the **knxOTA page** | [below](#1-browser-knxota-page) · [knxota-web.md](knxota-web.md) |
 | a serial or web console on an OpenKNX device | the **`ftc` command** | [below](#2-device-console) · [CONSOLE.md](console.md) |
-| a PC and a KNXnet/IP interface | the **`ftc` binary** | [below](#3-pc-ftc-cli) · [FTC-CLI.md](ftc-cli.md) |
+| a PC and a KNXnet/IP interface | the **`oknx` binary** | [below](#3-pc-oknx) · [oknx.md](oknx.md) |
 
 All three drive the *same* client code against the *same* server in the target device. Nothing else
 differs.
@@ -15,7 +15,7 @@ differs.
 ```
    browser ─┐
    console ─┼─▶  FileTransferClient  ──KNX──▶  FileTransferModule  ──▶  LittleFS · SD · ext-flash
-   ftc-cli ─┘    (one state machine)           (in the target device)
+      oknx ─┘    (one state machine)           (in the target device)
 ```
 
 ## Before you start
@@ -63,20 +63,20 @@ The full command surface: [CONSOLE.md](console.md).
 
 ---
 
-## 3. PC: ftc-cli
+## 3. PC: oknx
 
 One binary, no dependencies, macOS · Linux · Windows · Raspberry Pi.
 
 ```bash
-ftc --discover                                   find interfaces on the LAN
-ftc --ip 11.11.0.126 5.0.3 info                  fingerprint the target
-ftc --ip 11.11.0.126 5.0.3 send fw.bin.gz fast   push a file
-ftc --ip 11.11.0.126 5.0.3 knxota fw.bin         transfer and apply in one go
-ftc --ip 11.11.0.126 5.0.3 con                   remote console
+oknx --discover                                  find interfaces on the LAN
+oknx --ip 11.11.0.126 5.0.3 info                 fingerprint the target
+oknx --ip 11.11.0.126 5.0.3 send fw.bin.gz fast  push a file
+oknx --ip 11.11.0.126 5.0.3 knxota fw.bin        transfer and apply in one go
+oknx --ip 11.11.0.126 5.0.3 con                  remote console
 ```
 
 `--ip` is the **interface you tunnel through**, `<pa>` is the **target on the bus**. The full
-reference: [FTC-CLI.md](ftc-cli.md).
+reference: [oknx.md](oknx.md).
 
 ---
 
@@ -89,10 +89,10 @@ The short version. The long one, including what to do when it fails: [FIRMWARE-U
 pwsh Prepare-Firmware.ps1              # offers full image, gzip or delta
 
 # 2. transfer it
-ftc --ip <interface> <pa> send firmware.bin fast
+oknx --ip <interface> <pa> send firmware.bin fast
 
 # 3. apply it -- the target reboots
-ftc --ip <interface> <pa> apply firmware.bin
+oknx --ip <interface> <pa> apply firmware.bin
 ```
 
 **Silence after `apply` means it worked** — the device answers nothing and reboots. An answer means

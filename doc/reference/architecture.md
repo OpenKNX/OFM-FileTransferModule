@@ -9,7 +9,7 @@ transport looks the way it does. The command surface itself is in [PROTOCOL.md](
 flowchart TB
     subgraph FE["front ends"]
         direction LR
-        cli["ftc-cli<br/><i>PC · macOS Linux Windows Pi</i>"]
+        cli["oknx<br/><i>PC · macOS Linux Windows Pi</i>"]
         dcon["device console<br/><i>ftc … on the device itself</i>"]
         web["web file manager<br/><i>OFM-Network · HTTP</i>"]
     end
@@ -52,7 +52,7 @@ carried over ([../guide/throughput.md](../guide/throughput.md)).
    PC                               KNXnet/IP                    TP1 bus            Device
   ────                             ───────────                  ─────────          ────────
 
-  ftc                                                                          FileTransferModule
+  oknx                                                                         FileTransferModule
    │                                                                                    │
    │  FileTransferClient  ──┐                                                           │
    │  (the same source                                                                  │
@@ -60,7 +60,7 @@ carried over ([../guide/throughput.md](../guide/throughput.md)).
    │                        ▼                                                           │
    │              ┌──────────────────┐      UDP 3671      ┌───────────┐   ~400 B/s      │
    └─────────────▶│  KnxIpTunnel     │───────────────────▶│ Interface │────────────────▶│
-                  │  (ftc-cli/shim)  │◀───────────────────│           │◀────────────────│
+                  │  (oknx/shim)     │◀───────────────────│           │◀────────────────│
                   └──────────────────┘                    └───────────┘                 │
                                                                                         ▼
                                                             LittleFS  ·  SD  ·  ExtFlash
@@ -136,7 +136,7 @@ moving between drives is a copy plus a delete.
   Device                                   PC
   ──────                                   ──
   FileTransferClient.cpp   ◀── identical ──▶   FileTransferClient.cpp
-  knx.bau()                                    ftc-cli/shim/  →  KnxIpTunnel
+  knx.bau()                                    oknx/shim/     →  KnxIpTunnel
   serial console `ftc …`                       argv  →  the same command parser
 ```
 
@@ -144,4 +144,4 @@ The PC client carries **no** protocol logic of its own. It only provides a base 
 `knx.bau()` onto a KNXnet/IP tunnel. What works on the device therefore works on the PC — and a
 protocol bug shows on both sides instead of hiding between two implementations.
 
-Built for eight targets; the list and the build itself are in [FTC-CLI.md](../guide/ftc-cli.md).
+Built for eight targets; the list and the build itself are in [oknx.md](../guide/oknx.md).

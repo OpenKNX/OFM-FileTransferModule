@@ -57,7 +57,7 @@ frames it sent itself; you need a second interface ([QUICKSTART.md](quickstart.m
 
 The web console passes typed lines through the same path (`Console::submitLine()` into `_lineSink`),
 so the serial and the web console run side by side. The desktop client can additionally reach the
-console of the **interface** over WebSocket (`ftc -i <ip> con`) — another way to the same place,
+console of the **interface** over WebSocket (`oknx -i <ip> con`) — another way to the same place,
 without the bus.
 
 ## Build flag

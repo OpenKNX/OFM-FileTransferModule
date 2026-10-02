@@ -4,7 +4,7 @@
 **byte-identical** (no edits) on macOS/Linux/Windows, without compiling `lib/knx` or the OpenKNX Arduino
 stack.
 
-## Files in scope (compiled verbatim by `ftc-cli`)
+## Files in scope (compiled verbatim by `oknx`)
 
 | File | Lines | Real path |
 |------|------:|-----------|
@@ -22,7 +22,7 @@ Path note: in this repo `lib/knx -> ../../knx` and `lib/OFM-FileTransferModule -
   named earlier no longer exists; the gates are per feature (`_CLIENT`, `_CONSOLE`,
   `_DELTA_UPDATE`, `_DEVICEINFO`, `_SCAN`, `_SECURITY`, `_KNXOTA_WEB`).
 - `OPENKNX_FTC_CONSOLE` — optional; enables the console-tunnel code paths (`requestConsole`, obj-160,
-  `setLineSink`). Recommended ON for a full ftc-cli.
+  `setLineSink`). Recommended ON for a full `oknx` build.
 - The shim's `OpenKNX.h` must **not** be the real one: the real one hard-`#error`s unless one of
   `ARDUINO_ARCH_SAMD/RP2040/ESP32` is defined (`OGM-Common/src/OpenKNX.h:7-9`). The shim replaces it, so
   define **none** of those arch macros. Consequence: the `#ifdef ARDUINO_ARCH_RP2040` branch in
@@ -344,7 +344,7 @@ struct FtcBackend
 };
 ```
 
-These are **project-owned** structs (no shim), but the ftc-cli backends plug into them. Registration API:
+These are **project-owned** structs (no shim), but the `oknx` backends plug into them. Registration API:
 `void registerFileBackend(const char* prefix, const FtcFileSource& src, const FtcFileSink& sink,
 bool (*available)() = nullptr, uint64_t (*freeBytes)() = nullptr)` — decl `FileTransferClient.h:124-125`,
 def `FileTransferClient.cpp:44-54`, bounded to 4 slots (`_backends[4]`, `FileTransferClient.h:603`).
@@ -353,18 +353,18 @@ def `FileTransferClient.cpp:44-54`, bounded to 4 slots (`_backends[4]`, `FileTra
 (`FileTransferClient.cpp:131-136`, backed by `littleFsOpen/ftcSharedRead/ftcSharedClose` +
 `littleFsSinkOpen/ftcSharedSinkWrite/ftcSharedSinkClose` + `littleFsAvailable/littleFsFree`,
 `:105-127`). For the host this means: with the `LittleFS.h` shim of §1.3, the default backend "just works"
-against the host filesystem — no extra ftc-cli backend is strictly required to run.
+against the host filesystem — no extra `oknx` backend is strictly required to run.
 
 **Prefixes the resolver recognizes** (`ftcResolveBackend`, `FileTransferClient.cpp:57-81`): a named prefix
 matches when `path` starts with `prefix` **and** the next char is `'/'` (e.g. `"sd/x"` → backend `"sd"`,
 stripped `"/x"`); `""` is the default fallback (unstripped). Named backends `sd/` (SD) and `efc/`
 (ext-flash) self-register **from other modules** (`FileTransferClient.h:44-52,122-123` comments) — those
-modules are **not** in the four-file scope, so on host only `/` (LittleFS/default) exists unless the
-ftc-cli registers its own `sd`/`efc`. The `test` source is not a backend prefix; it is the `_ftcTestSource`
+modules are **not** in the four-file scope, so on host only `/` (LittleFS/default) exists unless
+`oknx` registers its own `sd`/`efc`. The `test` source is not a backend prefix; it is the `_ftcTestSource`
 generated RAM pattern path (`FileTransferClient.h:321`), selected internally by perf, not via prefix.
 
 `extern FileTransferClient openknxFileTransferClient;` (`FileTransferClient.h:617`) is **defined inside the
-compiled set** at `FileTransferClient.cpp:4986` — the ftc-cli does **not** need to provide it.
+compiled set** at `FileTransferClient.cpp:4986` — `oknx` does **not** need to provide it.
 
 ---
 

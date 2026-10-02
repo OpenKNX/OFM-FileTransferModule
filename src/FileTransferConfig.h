@@ -130,4 +130,19 @@
     #define FTM_DELTA_MAGIC "OKD1"
     #define FTM_DELTA_VERSION 1
     #define FTM_DELTA_HDR_SIZE 36
+
+#endif
+
+// The front end the READER is using. FileTransferClientConsole.cpp parses the same command line on the
+// device console and inside the PC tool, so its usage lines have to name the right one: `ftc` on the
+// device, `oknx` on the PC. On a device build this expands to "ftc" and every string stays as it was.
+// FTC_CMD_NAME names the front end; FTC_CMD_RUN is how a whole command is INVOKED there. They differ
+// on the PC, where every command that addresses a device needs the interface to tunnel through, so a
+// hint printed with the bare name would not run. On a device build both expand to "ftc" as before.
+#ifdef FTC_HOST_BUILD
+    #define FTC_CMD_NAME "oknx"
+    #define FTC_CMD_RUN  "oknx --ip <interface>"
+#else
+    #define FTC_CMD_NAME "ftc"
+    #define FTC_CMD_RUN  "ftc"
 #endif

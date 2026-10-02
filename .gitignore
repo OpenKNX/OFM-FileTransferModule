@@ -351,7 +351,7 @@ MigrationBackup/
 # Ionide (cross platform F# VS Code tools) working folder
 .ionide/
 
-# PlatformIO build tree (ftc-cli native build output)
+# PlatformIO build tree (oknx native build output)
 .pio/
 
 # macOS Finder metadata

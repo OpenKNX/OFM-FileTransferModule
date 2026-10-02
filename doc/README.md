@@ -26,7 +26,7 @@ guide is the shorter one.
 | How do I get going at all? | [quickstart.md](guide/quickstart.md) |
 | How do I flash a device over the bus? | [firmware-update.md](guide/firmware-update.md) |
 | How does the browser page work? | [knxota-web.md](guide/knxota-web.md) |
-| What can the desktop client do? | [ftc-cli.md](guide/ftc-cli.md) |
+| What can the desktop client do? | [oknx.md](guide/oknx.md) |
 | How do I reach a device's console over the bus? | [console.md](guide/console.md) |
 | Why is writing locked, and how do I log in? | [unlocking-a-device.md](guide/unlocking-a-device.md) |
 | How long will my transfer take, `safe` or `fast`? | [throughput.md](guide/throughput.md) |
@@ -76,12 +76,12 @@ guide is the shorter one.
 src/FileTransferModule.*        server in the device — files, directories, firmware, console
 src/FileTransferClient*.*       client              — on the device (console) AND on the PC
 src/FirmwarePatch.*             delta interpreter (both sides, the same source)
-ftc-cli/                        native desktop client (macOS · Linux · Windows · Raspberry Pi)
+oknx/                           native desktop client (macOS · Linux · Windows · Raspberry Pi)
 ```
 
 `src/FileTransferClient*` is compiled **unchanged** on the PC — the desktop client is not a rewrite but
-the same code on a different base (`ftc-cli/shim/`). See [architecture.md](reference/architecture.md)
+the same code on a different base (`oknx/shim/`). See [architecture.md](reference/architecture.md)
 and, for the exact contract, [host-shim.md](reference/host-shim.md).
 
 The desktop client also carries its own build-and-install readme:
-[`../ftc-cli/README.md`](../ftc-cli/README.md).
+[`../oknx/README.md`](../oknx/README.md).

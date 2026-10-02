@@ -68,11 +68,11 @@ pwsh Prepare-Firmware.ps1        # menu: full image, gzip or delta, with a file 
 
 See [FIRMWARE-UPDATE.md](../guide/firmware-update.md).
 
-## Building ftc-cli
+## Building oknx
 
-`ftc-cli/scripts/pio_zig_cross.py` is a PlatformIO pre-hook, not a user script: it pulls a
+`oknx/scripts/pio_zig_cross.py` is a PlatformIO pre-hook, not a user script: it pulls a
 project-local `zig` and sets the cross-compiler per target, so a single `pio run` produces all eight
-binaries ([FTC-CLI.md](../guide/ftc-cli.md)). It is Python because PlatformIO requires `extra_scripts` to be
+binaries ([oknx.md](../guide/oknx.md)). It is Python because PlatformIO requires `extra_scripts` to be
 Python.
 
 ## Convention

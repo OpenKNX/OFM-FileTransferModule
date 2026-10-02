@@ -23,7 +23,7 @@ never set by a product.
 -D OPENKNX_FTC_CONSOLE                ; why separate: see below
 ```
 
-**Interface, router, `ftc-cli` host** — three lines:
+**Interface, router, `oknx` host** — three lines:
 
 ```ini
 -D OPENKNX_FTC_PROFILE_MANAGER

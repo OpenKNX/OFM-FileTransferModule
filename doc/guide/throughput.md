@@ -66,7 +66,7 @@ currently gives, while `fast` only learns from the report that part of a window 
 bus `fast` is reliably the faster of the two.
 
 The window regulates itself and shows what it is doing; `--window <N>` pins it. What the display means:
-[FTC-CLI.md](ftc-cli.md).
+[oknx.md](oknx.md).
 
 ## Why the web interface feels faster
 
