@@ -1,7 +1,7 @@
 # Changes
 
 
-## ec/v1dev -- the desktop tool is now `oknx`: 2026-09-29
+## ec/v1dev -- `oknx`, legacy servers, hardening: 2026-09-29
 
 **Renaming of the PC tool -- breaking, without an alias**
 
@@ -12,6 +12,21 @@
 * Configuration is read from `~/.config/oknx/config.toml` resp. `%APPDATA%\oknx\config.toml`, monitor exports are written to `~/.local/share/oknx` resp. `%LOCALAPPDATA%\oknx`, and `oknx install` puts the binary in `~/.local/bin` resp. `%LOCALAPPDATA%\Programs\oknx` -- the directories under the old name are neither read nor deleted
 * The language of a shell is pinned with `OKNX_LANG=de|en`; `FTC_LANG` is no longer read. Resolution order: `--lang` > the stored `config lang` > `OKNX_LANG` > the operating system > `LC_ALL` / `LC_MESSAGES` / `LANG` > English
 * Entries below this one name `ftc-cli` and `ftc`, which is what those releases shipped
+
+**Older FTM servers are usable instead of being refused**
+
+* Feature: a server from 0.0.4 onwards is driven with the feature set it actually answers, instead of being reported as too old. What it cannot do is named on the line rather than failing silently
+* Fix: a one-octet answer to `ModuleVersion` is a STATUS, not a version. The length guard ran first, so a reachable device whose access stage refuses writes was reported as "older than 0.0.3" instead of naming the refusal it gave
+* 0.1.5 and 0.1.6 cannot be told apart by version alone, so the console tunnel is reported as unproven rather than absent
+* `fast` falls back to `classic` with the reason on the line when the server does not offer it
+* Measured against FTM 0.0.4 and 0.1.x on 5.0.8 and 5.0.3
+
+**Hardening suite**
+
+* Fix: F-N-5 abandoned `ftc <pa> ll` after 2000 ms while the pre-flight allows the same command 25000 ms, so the tail of the listing was charged to the next probe as that probe's own latency. The number tracked how many files the directory held -- 1240 ms with leftovers, 375 ms against an empty one -- not device health
+* The case now lets the listing finish and judges the return to the loop; its title says so. Responsiveness DURING a listing is not measurable here at all, because probe and listing share one serial console
+* `Measure-FtmResponsiveness` returns the per-probe gaps, so a failure can be read from the report instead of being inferred across twelve runs
+* `Remove-FtmArtefact` also removes directories: `rm` leaves one behind and the next run fails on it
 
 ## ec/v0.2.0-beta.1 -- third batch: 2026-09-15
 

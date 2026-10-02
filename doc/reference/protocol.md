@@ -63,6 +63,23 @@ bitmap never claims a block the device did not store.
 | 105 | `AuthLogout` | — | Code |
 | 106 | `FwProbe` | `[len:4][crc:4]` | Code + extra · also the **job status** ([DELTA.md](delta.md)) |
 
+### Older servers
+
+`ModuleVersion (100)` is the first thing a client asks, and the answer decides what follows. Three
+shapes, and the order they are tested in matters:
+
+| answer | meaning |
+|---|---|
+| **1 octet** | a STATUS, not a version — the access gate refused the command (`0xA2` at stage *Off*). Checking the length before the status reported a reachable device as "older than 0.0.3" |
+| **≥ 6 octets** | a version; the client then asks `CheckFeatures (102)` |
+| nothing | the device does not serve FTC |
+
+A server from **0.0.4** on is driven with the feature set it answers rather than being refused.
+Two limits are reported rather than guessed: a derived `Update` flag prints as `Update?`, and
+**0.1.5 cannot be told apart from 0.1.6 by version alone**, so the console tunnel is reported as
+unproven instead of absent. Where `fast` is not offered, the client falls back to `classic` and
+says why on the line.
+
 ## Response codes
 
 The first result byte. **Codes below `0x40` are per-command status, not shared errors** — the same
