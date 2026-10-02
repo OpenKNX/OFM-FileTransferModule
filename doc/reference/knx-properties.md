@@ -1,6 +1,6 @@
 # KNX interface objects and properties
 
-**For:** anyone using `ftc prop`, `ftc busprop` or `ftc … runstate` to read or write the KNX resources of
+**For:** anyone using `oknx prop`, `oknx busprop` or `oknx … runstate` to read or write the KNX resources of
 a device. What an object index is, which objects and PIDs a device actually has, and how to read the
 answers.
 
@@ -43,7 +43,7 @@ application program object). That is permitted: 03_05_01 states a numbering requ
 channel objects, and there explicitly says indices "do not need to be in consecutive order" (p.162, p.181).
 
 **Consequence for any client: never guess an index, and never derive it by counting.** Read `PID_OBJECT_TYPE`
-(PID 1) per index, or read the device object's `PID_IO_LIST`. This is not theory — `ftc … runstate` shipped
+(PID 1) per index, or read the device object's `PID_IO_LIST`. This is not theory — `oknx … runstate` shipped
 with a hard-coded index 3, asked the group object table instead of the application program, and reported a
 property as "not implemented" that simply was not on that object.
 
@@ -176,7 +176,7 @@ Writing PID 5 takes a **10 octet** load event (`00` NOP, `01` Start loading, `02
 This stack answers PID 6 with `00` while the load state is not `Loaded`, otherwise `01` or `03` — the two
 optional states Starting and Shutting down are never reported because start-up and shutdown are immediate.
 
-`ftc <pa> runstate [start|stop]` wraps this: it resolves the application program object by type, reads
+`oknx <pa> runstate [start|stop]` wraps this: it resolves the application program object by type, reads
 PID 6, and with an argument writes `01`/`02`. Stop halts group communication — the device stops sending
 group telegrams and ignores incoming group reads and writes — while property and memory access stay up, so
 it can always be started again.
@@ -188,7 +188,7 @@ bus: per 08_03_07 §2.13.3 an unknown PID is answered with `nr_of_elem = 0` and 
 ## Reading the output
 
 ```
-$ ftc -i 11.11.0.210 busprop read 5.0.8 4 6
+$ oknx -i 11.11.0.210 busprop read 5.0.8 4 6
 busprop read pa=5.0.8 objIdx=4 PID=6 startIdx=1 noe=1
   -> 0 byte:
 ```

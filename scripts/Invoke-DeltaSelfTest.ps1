@@ -16,17 +16,17 @@ FILEPATH: OFM-FileTransferModule/scripts/Invoke-DeltaSelfTest.ps1
       2. Every malformed patch is refused, with the reason it deserves, and nothing is produced.
 
     Both are checked here, on the host, in seconds. The interpreter under test is the very source the
-    firmware compiles (src/FirmwarePatch.cpp) -- `ftc delta apply` drives it -- so a green run says something
+    firmware compiles (src/FirmwarePatch.cpp) -- `oknx delta apply` drives it -- so a green run says something
     about the device path and not about a host-only lookalike.
 
     Each malformed case mutates ONE thing in an otherwise valid patch and expects ONE reason. Where a
     mutation can legitimately trip two guards, both are accepted; anything else is a failure, including
     "refused for a different reason", because a wrong reason means the wrong guard fired.
 
-    `ftc delta apply` exits with 10 + reason, so the exit code identifies the guard that stopped it.
+    `oknx delta apply` exits with 10 + reason, so the exit code identifies the guard that stopped it.
 
-.PARAMETER Ftc
-    The ftc binary. Defaults to the macOS arm64 build inside this repository.
+.PARAMETER Oknx
+    The oknx binary. Defaults to the macOS arm64 build inside this repository.
 
 .PARAMETER Old
     Image the patch is built against. Any two firmware images of the same target will do; two builds
@@ -42,15 +42,15 @@ FILEPATH: OFM-FileTransferModule/scripts/Invoke-DeltaSelfTest.ps1
     ./Invoke-DeltaSelfTest.ps1 -Old old.bin -New new.bin
 
 .EXAMPLE
-    ./Invoke-DeltaSelfTest.ps1 -Ftc ~/bin/ftc -Old a.bin -New b.bin -WorkDir /tmp/delta
+    ./Invoke-DeltaSelfTest.ps1 -Oknx ~/bin/oknx -Old a.bin -New b.bin -WorkDir /tmp/delta
 #>
 
 [CmdletBinding()]
 param(
-    [string]$Ftc = (Join-Path $PSScriptRoot '../ftc-cli/.pio/build/ftc-cli-macos-arm64/ftc'),
+    [string]$Oknx = (Join-Path $PSScriptRoot '../oknx/.pio/build/oknx-macos-arm64/oknx'),
     [Parameter(Mandatory = $true)][string]$Old,
     [Parameter(Mandatory = $true)][string]$New,
-    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'ftc-delta-selftest')
+    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'oknx-delta-selftest')
 )
 
 Set-StrictMode -Version Latest
@@ -104,7 +104,7 @@ function Assert-Reason {
     if (Test-Path $out) { Remove-Item $out -Force }
     $callArgs = @('delta', 'apply', $Old, $file, $out)
     if ($Limit -ne '') { $callArgs += @('--limit', $Limit) }
-    & $Ftc @callArgs *> $null
+    & $Oknx @callArgs *> $null
     $code = $LASTEXITCODE
     $want = $Expect | ForEach-Object { 10 + $_ }
     if ($want -contains $code) {
@@ -135,7 +135,7 @@ function Assert-True {
 }
 
 # ─── Setup ────────────────────────────────────────────────────────────────────────────────────────
-if (-not (Test-Path $Ftc)) { throw "ftc binary not found: $Ftc" }
+if (-not (Test-Path $Oknx)) { throw "oknx binary not found: $Oknx" }
 if (-not (Test-Path $Old)) { throw "source image not found: $Old" }
 if (-not (Test-Path $New)) { throw "target image not found: $New" }
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
@@ -154,9 +154,9 @@ Assert-True 'crc implementation' ($check -eq 0x765E7680) ('check value 0x{0:X8}'
 # ─── H-1 round trip ───────────────────────────────────────────────────────────────────────────────
 $good = Join-Path $WorkDir 'good.okd'
 $rebuilt = Join-Path $WorkDir 'rebuilt.bin'
-& $Ftc delta make $Old $New $good *> $null
+& $Oknx delta make $Old $New $good *> $null
 Assert-True 'patch built' ($LASTEXITCODE -eq 0 -and (Test-Path $good)) ("{0} B" -f (Get-Item $good).Length)
-& $Ftc delta apply $Old $good $rebuilt *> $null
+& $Oknx delta apply $Old $good $rebuilt *> $null
 Assert-True 'patch applied' ($LASTEXITCODE -eq 0) ''
 $a = [System.IO.File]::ReadAllBytes($New)
 $b = [System.IO.File]::ReadAllBytes($rebuilt)
@@ -166,7 +166,7 @@ Assert-True 'rebuilt image' $same 'byte for byte identical to the target'
 
 # ─── H-2 reproducible encoder ─────────────────────────────────────────────────────────────────────
 $twice = Join-Path $WorkDir 'twice.okd'
-& $Ftc delta make $Old $New $twice *> $null
+& $Oknx delta make $Old $New $twice *> $null
 $p1 = [System.IO.File]::ReadAllBytes($good)
 $p2 = [System.IO.File]::ReadAllBytes($twice)
 $rep = $p1.Length -eq $p2.Length
@@ -176,10 +176,10 @@ Assert-True 'encoder reproducible' $rep 'same inputs produce the same patch'
 # ─── Packed patch: same round trip, and smaller ───────────────────────────────────────────────────
 $packed = Join-Path $WorkDir 'good.okdz'
 $rebuiltZ = Join-Path $WorkDir 'rebuiltz.bin'
-& $Ftc delta make $Old $New $packed --pack *> $null
+& $Oknx delta make $Old $New $packed --pack *> $null
 Assert-True 'packed patch built' ($LASTEXITCODE -eq 0 -and (Test-Path $packed)) `
     ("{0} B vs {1} B plain" -f (Get-Item $packed).Length, (Get-Item $good).Length)
-& $Ftc delta apply $Old $packed $rebuiltZ *> $null
+& $Oknx delta apply $Old $packed $rebuiltZ *> $null
 $c = [System.IO.File]::ReadAllBytes($rebuiltZ)
 $sameZ = $a.Length -eq $c.Length
 if ($sameZ) { for ($i = 0; $i -lt $a.Length; $i++) { if ($a[$i] -ne $c[$i]) { $sameZ = $false; break } } }

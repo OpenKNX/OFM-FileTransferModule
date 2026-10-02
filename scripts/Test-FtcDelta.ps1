@@ -26,8 +26,8 @@ FILEPATH: OFM-FileTransferModule/scripts/Test-FtcDelta.ps1
     The proof that an update happened is the device's own Buildtime. It changes with every build, so a
     device reporting the new one has really started the new firmware -- no inference from "no error".
 
-.PARAMETER Ftc
-    The ftc binary.
+.PARAMETER Oknx
+    The oknx binary.
 
 .PARAMETER Ip
     Interface used to reach the bus.
@@ -56,12 +56,12 @@ FILEPATH: OFM-FileTransferModule/scripts/Test-FtcDelta.ps1
 
 [CmdletBinding()]
 param(
-    [string]$Ftc = (Join-Path $PSScriptRoot '../ftc-cli/.pio/build/ftc-cli-macos-arm64/ftc'),
+    [string]$Oknx = (Join-Path $PSScriptRoot '../oknx/.pio/build/oknx-macos-arm64/oknx'),
     [Parameter(Mandatory = $true)][string]$Ip,
     [Parameter(Mandatory = $true)][string]$Pa,
     [Parameter(Mandatory = $true)][string]$Old,
     [Parameter(Mandatory = $true)][string]$New,
-    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'ftc-delta-hw'),
+    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'oknx-delta-hw'),
     [switch]$SkipApply
 )
 
@@ -95,20 +95,20 @@ function Step {
     }
 }
 
-function Invoke-Ftc {
-    param([string[]]$FtcArgs)
-    $out = & $Ftc --ip $Ip @FtcArgs 2>&1 | Out-String
+function Invoke-Oknx {
+    param([string[]]$OknxArgs)
+    $out = & $Oknx --ip $Ip @OknxArgs 2>&1 | Out-String
     return $out
 }
 
 function Get-Buildtime {
     # The device prints Buildtime on its own console; the console tunnel is how we read it back.
-    $out = Invoke-Ftc @($Pa, 'con', 'version')
+    $out = Invoke-Oknx @($Pa, 'con', 'version')
     if ($out -match 'Buildtime\D+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { return $Matches[1] }
     return ''
 }
 
-if (-not (Test-Path $Ftc)) { throw "ftc binary not found: $Ftc" }
+if (-not (Test-Path $Oknx)) { throw "oknx binary not found: $Oknx" }
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 $patch = Join-Path $WorkDir 'hw.okd'
 
@@ -118,7 +118,7 @@ Write-Host ''
 
 # ─── Preparation ──────────────────────────────────────────────────────────────────────────────────
 Step 'patch built from the pair' {
-    & $Ftc delta make $Old $New $patch *> $null
+    & $Oknx delta make $Old $New $patch *> $null
     return ($LASTEXITCODE -eq 0 -and (Test-Path $patch))
 }
 
@@ -126,7 +126,7 @@ $size = if (Test-Path $patch) { (Get-Item $patch).Length } else { 0 }
 Write-Host ("        patch {0} B, about {1:N1} min on the bus at 480 B/s" -f $size, ($size / 480 / 60)) -ForegroundColor DarkGray
 
 # ─── G-10 / P-4: does the target advertise the feature at all? ────────────────────────────────────
-$feat = Invoke-Ftc @($Pa, 'feat')
+$feat = Invoke-Oknx @($Pa, 'feat')
 $hasDelta = $feat -match '(?i)delta'
 Step 'target advertises the delta feature' { return $hasDelta }
 
@@ -137,9 +137,9 @@ Write-Host ("        buildtime before: {0}" -f $(if ($before) { $before } else {
 # ─── P-3: a patch for a DIFFERENT base has to be refused before anything is transferred ───────────
 Step 'patch for a foreign base is refused, nothing sent' {
     $wrong = Join-Path $WorkDir 'wrong.okd'
-    & $Ftc delta make $New $Old $wrong *> $null   # built the other way round -> expects the NEW image
+    & $Oknx delta make $New $Old $wrong *> $null   # built the other way round -> expects the NEW image
     if ($LASTEXITCODE -ne 0) { return $false }
-    $out = Invoke-Ftc @($Pa, 'delta', $wrong)
+    $out = Invoke-Oknx @($Pa, 'delta', $wrong)
     return ($out -match '(?i)different image|full image')
 }
 
@@ -149,7 +149,7 @@ if ($SkipApply) {
 }
 else {
     Step 'update applied and the device reports the new build' {
-        $out = Invoke-Ftc @($Pa, 'delta', $patch)
+        $out = Invoke-Oknx @($Pa, 'delta', $patch)
         if ($out -notmatch '(?i)base confirmed') { return $false }
         Start-Sleep -Seconds 20   # transfer + rebuild + reboot
         $after = Get-Buildtime
