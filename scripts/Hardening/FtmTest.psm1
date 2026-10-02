@@ -779,4 +779,26 @@ function Invoke-FtmSelfTest {
     return [pscustomobject]@{ Total = $cases.Count; Failed = $failed.Count; Ok = ($failed.Count -eq 0); Cases = @($cases) }
 }
 
+function Remove-FtmArtefact {
+    <#
+    .SYNOPSIS
+        Removes the files a suite wrote to the target device.
+    .DESCRIPTION
+        A suite that leaves its probe files behind makes the NEXT run fail. Measured 2026-09-26 on
+        5.0.3: with ftctest.bin and ftm-state-probe*.bin present, F-S-4 and F-N-5 failed every time
+        (a listing stalled 1240-1309 ms in five runs), while the same stage against an empty
+        directory was 38/0/0/6/7 - so the verdict depended on the order the runs happened in.
+        Never throws: cleanup must not turn itself into a test result.
+    #>
+    param(
+        [Parameter(Mandatory)]$Console,
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string[]]$Names
+    )
+    foreach ($n in $Names) {
+        try { [void](Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target rm $n" -TimeoutMs 15000) }
+        catch { Write-Host "  cleanup: $n not removed ($($_.Exception.Message))" -ForegroundColor DarkGray }
+    }
+}
+
 Export-ModuleMember -Function *-* -Variable @()

@@ -180,4 +180,8 @@ function Invoke-FtmSuiteState {
         $still = Test-FtmStillWorks -Console $con -Target $t
         Assert-FtmTrue $still.Ok 'the client is wedged after addressing itself - the documented limit must fail cleanly, not hang'
     }
+
+    # This suite writes to the device; what it wrote goes away again, or the next run
+    # inherits it and fails on state this run created.
+    Remove-FtmArtefact -Console $con -Target $t -Names @('ftm-state-probe.bin', 'ftm-state-probe2.bin')
 }

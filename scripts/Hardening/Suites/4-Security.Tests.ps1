@@ -189,4 +189,8 @@ function Invoke-FtmSuiteAccess {
         # unlocked is worse than a test that did not run.
         [void](Set-FtmSecurityStage -Console $con -Stage $restore)
     }
+
+    # This suite writes to the device; what it wrote goes away again, or the next run
+    # inherits it and fails on state this run created.
+    Remove-FtmArtefact -Console $con -Target $t -Names @('ftm-acl-probe.bin', 'ftm-acl-probe2.bin')
 }

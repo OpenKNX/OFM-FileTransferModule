@@ -202,4 +202,8 @@ function Invoke-FtmSuiteResponse {
         Assert-FtmTrue ($second.Trim().Length -gt 0) 'the command after a timed-out one produced no output - the client is still busy'
         Assert-FtmNotMatch $second '(?i)(busy|in progress|already running)' 'the client still considers the previous, timed-out operation active'
     }
+
+    # This suite writes to the device; what it wrote goes away again, or the next run
+    # inherits it and fails on state this run created.
+    Remove-FtmArtefact -Console $con -Target $t -Names @('ftctest.bin')
 }
