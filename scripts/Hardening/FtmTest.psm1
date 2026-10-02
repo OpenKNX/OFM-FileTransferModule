@@ -782,22 +782,38 @@ function Invoke-FtmSelfTest {
 function Remove-FtmArtefact {
     <#
     .SYNOPSIS
-        Removes the files a suite wrote to the target device.
+        Removes the files and directories a suite wrote to the target device.
     .DESCRIPTION
         A suite that leaves its probe files behind makes the NEXT run fail. Measured 2026-09-26 on
         5.0.3: with ftctest.bin and ftm-state-probe*.bin present, F-S-4 and F-N-5 failed every time
         (a listing stalled 1240-1309 ms in five runs), while the same stage against an empty
         directory was 38/0/0/6/7 - so the verdict depended on the order the runs happened in.
         Never throws: cleanup must not turn itself into a test result.
+    .PARAMETER Names
+        Files, removed with `rm`.
+    .PARAMETER Dirs
+        Directories, removed with `rmdir` - `rm` does not remove one, so a directory passed as a
+        file name reads as "cleaned up" while it stays on the device.
     #>
     param(
         [Parameter(Mandatory)]$Console,
         [Parameter(Mandatory)][string]$Target,
-        [Parameter(Mandatory)][string[]]$Names
+        [string[]]$Names = @(),
+        [string[]]$Dirs = @()
     )
-    foreach ($n in $Names) {
-        try { [void](Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target rm $n" -TimeoutMs 15000) }
-        catch { Write-Host "  cleanup: $n not removed ($($_.Exception.Message))" -ForegroundColor DarkGray }
+    $plan = @()
+    foreach ($n in $Names) { $plan += [pscustomobject]@{ Verb = 'rm';    Path = $n } }
+    foreach ($d in $Dirs)  { $plan += [pscustomobject]@{ Verb = 'rmdir'; Path = $d } }
+    foreach ($item in $plan) {
+        # The device console splits its arguments on whitespace and has no quoting at all
+        # (FileTransferClientConsole reads the path with a plain %s), so "a b" would delete "a" -
+        # a DIFFERENT file. Such a name cannot be addressed over this transport: it is reported.
+        if ([string]::IsNullOrWhiteSpace($item.Path) -or $item.Path -match '\s') {
+            Write-Host "  cleanup: '$($item.Path)' skipped - the console cannot address a name with whitespace" -ForegroundColor DarkGray
+            continue
+        }
+        try { [void](Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target $($item.Verb) $($item.Path)" -TimeoutMs 15000) }
+        catch { Write-Host "  cleanup: $($item.Path) not removed ($($_.Exception.Message))" -ForegroundColor DarkGray }
     }
 }
 

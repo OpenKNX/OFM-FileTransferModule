@@ -52,7 +52,10 @@ function Measure-FtmResponsiveness {
     }
     $avg = 0
     if ($gaps.Count -gt 0) { $avg = [int](($gaps | Measure-Object -Sum).Sum / $gaps.Count) }
-    return [pscustomobject]@{ Worst = $worst; Average = $avg; Samples = $gaps.Count }
+    # Gaps is returned so a failure can be READ from the report instead of inferred from it. With only
+    # Worst/Average/Samples stored, telling "the device stalled once" from "one probe swallowed the
+    # previous command's output" needed arithmetic across twelve historical runs.
+    return [pscustomobject]@{ Worst = $worst; Average = $avg; Samples = $gaps.Count; Gaps = $gaps }
 }
 
 function Invoke-FtmSuiteNonBlocking {
@@ -101,11 +104,25 @@ function Invoke-FtmSuiteNonBlocking {
         Assert-FtmTrue ($m.Worst -le $maxGapMs) "the device stalled for $($m.Worst) ms while draining the console ring"
     }
 
-    Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-N-5' -Title 'Device stays responsive while a directory is listed' -Reference 'FTC-Reference: DirList reads the provider store; a large directory must not block' -Body {
-        [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ll" -TimeoutMs 2000 -QuietMs 200)
+    Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-N-5' -Title 'Device returns to its loop after a directory listing' -Reference 'FTC-Reference: DirList reads the provider store; a large directory must not block. Measured after the listing drains - probe and listing share one console, so a gap measured during it is the console, not the loop' -Body {
+        # The listing has to finish before the probes start. Abandoned after 2000 ms it kept streaming,
+        # and Invoke-FtmConsoleCommand only discards the buffer ONCE at entry - every byte arriving
+        # afterwards refreshed the quiet timer of the NEXT probe and was charged to it as that probe's
+        # own latency. That produced exactly one long gap per run while the other fourteen sat at the
+        # idle floor, and the number tracked how many files the directory held, not device health
+        # (the same effect Remove-FtmArtefact documents: 1240-1309 ms with leftovers, clean without).
+        # The pre-flight allows this identical command 25000 ms; the case allowed it 2000.
+        # Concurrency during the listing is NOT measurable here: probe and listing share one serial
+        # console, so any gap measured then is the console, not the loop. What is measurable, and what
+        # this case now judges, is that the device returns to its loop afterwards.
+        [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ll" -TimeoutMs 25000 -QuietMs 500)
         $m = Measure-FtmResponsiveness -Console $con -Seconds 8
-        Add-FtmEvidence -Note "during listing: worst $($m.Worst) ms, average $($m.Average) ms over $($m.Samples) probes"
-        Assert-FtmTrue ($m.Worst -le $maxGapMs) "the device stalled for $($m.Worst) ms while listing a directory"
+        Add-FtmEvidence -Note "after listing: worst $($m.Worst) ms, average $($m.Average) ms over $($m.Samples) probes; gaps $($m.Gaps -join ',')"
+        # No $m.Samples check: Measure-FtmResponsiveness tests its deadline at the TOP of the loop, so
+        # at least one probe always runs, and a dead console yields $ms = $ProbeTimeoutMs rather than
+        # no sample. "Samples -gt 0" is therefore unfalsifiable - and unnecessary, because that 3000 ms
+        # substitution is what makes the gap check below catch a dead console.
+        Assert-FtmTrue ($m.Worst -le $maxGapMs) "the device stalled for $($m.Worst) ms after listing a directory"
     }
 
     Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-N-6' -Title 'No measurement is taken during an OTA update' -Reference 'operational rule: never probe the runtime during OTA - the probe competes with the update' -Body {

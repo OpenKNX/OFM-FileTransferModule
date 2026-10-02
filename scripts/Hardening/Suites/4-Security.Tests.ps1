@@ -185,12 +185,21 @@ function Invoke-FtmSuiteAccess {
         }
     }
     finally {
+        # Clean up BEFORE the restore, and from a stage that can actually delete. In ProgMode /
+        # Password / Off the access gate answers the delete with 0xA0 / 0xA2, Invoke-FtmConsoleCommand
+        # does not throw on that and [void] swallows it - so the artefact silently survived the run
+        # that created it. Whatever the last case left behind, the stage is set to Always first.
+        # ftm-acl-dir is a DIRECTORY (F-A-5 creates it, and its own rmdir is skipped whenever an
+        # assertion above throws), so it needs rmdir; the two .bin files exist only when the write
+        # gate failed, which is exactly the run whose leftovers must not reach the next one.
+        # In its own try: a cleanup that throws must never cost the restore below.
+        try {
+            [void](Set-FtmSecurityStage -Console $con -Stage 'always')
+            Remove-FtmArtefact -Console $con -Target $t -Names @('ftm-acl-probe.bin', 'ftm-acl-probe2.bin') -Dirs @('ftm-acl-dir')
+        }
+        catch { Write-Host "  cleanup: skipped ($($_.Exception.Message))" -ForegroundColor DarkGray }
         # Always hand the device back in its configured state. A test that leaves a device
         # unlocked is worse than a test that did not run.
         [void](Set-FtmSecurityStage -Console $con -Stage $restore)
     }
-
-    # This suite writes to the device; what it wrote goes away again, or the next run
-    # inherits it and fails on state this run created.
-    Remove-FtmArtefact -Console $con -Target $t -Names @('ftm-acl-probe.bin', 'ftm-acl-probe2.bin')
 }

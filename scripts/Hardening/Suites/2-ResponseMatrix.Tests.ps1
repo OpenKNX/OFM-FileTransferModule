@@ -57,6 +57,12 @@ function Invoke-FtmSuiteResponse {
         @{ Key = 'FtcApplyCheck';     Cmd = 'apply {0}';       Note = 'existence check before a firmware apply' }
     )
 
+    # What this suite actually staged on the device, collected as it happens. A -Body scriptblock runs
+    # in a child scope, so a plain $probe assignment inside it never reaches the cleanup below - and a
+    # literal name there cleans up a file this run may never have written (the client picks the name,
+    # and the drive prefix changes it per drive). A List is mutated in place, so it does cross.
+    $artefacts = New-Object System.Collections.Generic.List[string]
+
     foreach ($drive in $Ctx.Drives) {
         $prefix = Get-FtmDrivePrefix -Drive $drive
 
@@ -82,6 +88,7 @@ function Invoke-FtmSuiteResponse {
             # Every consumer must re-poll until 0x00/0x01. The visible symptom of a missing
             # re-poll is exactly this: a file that exists is reported as 0 bytes or missing.
             $probe = "${prefix}ftm-hard-probe.bin"
+            $artefacts.Add($probe) # the name asked for; the one the client decided on is added below
 
             # Nothing in this suite ever CREATED that file, and the old line sent it as the
             # SOURCE: "ftc <t> send <probe>" shipped a file that does not exist, the target
@@ -111,7 +118,7 @@ function Invoke-FtmSuiteResponse {
             # the one passed in - so asking about $probe afterwards asked about a file that
             # was never written. The client prints the name it decided on in its config box;
             # read it there instead of assuming, which also keeps this right per drive.
-            if ($mk -match '(?im)^\s*Target\s+(\S+)') { $probe = $Matches[1] }
+            if ($mk -match '(?im)^\s*Target\s+(\S+)') { $probe = $Matches[1]; $artefacts.Add($probe) }
             Add-FtmEvidence -Note "probe staged as $probe"
             # The send returns the prompt as soon as it is CONFIGURED - the nine chunks then
             # go out over seconds. Asking one second later got 0x42 for a file that was still
@@ -204,6 +211,9 @@ function Invoke-FtmSuiteResponse {
     }
 
     # This suite writes to the device; what it wrote goes away again, or the next run
-    # inherits it and fails on state this run created.
-    Remove-FtmArtefact -Console $con -Target $t -Names @('ftctest.bin')
+    # inherits it and fails on state this run created. The names come from what was staged,
+    # per drive, not from a literal - a literal cleaned up a file no case here ever wrote.
+    if ($artefacts.Count -gt 0) {
+        Remove-FtmArtefact -Console $con -Target $t -Names @($artefacts | Select-Object -Unique)
+    }
 }
