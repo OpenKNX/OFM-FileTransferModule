@@ -20,6 +20,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -82,6 +83,8 @@ typedef int sock_t;
 #include "cli/Browser.h"
 #include "core/DeltaBase.h"
 #include "core/Describe.h"
+#include "core/GaImport.h"
+#include "core/GaTable.h"
 #include "core/DeviceMgmt.h"
 #include "core/Discovery.h"
 #include "core/Gzip.h"
@@ -6445,6 +6448,57 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    // Listing, re-pointing or dropping a stored group-address table touches no bus and names no
+    // interface - demanding --ip for it only gets in the way.
+    if (ip.empty() && pos.size() >= 2 && pos[0] == "ga" && pos[1] == "table")
+    {
+        ftc::I18n& L = g_i18n;
+        std::vector<std::string> names = ftc::GaTable::list();
+        if (pos.size() >= 4 && (pos[2] == "rm" || pos[2] == "delete"))
+        {
+            const std::string f = ftc::GaTable::path(pos[3]);
+            const bool gone = std::remove(f.c_str()) == 0;
+            g_tpl.status(gone ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Err,
+                         gone ? L.tr("table removed", "Tabelle entfernt") : L.tr("no such table", "keine solche Tabelle"),
+                         {f});
+            socketCleanup();
+            return gone ? 0 : 1;
+        }
+        // Only listing and removing work without an interface. Anything else used to fall through to the
+        // listing and exit 0, so `ga table move A B` reported success without moving anything.
+        if (pos.size() >= 3)
+        {
+            g_ui.errorBlock(false, L.tr("this needs an interface", "dafür wird ein Interface gebraucht"),
+                            {L.tr("without --ip only `ga table` and `ga table rm <name>` work",
+                                  "ohne --ip gehen nur `ga table` und `ga table rm <name>`"),
+                             "oknx -i <ip> ga table " + pos[2]});
+            socketCleanup();
+            return 1;
+        }
+        if (names.empty())
+        {
+            g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("no group address table imported yet",
+                                                    "noch keine Gruppenadresstabelle importiert"),
+                         {ftc::GaTable::dir(), "oknx -i <ip> ga import GA-Export.xml"});
+            socketCleanup();
+            return 1;
+        }
+        for (const std::string& n : names)
+        {
+            ftc::GaTable t;
+            t.load(n);
+            size_t withDpt = 0;
+            t.each([&](uint16_t, const ftc::GaInfo& gi) { if (gi.main != 0) withDpt++; });
+            // A fixed format string, so the compiler still checks it, and the quiet stream stays a stream.
+            if (g_quiet) std::printf("gatable\t%s\t%zu\t%zu\t0\n", n.c_str(), t.size(), withDpt);
+            else
+                std::printf("    %-18s %4zu %s, %4zu %s\n", n.c_str(), t.size(),
+                            L.tr("addresses", "Adressen"), withDpt, L.tr("with a type", "mit Typ"));
+        }
+        socketCleanup();
+        return 0;
+    }
+
     if (ip.empty())
     {
         std::fprintf(stderr, "error: --ip is required (or use --discover). See --help.\n");
@@ -6843,6 +6897,124 @@ int main(int argc, char** argv)
     // `oknx --ip <ip> groupmon|gm | busmon|bm` (no PA) — live monitors over a self-owned tunnel (own KNX layer).
     // -q gives plain tab-separated lines; -V adds raw hex; --frames/--seconds cap it for scripted runs; Ctrl+C stops.
     const bool isBus = pos[0] == "busmon" || pos[0] == "bm";
+    // `ga import <file>` and `ga table ...` touch no bus at all: they fill, list or re-point the group
+    // address table. It is keyed by the interface, because that is the separation that already exists -
+    // the test rig and the productive line are reached through different interfaces.
+    if (!pos.empty() && pos[0] == "ga" && pos.size() >= 2 && (pos[1] == "import" || pos[1] == "table"))
+    {
+        ftc::I18n& L = g_i18n;
+        if (pos[1] == "import")
+        {
+            if (pos.size() < 3)
+            {
+                g_ui.errorBlock(false, L.tr("ga import needs an ETS group address export",
+                                            "ga import braucht einen ETS-Gruppenadressexport"),
+                                {L.tr("XML or CSV; CSV only WITH header lines",
+                                      "XML oder CSV; CSV nur MIT Kopfzeilen")},
+                                "oknx -i <ip> ga import GA-Export.xml");
+                socketCleanup();
+                return 2;
+            }
+            ftc::GaTable t;
+            const ftc::GaImportResult res = ftc::GaImport::run(pos[2], t);
+            if (!res.ok)
+            {
+                g_ui.errorBlock(false, L.tr("could not read that export", "dieser Export ist nicht lesbar"),
+                                {res.error}, "oknx -i <ip> ga import GA-Export.xml");
+                socketCleanup();
+                return 2;
+            }
+            std::string werr;
+            if (!t.save(ip, werr))
+            {
+                // Say WHY: on a Pi this used to fail silently because the directory could not be created.
+                g_ui.errorBlock(false, L.tr("could not write the table", "Tabelle nicht schreibbar"),
+                                {werr, ftc::GaTable::path(ip)}, "");
+                socketCleanup();
+                return 1;
+            }
+            char det[160];
+            std::snprintf(det, sizeof(det),
+                          L.tr("%zu addresses, %zu with a datapoint type", "%zu Adressen, %zu mit Datenpunkttyp"),
+                          res.addresses, res.withDpt);
+            if (quiet) std::printf("gaimport\t%zu\t%zu\t%s\n", res.addresses, res.withDpt, ftc::GaTable::path(ip).c_str());
+            else if (res.withDpt == 0)
+                g_tpl.status(ftc::Tpl::Stat::Warn, res.format,
+                             {det, L.tr("this export carries no types - nothing will be decoded",
+                                        "dieser Export fuehrt keine Typen - es wird nichts dekodiert"),
+                              ftc::GaTable::path(ip)});
+            else
+                g_tpl.status(ftc::Tpl::Stat::Ok, res.format, {det, ftc::GaTable::path(ip)});
+            socketCleanup();
+            return res.withDpt == 0 ? 1 : 0;
+        }
+        // `ga table` - list, re-point after the interface changed its address, or drop one
+        if (pos.size() >= 4 && (pos[2] == "move" || pos[2] == "mv"))
+        {
+            const std::string from = ftc::GaTable::path(pos[3]);
+            const std::string to = ftc::GaTable::path(pos.size() >= 5 ? pos[4] : ip);
+            if (std::rename(from.c_str(), to.c_str()) != 0)
+            {
+                g_ui.errorBlock(false, L.tr("no table for that interface", "keine Tabelle fuer diese Schnittstelle"),
+                                {from}, "oknx ga table");
+                socketCleanup();
+                return 1;
+            }
+            g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("table moved", "Tabelle umgehaengt"), {from + "  ->  " + to});
+            socketCleanup();
+            return 0;
+        }
+        if (pos.size() >= 4 && (pos[2] == "rm" || pos[2] == "delete"))
+        {
+            const std::string f = ftc::GaTable::path(pos[3]);
+            const bool gone = std::remove(f.c_str()) == 0;
+            g_tpl.status(gone ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Err,
+                         gone ? L.tr("table removed", "Tabelle entfernt") : L.tr("no such table", "keine solche Tabelle"),
+                         {f});
+            socketCleanup();
+            return gone ? 0 : 1;
+        }
+        // plain `ga table`: what is stored, for which interface
+        const std::string dir = ftc::GaTable::dir();
+        std::vector<std::string> names = ftc::GaTable::list();
+        if (names.empty())
+        {
+            g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("no group address table imported yet",
+                                                    "noch keine Gruppenadresstabelle importiert"),
+                         {dir, "oknx -i <ip> ga import GA-Export.xml"});
+            socketCleanup();
+            return 1;
+        }
+        for (const std::string& n : names)
+        {
+            ftc::GaTable t;
+            t.load(n);
+            size_t withDpt = 0;
+            t.each([&](uint16_t, const ftc::GaInfo& gi) { if (gi.main != 0) withDpt++; });
+            // Same output as the offline listing: one command must not speak two protocols depending
+            // on whether --ip happens to be set.
+            if (g_quiet)
+            {
+                std::printf("gatable\t%s\t%zu\t%zu\t%d\n", n.c_str(), t.size(), withDpt, n == ftc::GaTable::key(ip) ? 1 : 0);
+                continue;
+            }
+            std::printf("    %-18s %4zu %s, %4zu %s%s\n", n.c_str(), t.size(), L.tr("addresses", "Adressen"),
+                        withDpt, L.tr("with a type", "mit Typ"),
+                        (n == ftc::GaTable::key(ip)) ? L.tr("   <- in use now", "   <- jetzt aktiv") : "");
+        }
+        socketCleanup();
+        return 0;
+    }
+
+    // `ga monitor <x/y/z>` is the group monitor narrowed to one address - the same viewer, the same
+    // keys, the same export, not a second implementation. Rewritten here and handled by the monitor path.
+    if (pos.size() >= 3 && pos[0] == "ga" && (pos[1] == "monitor" || pos[1] == "mon"))
+    {
+        std::vector<std::string> rw{"gm"};
+        for (size_t i = 2; i < pos.size(); i++) rw.push_back(pos[i]);
+        pos = rw;
+    }
+
     const bool isMon = isBus || pos[0] == "groupmon" || pos[0] == "gm";
 
     // `oknx -i <ipA> gm|bm compare <ipB> [--grace ms] [--multi]` — live A/B fidelity diff of two monitors on the
@@ -6867,10 +7039,68 @@ int main(int argc, char** argv)
         return rc;
     }
 
-    if (pos.size() == 1 && isMon)
+    // One or several group addresses, comma or space separated: `gm 0/7/0,0/7/1` and `gm 0/7/0 0/7/1`
+    // both watch two addresses. Every token has to parse, otherwise this is not a filter argument at all
+    // and the usual "too many arguments" path takes over.
+    std::vector<uint16_t> monGas;
+    static ftc::GaTable monInline; // types given on the command line
+    bool monGaBad = false;
+    if (isMon && pos.size() >= 2)
+    {
+        for (size_t i = 1; i < pos.size() && !monGaBad; i++)
+        {
+            std::string tok;
+            std::istringstream ts(pos[i]);
+            while (std::getline(ts, tok, ','))
+            {
+                if (tok.empty()) continue;
+                // "0/7/0:9.004" - the type given here wins over the imported table for that address
+                std::string dptHere;
+                const size_t colon = tok.find(':');
+                if (colon != std::string::npos)
+                {
+                    dptHere = tok.substr(colon + 1);
+                    tok = tok.substr(0, colon);
+                }
+                unsigned a1 = 0, b1 = 0, c1 = 0;
+                char tail = 0;
+                if (std::sscanf(tok.c_str(), "%u/%u/%u%c", &a1, &b1, &c1, &tail) != 3 || a1 > 31 ||
+                    b1 > 7 || c1 > 255)
+                {
+                    monGaBad = true;
+                    break;
+                }
+                const uint16_t packed = (uint16_t)((a1 << 11) | (b1 << 8) | c1);
+                monGas.push_back(packed);
+                if (!dptHere.empty())
+                {
+                    ftc::GaInfo gi;
+                    if (!ftc::GaTable::parseDpt(dptHere, gi.main, gi.sub)) { monGaBad = true; break; }
+                    monInline.set(packed, gi);
+                }
+            }
+        }
+    }
+    const bool monOneGa = isMon && !monGaBad && !monGas.empty();
+    if ((pos.size() == 1 || monOneGa) && isMon)
     {
         ftc::Monitor mon(g_term, g_theme, g_tpl, g_i18n);
         mon.target(ip, port);
+        if (monOneGa) mon.setGroupFilter(monGas);
+        // The imported table of THIS interface, plus anything given inline. Missing table = raw octets.
+        static ftc::GaTable monTab;
+        monTab.load(ip);
+        mon.setGaLookup(
+            [](uint16_t ga, const uint8_t* d, uint8_t n, uint8_t small) -> std::string {
+                const ftc::GaInfo* gi = monInline.find(ga);
+                if (gi == nullptr || gi->main == 0) gi = monTab.find(ga);
+                if (gi == nullptr || gi->main == 0) return "";
+                return ftc::GaTable::decode(gi->main, gi->sub, d, n, small);
+            },
+            [](uint16_t ga) -> std::string {
+                const ftc::GaInfo* gi = monTab.find(ga);
+                return gi != nullptr ? gi->name : std::string();
+            });
         const int rc = mon.run(isBus ? ftc::Monitor::Mode::Bus : ftc::Monitor::Mode::Group,
                                quiet, verbose, monFrames, monSeconds, &g_abort);
         socketCleanup();
