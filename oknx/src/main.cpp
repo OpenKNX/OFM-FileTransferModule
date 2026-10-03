@@ -1355,6 +1355,137 @@ static void printIfacePanel(const std::string& ip, const ftc::IfaceDesc& o)
 /**
  * @brief Print the full help/usage screen (banner + options + command groups + examples, DE/EN).
  */
+/**
+ * @brief `oknx --examples`: worked examples, grouped by the job rather than by the command.
+ * @details --help is the reference - every option, one line each. This is the teaching: whole commands
+ *          that run as printed, with the reason they exist. Keeping them apart is what lets --help stay
+ *          scannable while the tool grows.
+ */
+static void examples()
+{
+    ftc::Theme& c = g_theme;
+    ftc::I18n& L = g_i18n;
+    ftc::Ui& U = g_ui;
+    banner();
+
+    struct Ex { const char* cmd; const char* en; const char* de; };
+    struct Grp { const char* en; const char* de; const Ex* ex; size_t n; };
+
+    static const Ex gFind[] = {
+        {"oknx --discover", "which interfaces are on the network?", "welche Interfaces gibt es im Netz?"},
+        {"oknx -i 11.11.0.126 info", "what this interface is and can", "was dieses Interface ist und kann"},
+        {"oknx -i 11.11.0.126 scan 1.1 openknx", "every device on line 1.1, with its identity",
+         "jedes Gerät auf Linie 1.1, samt Identität"},
+        {"oknx -i 11.11.0.126 ps", "who is in programming mode right now",
+         "wer gerade im Programmiermodus ist"},
+    };
+    // Whole jobs, in the order they actually happen - that is what the page is for; single commands
+    // are what --help is for.
+    static const Ex gNew[] = {
+        {"oknx -i 11.11.0.126 ps", "1 · nobody in programming mode yet? then press the button on the device",
+         "1 · noch niemand im Programmiermodus? dann die Taste am Gerät drücken"},
+        {"oknx -i 11.11.0.126 setpa 1.1.42", "2 · give it its address — refuses unless exactly one answers",
+         "2 · ihm seine Adresse geben — verweigert, wenn nicht genau eines antwortet"},
+        {"oknx -i 11.11.0.126 1.1.42 progmode off", "3 · programming mode off again, it is not a resting state",
+         "3 · Programmiermodus wieder aus, das ist kein Dauerzustand"},
+        {"oknx -i 11.11.0.126 1.1.42 info", "4 · did it take? mask, manufacturer, application",
+         "4 · hat es gegriffen? Maske, Hersteller, Applikation"},
+    };
+    static const Ex gSwap[] = {
+        {"oknx -i 11.11.0.126 1.1.42 info ga", "1 · write down what it had: addresses, flags, sizes",
+         "1 · festhalten, was es hatte: Adressen, Flags, Größen"},
+        {"oknx -i 11.11.0.126 1.1.42 unload yes", "2 · clear the old device before it leaves the installation",
+         "2 · das alte Gerät leeren, bevor es die Anlage verlässt"},
+        {"oknx -i 11.11.0.126 setpa 1.1.42", "3 · new device into programming mode, same address",
+         "3 · neues Gerät in den Programmiermodus, dieselbe Adresse"},
+        {"(ETS)", "4 · the application has to come from ETS — oknx cannot write it",
+         "4 · die Applikation muss aus ETS kommen — oknx kann sie nicht schreiben"},
+    };
+    static const Ex gWhy[] = {
+        {"oknx -i 11.11.0.126 ga import GA-Export.xml", "once per interface: names + datapoint types from your project",
+         "einmal je Interface: Namen + Datenpunkttypen aus deinem Projekt"},
+        {"oknx -i 11.11.0.126 ga read 1/4/5", "1 · what does the bus say this address currently is?",
+         "1 · was sagt der Bus, was auf dieser Adresse steht?"},
+        {"oknx -i 11.11.0.126 gm 1/4/5", "2 · watch it: does the switch send at all, does the actuator answer?",
+         "2 · zusehen: sendet der Taster überhaupt, antwortet der Aktor?"},
+        {"oknx -i 11.11.0.126 ga write 1/4/5 1", "3 · drive it yourself — if this works, the actuator is fine",
+         "3 · selbst schalten — wenn das geht, liegt es nicht am Aktor"},
+        {"oknx -i 11.11.0.126 bm", "4 · still nothing? the raw bus shows repeats and missing acknowledges",
+         "4 · immer noch nichts? der rohe Bus zeigt Wiederholungen und fehlende Quittungen"},
+    };
+    static const Ex gDev[] = {
+        {"oknx -i 11.11.0.126 5.0.3 ping", "is it there, and how fast", "ist es da, und wie schnell"},
+        {"oknx -i 11.11.0.126 5.0.3 info ga", "its group objects: addresses, flags, size",
+         "seine Gruppenobjekte: Adressen, Flags, Größe"},
+        {"oknx -i 11.11.0.126 5.0.3 led blink", "make it blink in the cabinet (this is programming mode)",
+         "im Schrank blinken lassen (das ist der Programmiermodus)"},
+        {"oknx -i 11.11.0.126 5.0.3 restart", "reboot it", "neu starten"},
+        {"oknx -i 11.11.0.126 5.0.3 masterreset confirmedrestart yes",
+         "master reset; --help lists what each erase code erases",
+         "Master-Reset; was welcher Erase-Code löscht, steht in --help"},
+    };
+    static const Ex gMon[] = {
+        {"oknx -i 11.11.0.126 gm", "every group telegram, decoded", "jedes Gruppentelegramm, dekodiert"},
+        {"oknx -i 11.11.0.126 gm 0/7/0,0/7/1,1/4/5", "only these addresses, with their project names",
+         "nur diese Adressen, mit ihren Projektnamen"},
+        {"oknx -i 11.11.0.126 gm 0/7/0:9.004", "without an import: give the type for this run",
+         "ohne Import: den Typ für diesen Lauf angeben"},
+        {"oknx -i 11.11.0.126 bm --seconds 60", "raw bus, stops by itself — for a script",
+         "roher Bus, hört von selbst auf — fürs Skript"},
+        {"oknx -i 11.11.0.126 gm compare 11.11.0.151", "two interfaces on the same bus: do they see the same?",
+         "zwei Interfaces am selben Bus: sehen sie dasselbe?"},
+    };
+    static const Ex gFile[] = {
+        {"oknx -i 11.11.0.126 5.0.3 ll", "what is on the device", "was auf dem Gerät liegt"},
+        {"oknx -i 11.11.0.126 5.0.3 send ./cfg.json /cfg.json", "upload a file", "Datei hochladen"},
+        {"oknx -i 11.11.0.126 5.0.3 get /log.txt ./log.txt", "fetch one back", "eine zurückholen"},
+        {"oknx -i 11.11.0.126 5.0.3 login 'secret'", "a device that asks for a password",
+         "ein Gerät, das ein Passwort verlangt"},
+        {"oknx -i 11.11.0.126 5.0.3 con", "its console, over the tunnel", "seine Konsole, über den Tunnel"},
+    };
+    static const Ex gFw[] = {
+        {"oknx knxota firmware.uf2 --check", "FIRST: compare and report, write nothing",
+         "ZUERST: vergleichen und berichten, nichts schreiben"},
+        {"oknx -i 11.11.0.126 5.0.3 knxota firmware.uf2", "then the real run",
+         "dann der echte Lauf"},
+        {"oknx knxota firmware.uf2 --from ../Produkt-0.7.0", "send only the difference — minutes instead of an hour",
+         "nur die Differenz senden — Minuten statt einer Stunde"},
+        {"oknx knxota resume list", "a run that broke off: what is still lying around",
+         "ein abgebrochener Lauf: was noch herumliegt"},
+        {"oknx -i 11.11.0.126 5.0.3 perf 100", "how fast this path really is",
+         "wie schnell dieser Weg wirklich ist"},
+    };
+    static const Grp groups[] = {
+        {"FINDING YOUR WAY", "ÜBERBLICK", gFind, sizeof(gFind) / sizeof(Ex)},
+        {"COMMISSIONING A NEW DEVICE", "EIN NEUES GERÄT IN BETRIEB NEHMEN", gNew, sizeof(gNew) / sizeof(Ex)},
+        {"REPLACING A DEVICE", "EIN GERÄT TAUSCHEN", gSwap, sizeof(gSwap) / sizeof(Ex)},
+        {"WHY DOES THIS LAMP NOT SWITCH", "WARUM SCHALTET DIESE LAMPE NICHT", gWhy, sizeof(gWhy) / sizeof(Ex)},
+        {"ONE DEVICE", "EIN GERÄT", gDev, sizeof(gDev) / sizeof(Ex)},
+        {"WATCHING THE BUS", "DEN BUS BEOBACHTEN", gMon, sizeof(gMon) / sizeof(Ex)},
+        {"FILES ON A DEVICE", "DATEIEN AUF EINEM GERÄT", gFile, sizeof(gFile) / sizeof(Ex)},
+        {"UPDATING FIRMWARE", "FIRMWARE AKTUALISIEREN", gFw, sizeof(gFw) / sizeof(Ex)},
+    };
+
+    constexpr int COL = 50;
+    const bool wide = ftc::Tpl::cols() >= COL + 46;
+    for (const Grp& g : groups)
+    {
+        U.sectionPlain(L.tr(g.en, g.de));
+        for (size_t i = 0; i < g.n; i++)
+        {
+            const Ex& e = g.ex[i];
+            const char* note = L.tr(e.en, e.de);
+            const int pad = COL - (int)std::strlen(e.cmd);
+            if (wide) std::printf("  %s%*s %s\n", c.txt(e.cmd).c_str(), pad > 1 ? pad : 1, "", c.dim(note).c_str());
+            else std::printf("  %s\n      %s\n", c.txt(e.cmd).c_str(), c.dim(note).c_str());
+        }
+        std::printf("\n");
+    }
+    U.flushHelp();
+    std::printf("  %s\n\n", c.dim(L.tr("every option, one line each:  oknx --help",
+                                       "jede Option, je eine Zeile:  oknx --help")).c_str());
+}
+
 static void usage()
 {
     ftc::Theme& c = g_theme;
@@ -8579,11 +8710,473 @@ int main(int argc, char** argv)
         }
     }
 
+    // `oknx -i <ip> setpa <x.y.z>` - the ETS "programme the individual address" procedure. It addresses
+    // nobody: the device is picked by being in PROGRAMMING MODE, so the whole exchange is broadcast.
+    // 03_05_02: read who is in programming mode, refuse unless there is exactly one, write, read back.
+    if (!pos.empty() && pos[0] == "setpa")
+    {
+        ftc::I18n& L = g_i18n;
+        unsigned a1 = 0, b1 = 0, c1 = 0;
+        char tail = 0;
+        const bool ok = pos.size() >= 2 &&
+                        std::sscanf(pos[1].c_str(), "%u.%u.%u%c", &a1, &b1, &c1, &tail) == 3 &&
+                        a1 <= 15 && b1 <= 15 && c1 <= 255;
+        if (!ok)
+        {
+            g_ui.errorBlock(false, L.tr("setpa needs the new individual address",
+                                        "setpa braucht die neue physikalische Adresse"),
+                            {L.tr("put exactly ONE device into programming mode first",
+                                  "vorher genau EIN Gerät in den Programmiermodus bringen")},
+                            "oknx -i <ip> setpa 1.1.42");
+            socketCleanup();
+            return 2;
+        }
+        const uint16_t want = (uint16_t)((a1 << 12) | (b1 << 8) | c1);
+
+        static std::vector<uint16_t> s_inProg;
+        s_inProg.clear();
+        g_knxTunnel.setBroadcastCallback([](uint16_t src, uint16_t apci, const uint8_t*, uint8_t) {
+            if ((apci & 0x03C0) != APCI_INDADDR_RESP) return; // A_IndividualAddress_Response
+            for (uint16_t p : s_inProg)
+                if (p == src) return;
+            s_inProg.push_back(src);
+        });
+        auto probe = [&](uint32_t ms) {
+            s_inProg.clear();
+            g_knxTunnel.sendIndividualAddressRead();
+            for (uint64_t t0 = nowMs(); nowMs() - t0 < ms;) g_knxTunnel.pump();
+        };
+        probe(2500);
+        if (s_inProg.size() != 1)
+        {
+            g_knxTunnel.setBroadcastCallback(nullptr);
+            char det[120];
+            std::snprintf(det, sizeof(det),
+                          L.tr("%zu devices answered - it has to be exactly one",
+                               "%zu Geräte haben geantwortet - es muss genau eines sein"),
+                          s_inProg.size());
+            std::string who;
+            for (uint16_t p : s_inProg) who += (who.empty() ? "" : " · ") + ftc::Tpl::pa(p);
+            g_ui.errorBlock(false, L.tr("not exactly one device in programming mode",
+                                        "nicht genau ein Gerät im Programmiermodus"),
+                            {det, who.empty() ? L.tr("press the programming button on the device",
+                                                     "die Programmiertaste am Gerät drücken") : who,
+                             L.tr("nothing was sent", "es wurde nichts gesendet")},
+                            "oknx -i <ip> ps");
+            g_knxTunnel.disconnect();
+            socketCleanup();
+            return 2;
+        }
+        const uint16_t had = s_inProg[0];
+        g_knxTunnel.sendIndividualAddressWrite(want);
+        for (uint64_t t0 = nowMs(); nowMs() - t0 < 600;) g_knxTunnel.pump();
+        probe(2500); // read back: the same device now has to answer with the new address
+        g_knxTunnel.setBroadcastCallback(nullptr);
+        const bool took = s_inProg.size() == 1 && s_inProg[0] == want;
+        if (quiet)
+            std::printf("setpa\t%s\t%s\t%d\n", ftc::Tpl::pa(had).c_str(), pos[1].c_str(), took ? 1 : 0);
+        else if (took)
+            g_tpl.status(ftc::Tpl::Stat::Ok,
+                         ftc::Tpl::pa(had) + "  ->  " + pos[1],
+                         {L.tr("confirmed by reading it back; switch programming mode off now",
+                               "durch Rücklesen bestätigt; jetzt den Programmiermodus ausschalten")});
+        else
+            g_tpl.status(ftc::Tpl::Stat::Err, L.tr("the address was not taken", "die Adresse wurde nicht übernommen"),
+                         {L.tr("the read-back did not show it", "das Rücklesen zeigt sie nicht")});
+        g_knxTunnel.disconnect();
+        socketCleanup();
+        return took ? 0 : 1;
+    }
+
+    // `ga` is bus traffic, not a device command: it addresses a GROUP, so it names no PA, skips the
+    // reachability probe above and the FTC permission gate below. A GroupValue_Read is answered by every
+    // device that has the read flag set on that address, so the answers are collected, not awaited singly.
+    if (!consoleMode && !knxotaActive && !pos.empty() && pos[0] == "ga")
+    {
+        ftc::I18n& L = g_i18n;
+        const std::string op = pos.size() >= 2 ? pos[1] : "";
+        unsigned m = 0, mid = 0, sub = 0;
+        // `<x/y/z>:<DPT>` gives the type for this one call, without importing anything.
+        std::string gaTok = pos.size() >= 3 ? pos[2] : "";
+        uint16_t dptMain = 0, dptSub = 0;
+        const size_t gaColon = gaTok.find(':');
+        if (gaColon != std::string::npos)
+        {
+            ftc::GaTable::parseDpt(gaTok.substr(gaColon + 1), dptMain, dptSub);
+            gaTok = gaTok.substr(0, gaColon);
+        }
+        // 0/0/0 is NOT a group address: 03_05_01 reserves 0000h for broadcast, and a frame with
+        // address type "group" and destination 0 is a T_Data_Broadcast that every device acts on.
+        const bool haveGa = !gaTok.empty() &&
+                            std::sscanf(gaTok.c_str(), "%u/%u/%u", &m, &mid, &sub) == 3 &&
+                            m <= 31 && mid <= 7 && sub <= 255 && (m | mid | sub) != 0;
+        if ((op != "read" && op != "write") || !haveGa)
+        {
+            g_ui.errorBlock(false, L.tr("ga needs read or write and a group address",
+                                        "ga braucht read oder write und eine Gruppenadresse"),
+                            {L.tr("nothing was sent", "es wurde nichts gesendet")},
+                            "oknx -i <ip> ga read 1/4/5   ·   oknx -i <ip> ga write 1/4/5 1");
+            g_knxTunnel.disconnect();
+            socketCleanup();
+            return 2;
+        }
+        const uint16_t ga = (uint16_t)((m << 11) | (mid << 8) | sub);
+
+        // 03_03_07 3.1.3 p.16-17: the A_GroupValue_Write form follows the DATAPOINT's length, not the
+        // size of the number - six bits or less rides in the APCI octet. With a known type the stack's
+        // converter decides; without one, a plain 0-63 is the compact form and hex octets the long one.
+        uint8_t small = 0, payload[14], plen = 0;
+        if (op == "write")
+        {
+            if (pos.size() < 4)
+            {
+                g_ui.errorBlock(false, L.tr("write needs a value", "write braucht einen Wert"),
+                                {L.tr("with an imported type: the value itself (21.5, 1, 80)",
+                                      "mit importiertem Typ: der Wert selbst (21.5, 1, 80)"),
+                                 L.tr("without one: 0-63 plain, or hex octets",
+                                      "ohne Typ: 0-63 blank, oder Hex-Oktette")},
+                                "oknx -i <ip> ga write 1/4/5 1   ·   ga write 0/7/0:9.001 21.5");
+                g_knxTunnel.disconnect();
+                socketCleanup();
+                return 2;
+            }
+            uint16_t dMain = dptMain, dSub = dptSub; // from an inline `<ga>:<DPT>`, else the table
+            if (dMain == 0)
+            {
+                ftc::GaTable t;
+                t.load(ip);
+                const ftc::GaInfo* gi = t.find(ga);
+                if (gi != nullptr) { dMain = gi->main; dSub = gi->sub; }
+            }
+            if (dMain != 0)
+            {
+                // Sub-byte datapoints (1 bit, 2 bit, 4 bit) are the compact form; everything else is
+                // carried in its own octets, as many as the type declares.
+                const bool subByte = (dMain == 1 || dMain == 2 || dMain == 3 || dMain == 23);
+                const Dpt d((short)dMain, (short)dSub);
+                const size_t need = subByte ? 1u : (size_t)d.dataLength();
+                KNXValue v(false);
+                const std::string& tok = pos[3];
+                char* end = nullptr;
+                if (dMain == 16) v = tok.c_str();
+                else if (dMain == 9 || dMain == 14)
+                {
+                    const double dv = std::strtod(tok.c_str(), &end);
+                    if (end == nullptr || *end != 0) dMain = 0;
+                    v = dv;
+                }
+                else
+                {
+                    const long lv = std::strtol(tok.c_str(), &end, 0);
+                    if (end == nullptr || *end != 0) dMain = 0;
+                    v = (int64_t)lv;
+                }
+                uint8_t buf[16] = {0};
+                if (dMain != 0 && need <= sizeof(buf) && KNX_Encode_Value(v, buf, need, d))
+                {
+                    if (subByte) small = (uint8_t)(buf[0] & 0x3F);
+                    else { plen = (uint8_t)(need > sizeof(payload) ? sizeof(payload) : need); std::memcpy(payload, buf, plen); }
+                }
+                else
+                {
+                    g_ui.errorBlock(false,
+                                    L.tr("that value does not fit the datapoint type",
+                                         "dieser Wert passt nicht zum Datenpunkttyp"),
+                                    {ftc::GaTable::gaStr(ga) + "  DPT " + std::to_string(dMain) + "." +
+                                         std::to_string(dSub),
+                                     L.tr("nothing was sent", "es wurde nichts gesendet")},
+                                    "oknx -i <ip> ga write 0/7/0 21.5");
+                    g_knxTunnel.disconnect();
+                    socketCleanup();
+                    return 2;
+                }
+            }
+            else
+            {
+                const bool hex = pos[3].rfind("0x", 0) == 0 || pos[3].rfind("0X", 0) == 0;
+                if (!hex && pos.size() == 4)
+                {
+                    char* end = nullptr;
+                    long v = std::strtol(pos[3].c_str(), &end, 10);
+                    if (end == nullptr || *end != 0 || v < 0 || v > 63)
+                    {
+                        g_ui.errorBlock(false, L.tr("a plain value must be 0-63 without a known type",
+                                                    "eine blanke Zahl muss ohne bekannten Typ 0-63 sein"),
+                                        {L.tr("import the project, or give the type: ga write 0/7/0:9.001 21.5",
+                                              "Projekt importieren, oder Typ angeben: ga write 0/7/0:9.001 21.5")},
+                                        "oknx -i <ip> ga import GA-Export.xml");
+                        g_knxTunnel.disconnect();
+                        socketCleanup();
+                        return 2;
+                    }
+                    small = (uint8_t)v;
+                }
+                else
+                {
+                    for (size_t i = 3; i < pos.size(); i++)
+                    {
+                        char* end = nullptr;
+                        long v = std::strtol(pos[i].c_str(), &end, 16);
+                        if (end == nullptr || *end != 0 || v < 0 || v > 255 || plen >= sizeof(payload))
+                        {
+                            g_ui.errorBlock(false,
+                                            plen >= sizeof(payload)
+                                                ? L.tr("more than 14 octets", "mehr als 14 Oktette")
+                                                : L.tr("not a hex octet", "kein Hex-Oktett") + std::string(": ") + pos[i],
+                                            {L.tr("nothing was sent", "es wurde nichts gesendet")}, "0x00 .. 0xFF");
+                            g_knxTunnel.disconnect();
+                            socketCleanup();
+                            return 2;
+                        }
+                        payload[plen++] = (uint8_t)v;
+                    }
+                }
+            }
+        }
+
+        static std::vector<std::string> s_gaHits;
+        s_gaHits.clear();
+        g_knxTunnel.setGroupCallback([](uint16_t src, uint16_t g, uint16_t apci, const uint8_t* d, uint8_t n) {
+            if ((apci & 0x03C0) != APCI_GROUPVALUE_RESP) return; // GroupValue_Response only
+            char line[128];
+            int k = std::snprintf(line, sizeof(line), "%u.%u.%u  %u/%u/%u  ", (src >> 12) & 0x0F,
+                                  (src >> 8) & 0x0F, src & 0xFF, (g >> 11) & 0x1F, (g >> 8) & 0x07, g & 0xFF);
+            if (n == 0)
+                std::snprintf(line + k, sizeof(line) - k, "0x%02X (6 bit)", apci & 0x3F);
+            else
+                for (uint8_t i = 0; i < n && k < (int)sizeof(line) - 4; i++)
+                    k += std::snprintf(line + k, sizeof(line) - k, "%02X ", d[i]);
+            s_gaHits.push_back(line);
+        });
+        const bool sent = g_knxTunnel.sendGroupValue(ga, op == "write", small, payload, plen);
+        // A read has no single addressee, so there is no timeout to fail on - collect for a fixed window.
+        for (uint64_t t0 = nowMs(); nowMs() - t0 < (op == "read" ? 1500u : 400u);) g_knxTunnel.pump();
+        g_knxTunnel.setGroupCallback(nullptr);
+
+        if (quiet)
+        {
+            std::printf("ga\t%s\t%s\t%d\t%zu\n", op.c_str(), gaTok.c_str(), sent ? 1 : 0, s_gaHits.size());
+            for (const std::string& h : s_gaHits) std::printf("gaval\t%s\n", h.c_str());
+        }
+        else if (!sent)
+            g_tpl.status(ftc::Tpl::Stat::Err, L.tr("could not be sent", "konnte nicht gesendet werden"), {});
+        else if (op == "write")
+            g_tpl.status(ftc::Tpl::Stat::Ok, gaTok + " " + L.tr("written", "geschrieben"),
+                         {L.tr("a group write is not acknowledged", "ein Gruppenschreiben wird nicht quittiert")});
+        else if (s_gaHits.empty())
+            g_tpl.status(ftc::Tpl::Stat::Warn, gaTok + " " + L.tr("no answer in 1.5 s", "keine Antwort in 1,5 s"),
+                         {L.tr("no device on this address has the read flag set",
+                               "kein Gerät auf dieser Adresse hat das Lese-Flag")});
+        else
+        {
+            g_tpl.status(ftc::Tpl::Stat::Ok, gaTok + " " + std::to_string(s_gaHits.size()) + " " +
+                                                 L.tr("answers", "Antworten"), {});
+            for (const std::string& h : s_gaHits) std::printf("    %s\n", h.c_str());
+        }
+        g_knxTunnel.disconnect();
+        socketCleanup();
+        return sent ? 0 : 1;
+    }
+
+    // `oknx <pa> unload yes` - the ETS "Entladen". 03_05_01 4.3.4 / the load state machine: writing
+    // LE_UNLOAD (4) to PID_LOAD_STATE_CONTROL (5) takes a loadable object back to LS_UNLOADED (0). Done
+    // on the address table, the association table and the application program, which is what makes a
+    // device stop doing its job. Not reversible from here: only an ETS download brings it back.
+    if (!consoleMode && !knxotaActive && reachHasPa && pos.size() >= 2 && pos[1] == "unload")
+    {
+        ftc::I18n& L = g_i18n;
+        const uint16_t tgt = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
+        const bool said = pos.size() >= 3 && pos[2] == "yes";
+        if (!said)
+        {
+            g_ui.errorBlock(false, L.tr("unload erases this device's configuration",
+                                        "entladen löscht die Konfiguration dieses Geräts"),
+                            {L.tr("address table, association table and application program go to UNLOADED",
+                                  "Adresstabelle, Assoziationstabelle und Applikationsprogramm gehen auf UNLOADED"),
+                             L.tr("only an ETS download brings it back - oknx cannot",
+                                  "nur ein ETS-Download holt das zurück - oknx kann es nicht")},
+                            std::string("oknx -i <ip> ") + pos[0] + " unload yes");
+            g_knxTunnel.disconnect();
+            socketCleanup();
+            return 2;
+        }
+        // The `yes` is the script's consent. On a terminal a human also gets asked, with the device named,
+        // because a mistyped address here destroys a device that was working.
+        if (g_term.isTty() && !quiet)
+        {
+            g_tpl.status(ftc::Tpl::Stat::Warn, pos[0] + " " + L.tr("will be unloaded", "wird entladen"),
+                         {L.tr("configuration erased, only an ETS download brings it back",
+                               "Konfiguration gelöscht, nur ein ETS-Download holt sie zurück")});
+            if (!ftc::confirm(g_term, g_theme, L, L.tr("really unload this device?", "dieses Gerät wirklich entladen?")))
+            {
+                g_knxTunnel.disconnect();
+                socketCleanup();
+                return 2;
+            }
+        }
+        static constexpr uint8_t PID_LOAD_STATE_CONTROL = 5;
+        static constexpr uint8_t LE_UNLOAD = 4;
+        struct Obj { uint8_t idx; const char* en; const char* de; };
+        static const Obj OBJS[] = {{1, "address table", "Adresstabelle"},
+                                   {2, "association table", "Assoziationstabelle"},
+                                   {3, "application program", "Applikationsprogramm"}};
+        SecurityControl sec{false, None};
+        int done = 0;
+        for (const Obj& o : OBJS)
+        {
+            uint8_t v = LE_UNLOAD;
+            if (!g_knxTunnel.sendPropertyValueWrite(tgt, o.idx, PID_LOAD_STATE_CONTROL, 1, 1, &v, 1)) continue;
+            for (uint64_t t0 = nowMs(); nowMs() - t0 < 500;) g_knxTunnel.pump();
+            done++;
+        }
+        (void)sec;
+        // Read the state back: LS_UNLOADED (0) is the proof, not the fact that a write left the socket.
+        static int s_ls[3];
+        static size_t s_lsIx;
+        static uint8_t s_lsObj;
+        static uint16_t s_lsPa;
+        s_lsPa = tgt;
+        s_lsIx = 0;
+        for (size_t i = 0; i < 3; i++) s_ls[i] = -1;
+        for (size_t i = 0; i < 3; i++)
+        {
+            s_lsIx = i;
+            s_lsObj = OBJS[i].idx;
+            // Filter on the object index: a previous table's late answer carries the same PID and would
+            // otherwise be stored as THIS table's state, reporting the two tables swapped.
+            g_knxTunnel.setPropertyCallback([](uint16_t sa, uint8_t oi, uint8_t pid, const uint8_t* d, uint8_t n) {
+                if (sa == s_lsPa && oi == s_lsObj && pid == PID_LOAD_STATE_CONTROL && n >= 1) s_ls[s_lsIx] = d[0];
+            });
+            g_knxTunnel.sendPropertyValueRead(tgt, OBJS[i].idx, PID_LOAD_STATE_CONTROL, 1, 1);
+            for (uint64_t t0 = nowMs(); nowMs() - t0 < 1200 && s_ls[i] < 0;) g_knxTunnel.pump();
+        }
+        g_knxTunnel.setPropertyCallback(nullptr);
+        int unloaded = 0;
+        for (size_t i = 0; i < 3; i++)
+            if (s_ls[i] == 0) unloaded++;
+        if (quiet)
+            std::printf("unload\t%s\t%d\t%d\t%d\n", pos[0].c_str(), s_ls[0], s_ls[1], s_ls[2]);
+        else
+        {
+            for (size_t i = 0; i < 3; i++)
+                std::printf("    %-24s %s\n", L.tr(OBJS[i].en, OBJS[i].de),
+                            s_ls[i] == 0 ? L.tr("unloaded", "entladen")
+                                         : s_ls[i] < 0 ? L.tr("no answer", "keine Antwort")
+                                                       : L.tr("still loaded", "noch geladen"));
+            g_tpl.status(unloaded == 3 ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Err,
+                         pos[0] + " " + (unloaded == 3 ? L.tr("unloaded", "entladen")
+                                                       : L.tr("not fully unloaded", "nicht vollständig entladen")),
+                         {});
+        }
+        (void)done;
+        g_knxTunnel.disconnect();
+        socketCleanup();
+        return unloaded == 3 ? 0 : 1;
+    }
+
+    // A_Restart is a KNX service, not an FTC command: a foreign device has no FTC server to ask for
+    // permission, so this bypasses everything below. Byte layout from knx application_layer.cpp (case
+    // Restart). A basic restart is answered by nothing - the device just reboots.
+    if (!consoleMode && !knxotaActive && reachHasPa && pos.size() >= 2 &&
+        (pos[1] == "restart" || pos[1] == "masterreset"))
+    {
+        ftc::I18n& L = g_i18n;
+        const uint16_t tgt = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
+        const bool master = (pos[1] == "masterreset");
+        uint8_t erase = 0;
+        if (master)
+        {
+            // Names, not numbers, because a mistyped digit here is not recoverable over the bus.
+            // Values from knx_types.h EraseCode.
+            static const struct { const char* name; uint8_t code; } ERASE[] = {
+                {"confirmedrestart", 1}, {"factoryreset", 2}, {"resetia", 3}, {"resetap", 4},
+                {"resetparam", 5}, {"resetlinks", 6}, {"factoryresetwithoutia", 7}};
+            std::string want = pos.size() >= 3 ? pos[2] : "";
+            for (char& c : want) c = (char)std::tolower((unsigned char)c);
+            for (const auto& e : ERASE)
+                if (want == e.name) erase = e.code;
+            const bool confirmed = pos.size() >= 4 && pos[3] == "yes";
+            if (erase == 0 || !confirmed)
+            {
+                g_ui.errorBlock(false,
+                                L.tr("master reset needs an erase code and a confirmation",
+                                     "Master-Reset braucht einen Erase-Code und eine Bestätigung"),
+                                {L.tr("nothing was sent", "es wurde nichts gesendet"),
+                                 "confirmedrestart · factoryreset · resetia · resetap · resetparam · resetlinks · factoryresetwithoutia"},
+                                "oknx <pa> masterreset factoryreset yes");
+                g_knxTunnel.disconnect();
+                socketCleanup();
+                return 2;
+            }
+        }
+        // A master reset is answered, a basic restart is not: wait for the answer only where one is due,
+        // and report the device's error code rather than calling an unanswered send a success.
+        static int s_mrErr = -1;
+        static uint16_t s_mrTime = 0;
+        s_mrErr = -1;
+        if (master)
+            g_knxTunnel.setRestartCallback([](uint16_t, uint8_t err, uint16_t secs) {
+                s_mrErr = (int)err;
+                s_mrTime = secs;
+            });
+        // 06 Profiles 4.2 p.37 row 11: the CONNECTION-ORIENTED restart is mandatory for every profile,
+        // the connectionless one is optional everywhere. The reachability probe closes its CO session
+        // before returning, so without this the request goes out connectionless and a device that only
+        // implements the mandatory form ignores it - and we would report "sent", exit 0, nothing rebooted.
+        bool co = g_knxTunnel.scanConnect(tgt);
+        if (co)
+        {
+            for (uint64_t t0 = nowMs(); !g_knxTunnel.scanConnected() && nowMs() - t0 < 800;) g_knxTunnel.pump();
+            co = g_knxTunnel.scanConnected();
+        }
+        const bool sent = g_knxTunnel.sendRestart(tgt, master, erase, 0);
+        const uint32_t window = master ? 3000u : 400u;
+        for (uint64_t t0 = nowMs(); nowMs() - t0 < window;)
+        {
+            g_knxTunnel.pump();
+            if (master && s_mrErr >= 0) break;
+        }
+        g_knxTunnel.setRestartCallback(nullptr);
+        if (co) g_knxTunnel.scanDisconnect(); // the device reboots anyway; leaving the session open wedges the next call
+        if (master && sent)
+        {
+            char det[96];
+            if (s_mrErr < 0)
+                std::snprintf(det, sizeof(det), "%s",
+                              L.tr("no answer in 3 s - it may still have acted, check the device",
+                                   "keine Antwort in 3 s - kann trotzdem gewirkt haben, am Gerät prüfen"));
+            else
+                std::snprintf(det, sizeof(det), L.tr("device says error %d, %u s", "Gerät meldet Fehler %d, %u s"),
+                              s_mrErr, (unsigned)s_mrTime);
+            if (quiet) std::printf("masterreset\t%s\t%d\t%d\n", pos[0].c_str(), s_mrErr, (int)s_mrTime);
+            else if (s_mrErr == 0)
+                g_tpl.status(ftc::Tpl::Stat::Ok, pos[0] + " " + L.tr("master reset accepted", "Master-Reset angenommen"), {det});
+            else
+                g_tpl.status(ftc::Tpl::Stat::Warn, pos[0] + " " + L.tr("master reset sent", "Master-Reset gesendet"), {det});
+            g_knxTunnel.disconnect();
+            socketCleanup();
+            return s_mrErr == 0 ? 0 : 1;
+        }
+        if (quiet)
+            std::printf("%s\t%s\t%d\n", master ? "masterreset" : "restart", pos[0].c_str(), sent ? 1 : 0);
+        else if (sent)
+            g_tpl.status(ftc::Tpl::Stat::Ok,
+                         pos[0] + " " + (master ? L.tr("master reset sent", "Master-Reset gesendet")
+                                                : L.tr("restart sent", "Neustart gesendet")),
+                         {L.tr("a restart is not acknowledged - check the device",
+                               "ein Neustart wird nicht quittiert - am Gerät prüfen")});
+        else
+            g_tpl.status(ftc::Tpl::Stat::Err, pos[0] + " " + L.tr("could not be sent", "konnte nicht gesendet werden"), {});
+        g_knxTunnel.disconnect();
+        socketCleanup();
+        return sent ? 0 : 1;
+    }
+
     // A write needs the device's permission, and we can ASK before spending a transfer on a refusal. The
     // console has done this since it was written; every other write command ran into the wall instead and
     // reported it as a failure. Mirrored from the server's own gate (secIsWriteCommand) so the two lists
     // cannot drift: reads stay open, writes do not.
-    if (!consoleMode && !knxotaActive && !g_pchild && reachHasPa && pos.size() >= 2)
+    if (!consoleMode && !knxotaActive && reachHasPa && pos.size() >= 2)
     {
         static const char* WRITE_VERBS[] = {"send", "u", "upload", "perf", "pf", "apply", "a", "rm", "mv", "m",
                                             "mkdir", "md", "rmdir", "rd", "format", "fwupdate", "fw"};
