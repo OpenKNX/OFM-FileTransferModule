@@ -4777,21 +4777,20 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
         });
     else
     {
-        std::function<void(const FtcEntry&)> onNew;
-        if (pool)
-            onNew = [&](const FtcEntry& e) {
-                // The class comes from the sweep; only a System B device can be OpenKNX. An address that
-                // merely acknowledged (mask 0) says nothing about itself, so `details` includes it too.
-                // One definition of "could be OpenKNX", taken from the stack's own classifier. The old
-                // `& 0xFFF0 == 0x07B0` matched TP1 only, so a device reporting 0x57B0 (TP1/IP System B)
-                // or an OpenKNX router (0x091A) was never asked who it is.
-                const bool candidate =
-                    wantDetails || KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB;
-                if (candidate) pool->submit(e.name);
-            };
         openknxFileTransferClient.processCommand(cmd, false);
         ftcPumpStructured(snap, k == K_Scan, k == K_Scan && !quiet, k == K_InfoGa,
-                          pool ? &onNew : nullptr); // live progress line for the scan (unless -q)
+                          nullptr); // live progress line for the scan (unless -q)
+        // The identity read starts when the sweep is DONE, not while it runs. The sweep decides presence
+        // from the TP1 acknowledge with one request in flight; reading identities at the same time puts
+        // our own children's traffic on the bus it is measuring, and addresses go missing.
+        if (pool)
+            for (const auto& e : snap)
+            {
+                // Only a System B device can be OpenKNX, taken from the stack's own classifier. An address
+                // that merely acknowledged (mask 0) says nothing about itself, so `details` includes it.
+                if (wantDetails || KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB)
+                    pool->submit(e.name);
+            }
     }
     if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
     g_ftcSuppress = false;
@@ -7712,16 +7711,17 @@ int main(int argc, char** argv)
             if (!g_ip.empty())
                 dpool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
                                                 g_workers > 0 ? g_workers : FTC_DETAIL_WORKERS));
-            std::function<void(const FtcEntry&)> onNew = [&](const FtcEntry& e) {
-                // Same predicate as the scan, or the picker and the table disagree about who is a candidate.
-                if (dpool && KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB)
-                    dpool->submit(e.name);
-            };
             g_ftcSuppress = true;
             // Without the pool the sweep would run its own identity probe over the one shared tunnel; with
             // it that is the same question asked twice, and the two starve each other.
             openknxFileTransferClient.processCommand(std::string("ftc scan ") + line + (dpool ? "" : " openknx"), false);
-            ftcPumpStructured(hits, true, g_term.isTty() && !quiet, false, dpool ? &onNew : nullptr);
+            ftcPumpStructured(hits, true, g_term.isTty() && !quiet, false, nullptr);
+            // Read identities only once the sweep is done -- the same rule as the scan: our children must
+            // not put traffic on the bus whose acknowledges the sweep is measuring.
+            if (dpool)
+                for (const auto& e : hits)
+                    if (KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB)
+                        dpool->submit(e.name);
             g_ftcSuppress = false;
             if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
 
