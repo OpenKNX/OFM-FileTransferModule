@@ -60,7 +60,7 @@ carried over ([../guide/throughput.md](../guide/throughput.md)).
    │                        ▼                                                           │
    │              ┌──────────────────┐      UDP 3671      ┌───────────┐   ~400 B/s      │
    └─────────────▶│  KnxIpTunnel     │───────────────────▶│ Interface │────────────────▶│
-                  │  (oknx/shim)     │◀───────────────────│           │◀────────────────│
+                  │  (oknx/src)      │◀───────────────────│           │◀────────────────│
                   └──────────────────┘                    └───────────┘                 │
                                                                                         ▼
                                                             LittleFS  ·  SD  ·  ExtFlash
@@ -106,10 +106,10 @@ not a second client.
 ```
   KNX dispatch (close to the interrupt)   loop()  (cooperative, under freeLoopTime)
   ─────────────────────────────────────   ────────────────────────────────────────
-  processFunctionProperty()               conLoop()         run a console line
-    ├─ recognise the command              crcSlice()        one slice of a checksum
-    ├─ one file operation                 deltaSlice()      one slice of a firmware rebuild
-    └─ return the answer                  drainOut()        emit the log ring
+  processFunctionProperty()               conLoop()         run a parked console line
+    ├─ recognise the command              crcLoop()         one slice of a file checksum
+    ├─ one file operation                 deltaLoop()       one slice of a firmware rebuild
+    └─ return the answer                  probeLoop()       one slice of the source checksum
        -- nothing long here --
 ```
 
@@ -136,7 +136,7 @@ moving between drives is a copy plus a delete.
   Device                                   PC
   ──────                                   ──
   FileTransferClient.cpp   ◀── identical ──▶   FileTransferClient.cpp
-  knx.bau()                                    oknx/shim/     →  KnxIpTunnel
+  knx.bau()                                    oknx/src/      →  KnxIpTunnel
   serial console `ftc …`                       argv  →  the same command parser
 ```
 
