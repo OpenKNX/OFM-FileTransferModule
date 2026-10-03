@@ -149,6 +149,15 @@ struct TunnelProbe
 };
 static TunnelProbe probeTunnelSlots(const std::string& ip, uint16_t port, int slots);
 
+/// @brief Pad an individual address so a row of chips has one width. A chip is as wide as its text, so
+///        unpadded addresses (1.0.0 to 15.15.200) give a ragged column of coloured blocks.
+static std::string padPa(const std::string& pa, size_t w)
+{
+    std::string s = pa;
+    while (s.size() < w) s += ' ';
+    return s;
+}
+
 /**********************************************************************
  *************************** SMALL HELPERS ****************************
  **********************************************************************/
@@ -3452,6 +3461,9 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
             if (!probe.conclusive)
                 head += c.dim("  · ") + c.amber(L.tr("a probe got no answer", "eine Probe blieb unbeantwortet"));
             p.kv(L.tr("Tunnel addresses", "Tunnel-Adressen"), head);
+            size_t slotW = 0;
+            for (uint16_t a : det.tunnelAddrs)
+                slotW = std::max(slotW, pa(a).size());
             for (size_t i = 0; i < det.tunnelAddrs.size(); ++i)
             {
                 const bool isFree = freeSet.count(det.tunnelAddrs[i]) != 0;
@@ -3461,7 +3473,7 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
                 // report a failed handshake as somebody else's connection.
                 const char* lbl = isFree ? nullptr
                                          : (probe.conclusive ? L.tr("busy", "belegt") : L.tr("unknown", "unbekannt"));
-                p.kv(buf, t.chip(pa(det.tunnelAddrs[i]), isFree ? 'c' : 'a') +
+                p.kv(buf, t.chip(padPa(pa(det.tunnelAddrs[i]), slotW), isFree ? 'c' : 'a') +
                               (lbl ? ("   " + c.amber(lbl)) : std::string()));
             }
             // The colour IS the status — one dim legend line makes it an explicit (indirect) description.
@@ -4028,6 +4040,9 @@ static void renderOwnerMap(const std::vector<IfaceOwner>& map)
     // 11, not 9: the widest address is 15.15.200 (9 columns) and the no-colour chip adds its brackets.
     // At 9 that row overflowed its cell and pushed the whole line two columns right.
     const std::vector<int> w = {11, 30, 15, 0};
+    size_t paW = 0;
+    for (const auto& o : map)
+        if (o.ia) paW = std::max(paW, paToStr(o.ia).size());
     for (const auto& o : map)
     {
         char blk[48] = {0};
@@ -4049,7 +4064,7 @@ static void renderOwnerMap(const std::vector<IfaceOwner>& map)
                 std::snprintf(blk, sizeof(blk), "%u %s  %s%s%s", (unsigned)o.tun.size(), L.tr("additional", "Zusatz"),
                               paToStr(*mm.first).c_str(), dense ? "\xE2\x80\xA6" : " .. ", paToStr(*mm.second).c_str());
         }
-        t.tableRow({o.ia ? t.chip(paToStr(o.ia), 'c') : c.red("?"), c.txt(o.name), c.dim(o.ip),
+        t.tableRow({o.ia ? t.chip(padPa(paToStr(o.ia), paW), 'c') : c.red("?"), c.txt(o.name), c.dim(o.ip),
                     o.refused ? c.red(blk) : c.dim(blk)}, w);
     }
     t.note(L.tr("own address from the search answer, additional addresses over device management -- no tunnel slot",
@@ -4103,6 +4118,10 @@ static void renderScanTable(const std::vector<FtcEntry>& devices,
     ftc::I18n& L = g_i18n;
     ftc::Tpl& t = g_tpl;
     const bool cols = !det.empty();
+    // One width for every owner chip, so a column of tunnel rows does not step left and right.
+    size_t ownW = 0;
+    for (const auto& o : owners)
+        if (o.ia) ownW = std::max(ownW, paToStr(o.ia).size());
     auto fmtSerial = [](const std::string& hex) {
         // The device answers 12 hex digits: manufacturer, then the serial itself.
         if (hex.size() != 12) return hex;
@@ -4132,7 +4151,7 @@ static void renderScanTable(const std::vector<FtcEntry>& devices,
                 char lbl[40];
                 std::snprintf(lbl, sizeof(lbl), "Tunnel %d \xC2\xB7 ", slot);
                 t.tableRow({c.violet(g_term.glyph("\xE2\x97\x8D", "o")), c.txt(e.name),
-                            c.violet(lbl) + t.chip(paToStr(own->ia), 'c'),
+                            c.violet(lbl) + t.chip(padPa(paToStr(own->ia), ownW), 'c'),
                             c.dim(own->name), c.dim(""), c.dim(""), c.dim(""), c.dim(""), c.dim("")}, w);
                 continue;
             }
@@ -4179,7 +4198,7 @@ static void renderScanTable(const std::vector<FtcEntry>& devices,
                 char lbl[40];
                 std::snprintf(lbl, sizeof(lbl), "Tunnel %d \xC2\xB7 ", slot);
                 t.tableRow({c.violet(g_term.glyph("\xE2\x97\x8D", "o")), c.txt(e.name),
-                            c.violet(lbl) + t.chip(paToStr(own->ia), 'c'), c.dim(own->name)}, wn);
+                            c.violet(lbl) + t.chip(padPa(paToStr(own->ia), ownW), 'c'), c.dim(own->name)}, wn);
                 continue;
             }
             const char* cls = ftc::knxMaskName((uint16_t)e.crc);
