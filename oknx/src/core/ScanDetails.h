@@ -7,8 +7,8 @@
  *              parallel — each over its own tunnel.
  *
  *              Nothing here reads a device itself. `oknx <pa> info -q` already emits every field as a
- *              tab-separated key/value protocol, and the parallel scan already runs the binary as a child
- *              process per tunnel; a worker is just those two put together. That keeps one implementation
+ *              tab-separated key/value protocol, and the tool already runs itself as a child process;
+ *              a reader is just those two put together. That keeps one implementation
  *              of the read, and a child process cannot disturb the sweep's own tunnel or client state.
  *
  *              How many workers is not a decision worth agonising over: an interface grants what it grants.
@@ -50,6 +50,18 @@ struct DetailRow
     std::string ftm;     ///< file-transfer module version (empty for a device without it)
     std::string serial;  ///< KNX serial number
     uint16_t mfr = 0;    ///< manufacturer id (0x00FA = OpenKNX)
+    uint16_t mask = 0;   ///< mask version the device itself reported (0 = not read)
+    // BCU1/BCU2/System 7 identity. Those families have no order number and no KNX serial -- their
+    // identity is the manufacturer code plus the 6-digit application number, so without these a BCU
+    // answers in full and the row still shows nothing.
+    std::string bcuApp;  ///< 6-digit application number, BCD as printed (last pair = version)
+    uint8_t bcuMfr = 0;  ///< BCU manufacturer code (0x01 = Siemens)
+    uint8_t pei = 0xFF;  ///< PEI type (0xFF = not read)
+    uint8_t runState = 0xFF;
+    // Load state of the application program, as a number. A device with interface objects reports this
+    // instead of a BCU run state. The number, not the name: the child's `app_state` is translated.
+    uint8_t appState = 0xFF;
+    bool progMode = false;
     bool answered = false;
 };
 
@@ -76,17 +88,19 @@ class DetailPool
 
     /**
      * @brief Queue one address. Ignored once the pool is closing, and never queued twice.
-     * @param answersUp the device answered the sweep at application level. One that only acknowledged
-     *        will not answer this read either, so it is asked once and never retried — on a full line
-     *        those are the majority, and a pointless second timeout each dominates the wall clock.
+     * @details Every address gets the same budget. An earlier version asked an "acknowledged only"
+     *          address once and never again, on the assumption that a device silent to the sweep stays
+     *          silent here. That is false: the sweep asks CONNECTIONLESS, this read falls back to a
+     *          connection, and BCU1/BCU2 answer only the latter (06 Profiles 4.3 p.42). Measured on
+     *          1.1.73 and 1.1.20 — "acknowledged only" in the sweep, full identity over the connection.
      */
-    void submit(const std::string& pa, bool answersUp = true)
+    void submit(const std::string& pa, bool = true)
     {
         std::lock_guard<std::mutex> lk(_mtx);
         if (_closing) return;
         if (_seen.count(pa)) return;
         _seen.insert(pa);
-        _queue.push_back(Item{pa, answersUp, 0});
+        _queue.push_back(Item{pa, 0});
     }
 
     /** @brief How many addresses are still queued or in flight. */
@@ -155,10 +169,11 @@ class DetailPool
             bool reached = false;
             DetailRow r = ask(it.pa, reached);
             _busy--;
-            // A device that answers at application level but told us nothing gets one more go: on a busy
-            // line a single read can time out while the device is perfectly reachable. One that only ever
-            // acknowledged is not asked twice — it has nothing to say up here.
-            const bool worthAnotherGo = !reached || (it.answersUp && !r.answered && it.tries == 0);
+            // Every address that was reached but told us nothing gets one more go: on a busy line a
+            // single read times out while the device is perfectly reachable, and the first attempt falls
+            // into the heaviest part of the run. The cost is one extra timeout for an address that truly
+            // never answers; the gain is the identity of every BCU on the line.
+            const bool worthAnotherGo = !reached || (!r.answered && it.tries == 0);
             if (worthAnotherGo && it.tries + 1 < MAX_TRIES)
             {
                 // The child never got as far as talking to the device: every tunnel was busy. That is a
@@ -205,9 +220,19 @@ class DetailPool
             else if (key == "ftm_version") r.ftm = val;
             else if (key == "serial") r.serial = val;
             else if (key == "manufacturer") r.mfr = (uint16_t)std::strtoul(val.c_str(), nullptr, 0);
+            // Not folded into `answered`: a descriptor alone is not an identity, and the one retry a
+            // half-answer gets is worth keeping.
+            else if (key == "mask") r.mask = (uint16_t)std::strtoul(val.c_str(), nullptr, 0);
+            else if (key == "bcu_app") r.bcuApp = val;
+            else if (key == "bcu_manufacturer") r.bcuMfr = (uint8_t)std::strtoul(val.c_str(), nullptr, 0);
+            else if (key == "bcu_pei") r.pei = (uint8_t)std::strtoul(val.c_str(), nullptr, 0);
+            else if (key == "bcu_runstate") r.runState = (uint8_t)std::strtoul(val.c_str(), nullptr, 0);
+            else if (key == "app_state_id") r.appState = (uint8_t)std::strtoul(val.c_str(), nullptr, 0);
+            else if (key == "progmode") r.progMode = val == "1";
         }
         FTC_SD_PCLOSE(f);
-        r.answered = !r.order.empty() || !r.serial.empty() || r.mfr != 0;
+        // A BCU that gave its application number HAS answered, even with no order number and no serial.
+        r.answered = !r.order.empty() || !r.serial.empty() || r.mfr != 0 || !r.bcuApp.empty();
         return r;
     }
 
@@ -215,7 +240,6 @@ class DetailPool
     struct Item
     {
         std::string pa;
-        bool answersUp = true;
         int tries = 0;
     };
     static constexpr int MAX_TRIES = 3; // only ever spent on "no tunnel was free", never on a silent device

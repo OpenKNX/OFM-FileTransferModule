@@ -53,6 +53,7 @@ typedef int sock_t;
 
 // The transport seam + the compiled embedded client (pulls the shim's OpenKNX.h -> `openknx`).
 #include "FileTransferClient.h"
+#include "KnxDeviceMap.h"
 #include "knx_ip_tunnel.h"
 
 // oknx CLI presentation layer (host-only, header-only, NO lib/knx dependency): terminal caps, i18n,
@@ -122,21 +123,28 @@ static int graphWidth(int reserve) // graph columns = GRAPH_WIDTH_PCT of (cols -
     if (w < 8) w = 8;
     return w;
 }
-// Parallel scan (--tunnels N): the parent self-execs N child scans over range chunks, each on its own tunnel.
-static std::string g_selfPath;   // argv[0] -> re-invoked for the child scans
+// The sweep is serial on one tunnel; only the identity read runs in parallel, as child processes.
+static std::string g_selfPath;   // argv[0] -> re-invoked for the identity children
 static std::string g_ip;         // interface address, as given -> the detail children reach the same one
 static uint16_t g_port = 3671;
 static uint16_t g_ifaceApdu = 0;  // the interface's own max APDU -- shown beside the target's
 // Enough tunnels to hide the per-device read behind the sweep, few enough that an interface still grants
-// them all; `--tunnels N` overrides. A worker whose tunnel is refused just drops out.
+// them all; `--workers N` overrides. A reader whose tunnel is refused just drops out.
 static constexpr int FTC_DETAIL_WORKERS = 5;
-static int g_tunnels = 1;        // 1 = serial (default); N = N parallel tunnels; 0 = auto (as many as the interface allows)
-static bool g_pchild = false;    // internal: this process is a parallel-scan child (emit the P/D line protocol)
+// How many identity readers run in parallel for `details`/`openknx` (each takes one tunnel of the
+// interface). 0 = the built-in default. This is the ONLY place parallelism measurably pays: ~20 found
+// devices instead of 255 addresses, and the bus is not the limit there.
+static int g_workers = 0;
 static bool g_probeSlot = false; // internal: this process is a tunnel-slot probe child (connect, emit SLOT, hold, exit)
 
 // Probe which tunnel additional-addresses are currently free: spawn one short-lived tunnel per slot (children
 // hold the slot briefly so the interface hands each a distinct free PA); the PAs that come back are free.
-static std::set<uint16_t> probeTunnelSlots(const std::string& ip, uint16_t port, int slots);
+struct TunnelProbe
+{
+    std::set<uint16_t> freeSet; ///< addresses the interface actually handed out
+    bool conclusive = true;     ///< false = at least one probe got no answer, so "the rest is busy" is a guess
+};
+static TunnelProbe probeTunnelSlots(const std::string& ip, uint16_t port, int slots);
 
 /**********************************************************************
  *************************** SMALL HELPERS ****************************
@@ -896,7 +904,7 @@ class StdinLines
  ******************************** CLI *******************************
  **********************************************************************/
 
-#define FTC_CLI_VERSION "1.0.0"
+#define FTC_CLI_VERSION "1.0.5"
 
 // The colour + glyph layer lives in ftc::Term / Theme / Ui; g_color mirrors Term's decision so the few
 // remaining plain-printf sites can gate on it.
@@ -1053,7 +1061,7 @@ static bool ftcLineHook(const std::string& in, uint8_t color)
     }
     if (in.find("[...output truncated...]") != std::string::npos) g_conTrunc++; // device console-ring overflow
     // -q during a TRANSFER: the facts block is the whole report. Narrowed to a running transfer -- `info -q`
-    // emits the key/value protocol the parallel scan parses, and that must keep flowing.
+    // emits the key/value protocol the identity pool parses, and that must keep flowing.
     if (g_quiet && openknxFileTransferClient.transferSetup().valid) return true;
     // Detail lines are written for the log. On screen they belong to -V only -- and there without the marker,
     // which is a filter tag, not something a reader needs to see.
@@ -1375,8 +1383,12 @@ static void usage()
              "a device on the bus", "ein Gerät am Bus"},
             {std::string(c.dim("oknx ")) + c.blue("-i") + " " + c.txt("A.B.C.D") + " " + c.bold("<cmd>"),
              "oknx -i A.B.C.D <cmd>",
-             "the interface/router itself: info · scan · bm · gm · ps",
-             "das Interface/der Router selbst: info · scan · bm · gm · ps"},
+             "the interface/router itself: info · con · scan · ps · ga · gm · bm · prop",
+             "das Interface/der Router selbst: info · con · scan · ps · ga · gm · bm · prop"},
+            {std::string(c.dim("oknx ")) + c.blue("--discover"),
+             "oknx --discover",
+             "step 1: which interfaces are on the network at all",
+             "Schritt 1: welche Interfaces es im Netz ueberhaupt gibt"},
             {std::string(c.dim("oknx ")) + c.bold("<cmd>"),
              "oknx <cmd>",
              "no bus at all: knxota · gzip · decode · config · install",
@@ -3240,17 +3252,18 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
             p.sep();
             // Probing opens one short-lived tunnel per slot (blocking) -> animate on stderr so a piped stdout
             // panel stays clean and it never looks hung.
-            std::set<uint16_t> freeSet;
+            TunnelProbe probe;
             if (g_term.isTty())
-                runWithBusAnim(L.tr("probing tunnel slots …", "prüfe Tunnel-Slots …"), [&]() { freeSet = probeTunnelSlots(ip, port, (int)det.tunnelAddrs.size()); }, stderr);
+                runWithBusAnim(L.tr("probing tunnel slots …", "prüfe Tunnel-Slots …"), [&]() { probe = probeTunnelSlots(ip, port, (int)det.tunnelAddrs.size()); }, stderr);
             else
             {
                 std::fprintf(stderr, "  %s\r", c.dim(L.tr("probing tunnel slots …", "prüfe Tunnel-Slots …")).c_str());
                 std::fflush(stderr);
-                freeSet = probeTunnelSlots(ip, port, (int)det.tunnelAddrs.size());
+                probe = probeTunnelSlots(ip, port, (int)det.tunnelAddrs.size());
                 std::fprintf(stderr, "\x1b[K");
                 std::fflush(stderr);
             }
+            const std::set<uint16_t>& freeSet = probe.freeSet;
             size_t nFree = 0;
             for (uint16_t a : det.tunnelAddrs)
                 if (freeSet.count(a)) ++nFree;
@@ -3259,16 +3272,26 @@ static int renderInterfaceInfo(const std::string& ip, uint16_t port, bool quiet)
             char fb[32];
             std::snprintf(fb, sizeof(fb), "%zu/%zu", nFree, det.tunnelAddrs.size());
             head += c.dim("  · ") + c.cyan(fb) + c.dim(L.tr(" free", " frei"));
+            if (!probe.conclusive)
+                head += c.dim("  · ") + c.amber(L.tr("a probe got no answer", "eine Probe blieb unbeantwortet"));
             p.kv(L.tr("Tunnel addresses", "Tunnel-Adressen"), head);
             for (size_t i = 0; i < det.tunnelAddrs.size(); ++i)
             {
                 const bool isFree = freeSet.count(det.tunnelAddrs[i]) != 0;
                 std::snprintf(buf, sizeof(buf), "  #%zu", i + 1);
+                // A slot we were not handed is only "busy" when every refusal was E_NO_MORE_CONNECTIONS.
+                // If a probe went unanswered, this address is simply not known -- saying "busy" would
+                // report a failed handshake as somebody else's connection.
+                const char* lbl = isFree ? nullptr
+                                         : (probe.conclusive ? L.tr("busy", "belegt") : L.tr("unknown", "unbekannt"));
                 p.kv(buf, t.chip(pa(det.tunnelAddrs[i]), isFree ? 'c' : 'a') +
-                              (isFree ? std::string() : ("   " + c.amber(L.tr("busy", "belegt")))));
+                              (lbl ? ("   " + c.amber(lbl)) : std::string()));
             }
             // The colour IS the status — one dim legend line makes it an explicit (indirect) description.
-            p.kv("", c.dim(L.tr("cyan = free · amber = busy (in use)", "cyan = frei · orange = belegt (in Benutzung)")));
+            p.kv("", c.dim(probe.conclusive
+                               ? L.tr("cyan = free · amber = busy (in use)", "cyan = frei · orange = belegt (in Benutzung)")
+                               : L.tr("cyan = free · amber = not handed out, and a probe went unanswered",
+                                      "cyan = frei · orange = nicht zugeteilt, und eine Probe blieb unbeantwortet")));
         }
     }
     p.render(0);
@@ -3325,7 +3348,12 @@ static void liveLine(const std::string& body)
     std::fflush(stderr);
 }
 
-static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool progress = false,
+// True when the absolute safety cap ended the pump while the client was still working. Without this a
+// capped run looked exactly like a finished one: the renderer printed whatever had arrived and called it
+// complete - the very failure the group-comm "incomplete" marker exists to prevent.
+static bool g_pumpCapped = false;
+
+static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool progress = false, bool longRun = false,
                               const std::function<void(const FtcEntry&)>* onNew = nullptr)
 {
     auto absorb = [&]() {
@@ -3352,9 +3380,12 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
         else if (lst.size() >= snap.size())
             snap = lst;
     };
-    const uint64_t QUIET_MS = 1500, ABS_CAP_MS = (progress || g_pchild) ? 600000 : 60000; // a scan can run minutes
+    // A group-comm walk is hundreds of round trips over TP - the device page itself says 1-3 minutes - so
+    // 60 s was a cap on normal operation, not on a hang.
+    const uint64_t QUIET_MS = 1500;
+    const uint64_t ABS_CAP_MS = progress ? 600000 : (longRun ? 300000 : 60000);
+    g_pumpCapped = false;
     uint64_t t0 = nowMs(), last = t0, lastRender = 0;
-    uint16_t lastChildPa = 0xFFFF;
     uint32_t lastTx = knxTunnelActivity();
     bool started = false;
     for (;;)
@@ -3394,17 +3425,6 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
             // a wrapped line leaves fragments \r cannot clear (esp. when the window is shrunk mid-scan).
             liveLine(live);
         }
-        if (g_pchild) // parallel-scan child: emit the P progress protocol on stdout (the parent aggregates it)
-        {
-            const uint16_t pa = openknxFileTransferClient.scanCurrentPa();
-            if (pa != lastChildPa)
-            {
-                lastChildPa = pa;
-                const FtcStatus& stc = openknxFileTransferClient.status();
-                std::printf("P\t%u\t%u\t%u\t%u\n", openknxFileTransferClient.scanFound(), stc.done, stc.total, pa);
-                std::fflush(stdout);
-            }
-        }
         if (started && (ph == FtcPhase::Done || ph == FtcPhase::Failed))
         {
             for (int i = 0; i < 48; ++i)
@@ -3420,7 +3440,12 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
-        if (now - last > QUIET_MS || now - t0 > ABS_CAP_MS) break;
+        if (now - t0 > ABS_CAP_MS)
+        {
+            g_pumpCapped = openknxFileTransferClient.isBusy(); // cut short mid-work -> the result is a prefix
+            break;
+        }
+        if (now - last > QUIET_MS) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     if (progress)
@@ -3431,11 +3456,10 @@ static void ftcPumpStructured(std::vector<FtcEntry>& snap, bool mergeMode, bool 
 }
 
 /**********************************************************************
- ***************************** PARALLEL SCAN ************************
+ ***************************** CHILD PROCESSES *************************
  **********************************************************************/
-// --tunnels N: the parent self-execs N child scans over range chunks, each child on its OWN tunnel connection
-// (own process). Overlaps the per-absent-address CO timeouts N-fold. Portable: popen/_popen for the children
-// + std::thread for concurrent readers. No change to the single-tunnel core.
+// Child processes over popen/_popen + std::thread for the readers. Used by the tunnel-slot probe and by
+// the identity pool; the sweep itself stays serial on the one tunnel.
 #ifdef _WIN32
     #define FTC_POPEN _popen
     #define FTC_PCLOSE _pclose
@@ -3642,204 +3666,17 @@ static bool parseScanRange(const std::vector<std::string>& pos, uint16_t& start,
     return false;
 }
 
-namespace
-{
-struct PChild // one parallel-scan child (chunk + live counters, atomics for the reader thread)
-{
-    uint16_t cs = 0, ce = 0;
-    std::atomic<uint32_t> found{0}, probed{0}, total{0}, curPa{0};
-    std::atomic<bool> done{false}, failed{false};
-};
-} // namespace
-
-/**
- * @brief Run one wave of parallel child scans over [start,end] split into N chunks; append devices to @p out.
- * @details Devices are deduped by PA; chunks whose child could not get a tunnel go into @p failed. @p renderProgress
- *          draws the live aggregate.
- */
-static void parallelScanWave(uint16_t start, uint16_t end, int N, const std::string& ip, uint16_t port,
-                             std::vector<FtcEntry>& out, std::mutex& outMtx,
-                             std::vector<std::pair<uint16_t, uint16_t>>& failed, bool renderProgress)
-{
-    const int span = (int)end - (int)start + 1;
-    if (N > span) N = span;
-    if (N < 1) N = 1;
-    // The ip is interpolated into a popen() shell string below -> it MUST be a bare IPv4 literal, never anything
-    // a shell could act on. inet_pton mirrors the tunnel's own connect check; a non-IPv4 value fails the whole
-    // wave (the caller's no-progress guard then stops) instead of ever reaching /bin/sh.
-    struct in_addr _ipv4chk;
-    if (inet_pton(AF_INET, ip.c_str(), &_ipv4chk) != 1)
-    {
-        failed.emplace_back(start, end); // runs in the calling thread (children are joined before return) -> no lock
-        return;
-    }
-    std::vector<std::unique_ptr<PChild>> kids;
-    for (int i = 0; i < N; ++i)
-    {
-        auto k = std::unique_ptr<PChild>(new PChild());
-        k->cs = (uint16_t)(start + (int)((int64_t)span * i / N));
-        k->ce = (uint16_t)(start + (int)((int64_t)span * (i + 1) / N) - 1);
-        kids.push_back(std::move(k));
-    }
-    std::vector<std::thread> threads;
-    for (int i = 0; i < N; ++i)
-    {
-        PChild* k = kids[i].get();
-        threads.emplace_back([k, ip, port, &out, &outMtx]() {
-            std::string cmd = "\"" + g_selfPath + "\" --_pchild -i " + ip + " --port " + std::to_string(port) +
-                              " scan " + paToStr(k->cs) + " " + paToStr(k->ce) + " ets";
-#ifdef _WIN32
-            cmd += " 2>NUL"; // swallow the child's own chrome/errors -- the parent renders one clean status
-#else
-            cmd += " 2>/dev/null";
-#endif
-            FILE* f = FTC_POPEN(cmd.c_str(), "r");
-            if (!f)
-            {
-                k->failed = true;
-                k->done = true;
-                return;
-            }
-            char line[256];
-            bool gotDevice = false, gotProgress = false;
-            while (std::fgets(line, sizeof(line), f))
-            {
-                if (line[0] == 'P' && line[1] == '\t')
-                {
-                    unsigned fnd = 0, prb = 0, tot = 0, pa = 0;
-                    if (std::sscanf(line, "P\t%u\t%u\t%u\t%u", &fnd, &prb, &tot, &pa) == 4)
-                    {
-                        k->found = fnd;
-                        k->probed = prb;
-                        k->total = tot;
-                        k->curPa = pa;
-                        gotProgress = true;
-                    }
-                    continue;
-                }
-                char pa[16] = {0}, cls[80] = {0};
-                unsigned mask = 0;
-                int ok = 0;
-                if (std::sscanf(line, "%15[^\t]\t0x%x\t%79[^\t]\t%d", pa, &mask, cls, &ok) >= 2 && pa[0])
-                {
-                    std::lock_guard<std::mutex> lk(outMtx);
-                    bool dup = false;
-                    for (const auto& e : out)
-                        if (std::strcmp(e.name, pa) == 0)
-                        {
-                            dup = true;
-                            break;
-                        }
-                    if (!dup)
-                    {
-                        FtcEntry e{};
-                        std::strncpy(e.name, pa, sizeof(e.name) - 1);
-                        e.crc = (uint16_t)mask;
-                        e.isOpenKnx = (ok == 1);
-                        e.hasInfo = true;
-                        out.push_back(e);
-                    }
-                    gotDevice = true;
-                }
-            }
-            const int rc = FTC_PCLOSE(f);
-            if (rc != 0 && !gotDevice && !gotProgress) k->failed = true; // no output + error -> tunnel refused
-            k->done = true;
-        });
-    }
-    // aggregate live progress until every child is done
-    uint64_t lastRender = 0;
-    for (;;)
-    {
-        bool allDone = true;
-        uint32_t tf = 0, tp = 0, tt = 0;
-        int active = 0;
-        uint16_t frontPa = 0;
-        for (auto& k : kids)
-        {
-            tf += k->found;
-            tp += k->probed;
-            tt += k->total;
-            if (!k->done)
-            {
-                allDone = false;
-                active++;
-                if (k->curPa > frontPa) frontPa = (uint16_t)k->curPa;
-            }
-        }
-        if (renderProgress && nowMs() - lastRender > 70)
-        {
-            lastRender = nowMs();
-            static const char* SPU[8] = {"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"};
-            static const char* SPA[8] = {"|", "/", "-", "\\", "|", "/", "-", "\\"};
-            const int si = (int)((nowMs() / 80) % 8);
-            ftc::Theme& c = g_theme;
-            std::string live = std::string("  ") + c.green(g_term.glyph(SPU[si], SPA[si])) + " " +
-                               c.cyan(std::to_string(active) + "\xC3\x97 tunnels") + "   " +
-                               c.bold(std::to_string(tf) + " found") + "   " +
-                               c.dim(std::to_string(tp) + "/" + std::to_string(tt) + " probed" +
-                                     (frontPa ? ("   ~" + paToStr(frontPa)) : std::string()));
-            std::fprintf(stderr, "\r%s\x1b[K", g_tpl.clip(live, ftc::Tpl::cols() - 1).c_str());
-            std::fflush(stderr);
-        }
-        if (allDone) break;
-        if (g_abort) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
-    }
-    for (auto& t : threads)
-        if (t.joinable()) t.join();
-    if (renderProgress)
-    {
-        std::fprintf(stderr, "\r\x1b[K");
-        std::fflush(stderr);
-    }
-    for (auto& k : kids)
-        if (k->failed) failed.push_back({k->cs, k->ce});
-}
-
-/**
- * @brief Full parallel scan with adaptive wave-retry; @p allBusy set when the interface has no free tunnel slots.
- * @details Children that could not get a tunnel have their chunks retried in later waves with fewer tunnels,
- *          until all are covered or no progress is possible.
- */
-static std::vector<FtcEntry> parallelScan(uint16_t start, uint16_t end, int nReq, const std::string& ip, uint16_t port, bool& allBusy)
-{
-    allBusy = false;
-    std::vector<FtcEntry> out;
-    std::mutex outMtx;
-    std::vector<std::pair<uint16_t, uint16_t>> pending = {{start, end}};
-    int N = nReq > 0 ? nReq : 4; // auto -> a safe default; explicit --tunnels N overrides
-    for (int wave = 0; wave < 8 && !pending.empty() && !g_abort; ++wave)
-    {
-        std::vector<std::pair<uint16_t, uint16_t>> failed;
-        const size_t before = out.size();
-        for (auto& chunk : pending)
-        {
-            if (g_abort) break;
-            parallelScanWave(chunk.first, chunk.second, N, ip, port, out, outMtx, failed, wave == 0);
-        }
-        // A whole wave failed with NO progress -> the interface simply has no free tunnel slots. Stop here (do
-        // not retry 8 times and flood the terminal); the caller reports it once.
-        if (out.size() == before && !failed.empty() && failed.size() >= pending.size())
-        {
-            allBusy = true;
-            break;
-        }
-        pending = failed;
-        if (N > 1) N = (N + 1) / 2; // fewer tunnels each retry wave (slots were busy) -> converge
-    }
-    return out;
-}
 
 /**
  * @brief Probe which tunnel additional-addresses are currently free (union of reported PAs = free; rest = busy).
  * @details Spawns one short-lived probe child per slot; each opens a tunnel and reports the free PA it is handed,
  *          holding it briefly so siblings get *distinct* free slots.
  */
-static std::set<uint16_t> probeTunnelSlots(const std::string& ip, uint16_t port, int slots)
+static TunnelProbe probeTunnelSlots(const std::string& ip, uint16_t port, int slots)
 {
-    std::set<uint16_t> freeSet;
-    if (slots < 1 || ip.empty()) return freeSet;
+    TunnelProbe out;
+    std::set<uint16_t>& freeSet = out.freeSet;
+    if (slots < 1 || ip.empty()) return out;
     if (slots > 16) slots = 16; // a KNXnet/IP interface tops out at 16 tunnel connections
     std::mutex mtx;
     std::vector<std::thread> threads;
@@ -3850,7 +3687,7 @@ static std::set<uint16_t> probeTunnelSlots(const std::string& ip, uint16_t port,
         // small gap lets each connect land + get a distinct additional address, while all stay held open so the
         // set of assigned addresses = every free slot. The child hold time below covers the full stagger span.
         if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(60));
-        threads.emplace_back([ip, port, &freeSet, &mtx]() {
+        threads.emplace_back([ip, port, &out, &freeSet, &mtx]() {
             std::string cmd = "\"" + g_selfPath + "\" --_probeslot -i " + ip + " --port " + std::to_string(port);
 #ifdef _WIN32
             cmd += " 2>NUL";
@@ -3858,7 +3695,13 @@ static std::set<uint16_t> probeTunnelSlots(const std::string& ip, uint16_t port,
             cmd += " 2>/dev/null";
 #endif
             FILE* f = FTC_POPEN(cmd.c_str(), "r");
-            if (!f) return;
+            if (!f)
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                out.conclusive = false;
+                return;
+            }
+            bool sawLine = false;
             char line[128];
             while (std::fgets(line, sizeof(line), f))
             {
@@ -3867,14 +3710,31 @@ static std::set<uint16_t> probeTunnelSlots(const std::string& ip, uint16_t port,
                 {
                     std::lock_guard<std::mutex> lk(mtx);
                     freeSet.insert((uint16_t)(((a & 0x0F) << 12) | ((b & 0x0F) << 8) | (c & 0xFF)));
+                    sawLine = true;
                 }
+                int st = 0;
+                if (std::sscanf(line, "NOSLOT\t%d", &st) == 1 && st != 0x24)
+                {
+                    // Only E_NO_MORE_CONNECTIONS means "the interface has nothing left". A timeout or any
+                    // other status says the probe failed, which is not the same as the slot being taken.
+                    std::lock_guard<std::mutex> lk(mtx);
+                    out.conclusive = false;
+                }
+                if (st == 0x24) sawLine = true;
             }
+            // A child that said nothing at all -- could not be spawned, could not run, died -- is not
+            // evidence that the slot is taken. Its EXIT code is no signal: a refused slot exits 3 by design.
             FTC_PCLOSE(f);
+            if (!sawLine)
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                out.conclusive = false;
+            }
         });
     }
     for (auto& t : threads)
         if (t.joinable()) t.join();
-    return freeSet;
+    return out;
 }
 
 /**
@@ -3931,15 +3791,250 @@ static bool armScanAckFeed(uint16_t lineBase)
     return true;
 }
 
-static void renderScanSummary(const std::vector<FtcEntry>& devices)
+/**
+ * @brief One KNXnet/IP device on the network and the individual addresses it owns.
+ * @details `ia` comes from the search answer's Device Information DIB, `tun` from a device-management
+ *          connection (which costs no tunnel slot). `refused` = answered the search but not the
+ *          management connection, so its block stays unknown.
+ */
+struct IfaceOwner
+{
+    uint16_t ia = 0;
+    std::string ip, name;
+    std::vector<uint16_t> tun;
+    bool refused = false;
+};
+
+/**
+ * @brief Ask the network who owns which address: search, then read each answerer's additional addresses.
+ * @details This is what turns a tunnel slot in the hit list from "acknowledged only" into "tunnel 3 of
+ *          1.1.11". Only devices reachable by multicast appear; anything else stays unknown by design.
+ */
+static std::vector<IfaceOwner> buildOwnerMap(uint16_t port)
+{
+    std::vector<IfaceOwner> out;
+    // Our own tunnel is already open and its keep-alive runs only from pump() (HEARTBEAT_MS 60 s).
+    // Discovery plus one management query per device blocks ~1.5 s + 1.2 s each, so on an installation
+    // with many KNXnet/IP devices the window would outlast the heartbeat and the interface would drop us.
+    auto breathe = [] { if (g_knxTunnel.connected()) g_knxTunnel.pump(); };
+    breathe();
+    auto ifaces = ftc::discoverInterfaces(port, 1500);
+    breathe();
+    ftc::sortInterfaces(ifaces);
+    for (const auto& f : ifaces)
+    {
+        breathe();
+        IfaceOwner o;
+        o.ia = f.ia;
+        o.ip = f.ip;
+        o.name = f.name;
+        ftc::InterfaceDetails d;
+        if (ftc::queryInterfaceDetails(f.ip, port, d, 1200))
+            o.tun = d.tunnelAddrs;
+        else
+            o.refused = true; // answered the search, refused the management connection
+        out.push_back(o);
+    }
+    return out;
+}
+
+/** @brief The "who is on this network" block: one row per KNXnet/IP device, with the block it owns. */
+static void renderOwnerMap(const std::vector<IfaceOwner>& map)
+{
+    ftc::Theme& c = g_theme;
+    ftc::I18n& L = g_i18n;
+    ftc::Tpl& t = g_tpl;
+    char hdr[64];
+    std::snprintf(hdr, sizeof(hdr), "%s \xC2\xB7 %u %s", L.tr("KNXnet/IP devices", "KNXnet/IP-Geräte im Netz"),
+                  (unsigned)map.size(), L.tr("found", "gefunden"));
+    t.section(hdr);
+    // 11, not 9: the widest address is 15.15.200 (9 columns) and the no-colour chip adds its brackets.
+    // At 9 that row overflowed its cell and pushed the whole line two columns right.
+    const std::vector<int> w = {11, 30, 15, 0};
+    for (const auto& o : map)
+    {
+        char blk[48] = {0};
+        if (o.refused)
+            std::snprintf(blk, sizeof(blk), "%s", L.tr("refused unencrypted -- block unknown",
+                                                       "verweigert unverschlüsselt -- Block unbekannt"));
+        else if (o.tun.empty())
+            std::snprintf(blk, sizeof(blk), "%s", L.tr("no additional addresses", "keine Zusatzadressen"));
+        else
+        {
+            // Lowest to highest, not first to last: the device returns them in its own order, which is
+            // not sorted (1.1.11 hands back 1.1.233 first). And a pool is not always contiguous -- the
+            // router's own list has gaps -- so a span is marked when it is one and counted when it is not.
+            auto mm = std::minmax_element(o.tun.begin(), o.tun.end());
+            const bool dense = (unsigned)(*mm.second - *mm.first + 1) == (unsigned)o.tun.size();
+            if (o.tun.size() == 1)
+                std::snprintf(blk, sizeof(blk), "1 %s  %s", L.tr("additional", "Zusatz"), paToStr(*mm.first).c_str());
+            else
+                std::snprintf(blk, sizeof(blk), "%u %s  %s%s%s", (unsigned)o.tun.size(), L.tr("additional", "Zusatz"),
+                              paToStr(*mm.first).c_str(), dense ? "\xE2\x80\xA6" : " .. ", paToStr(*mm.second).c_str());
+        }
+        t.tableRow({o.ia ? t.chip(paToStr(o.ia), 'c') : c.red("?"), c.txt(o.name), c.dim(o.ip),
+                    o.refused ? c.red(blk) : c.dim(blk)}, w);
+    }
+    t.note(L.tr("own address from the search answer, additional addresses over device management -- no tunnel slot",
+                "eigene PA aus der Suchantwort, Zusatzadressen über Device-Management — belegt keinen Tunnelplatz"));
+}
+
+/** @brief Which interface owns @p pa as a tunnel slot, and as which slot number. Empty name = nobody. */
+static const IfaceOwner* ownerOf(const std::vector<IfaceOwner>& map, uint16_t pa, int& slot)
+{
+    for (const auto& o : map)
+        for (size_t i = 0; i < o.tun.size(); ++i)
+            if (o.tun[i] == pa)
+            {
+                slot = (int)(i + 1);
+                return &o;
+            }
+    slot = 0;
+    return nullptr;
+}
+
+static void renderScanSummary(const std::vector<FtcEntry>& devices,
+                              const std::unordered_map<std::string, ftc::DetailRow>* det,
+                              const std::vector<IfaceOwner>& owners);
+
+/**
+ * @brief The mask to show for a scanned device: what it said about itself beats what the sweep saw.
+ * @details The sweep's descriptor read is connectionless, which a BCU1/BCU2/BIM M112 and some System B
+ *          devices never answer; the detail child asks over a connection and gets one. Without this the
+ *          table printed "acknowledged only" next to an order number read from that same device.
+ */
+static uint16_t scanMask(const FtcEntry& e, const std::unordered_map<std::string, ftc::DetailRow>* det)
+{
+    if (det)
+    {
+        const auto it = det->find(e.name);
+        if (it != det->end() && it->second.mask) return it->second.mask;
+    }
+    return (uint16_t)e.crc;
+}
+
+/**
+ * @brief The scan result table, wide when identities were read and narrow when they were not.
+ * @details One renderer for the decorated run and the knxOTA picker, so a column cannot exist in one
+ *          and be missing in the other.
+ */
+static void renderScanTable(const std::vector<FtcEntry>& devices,
+                            const std::unordered_map<std::string, ftc::DetailRow>& det,
+                            const std::vector<IfaceOwner>& owners = {})
+{
+    ftc::Theme& c = g_theme;
+    ftc::I18n& L = g_i18n;
+    ftc::Tpl& t = g_tpl;
+    const bool cols = !det.empty();
+    auto fmtSerial = [](const std::string& hex) {
+        // The device answers 12 hex digits: manufacturer, then the serial itself.
+        if (hex.size() != 12) return hex;
+        return hex.substr(0, 4) + ":" + hex.substr(4);
+    };
+    if (cols)
+    {
+        const std::vector<int> w = {2, 9, 20, 18, 9, 8, 5, 8, 0};
+        t.tableRow({c.dim("ST"), c.dim("PA"), c.dim(L.tr("CLASS", "KLASSE")),
+                    c.dim(L.tr("ORDER NO. / APP", "BESTELLNR. / APP")), c.dim(L.tr("VERSION", "VERSION")),
+                    c.dim("FTM"), c.dim("PEI"), c.dim(L.tr("STATE", "ZUSTAND")),
+                    c.dim(L.tr("SERIAL NO.", "SERIENNR."))}, w);
+        for (const auto& e : devices)
+        {
+            unsigned pa_a = 0, pa_l = 0, pa_d = 0;
+            std::sscanf(e.name, "%u.%u.%u", &pa_a, &pa_l, &pa_d);
+            int slot = 0;
+            const IfaceOwner* own = ownerOf(owners, (uint16_t)((pa_a << 12) | (pa_l << 8) | pa_d), slot);
+            // The owner list is a CONFIGURED list of addresses, not proof that a slot is in use and not
+            // proof that no device sits there. A device that answered with its own mask outranks it.
+            if (own && scanMask(e, &det) != 0) own = nullptr;
+            if (own)
+            {
+                // Not a device: a tunnel slot of a KNXnet/IP interface. It acknowledges on the bus and
+                // has no application layer, which is indistinguishable from a silent device by probing
+                // alone -- only the owner's own list says what it is.
+                char lbl[40];
+                std::snprintf(lbl, sizeof(lbl), "Tunnel %d \xC2\xB7 ", slot);
+                t.tableRow({c.violet(g_term.glyph("\xE2\x97\x8D", "o")), c.txt(e.name),
+                            c.violet(lbl) + t.chip(paToStr(own->ia), 'c'),
+                            c.dim(own->name), c.dim(""), c.dim(""), c.dim(""), c.dim(""), c.dim("")}, w);
+                continue;
+            }
+            const uint16_t m = scanMask(e, &det);
+            const char* cls = ftc::knxMaskName(m);
+            const auto it = det.find(e.name);
+            const ftc::DetailRow r = it != det.end() ? it->second : ftc::DetailRow{};
+            std::string pa = c.txt(e.name);
+            if (e.isOpenKnx) pa = c.cyan(e.name);
+            auto cell = [&](const std::string& v) { return v.empty() ? c.dim("—") : c.txt(v); };
+            // A BCU has no order number and no KNX serial: its identity is the 6-digit application
+            // number, whose last BCD pair is the version. Showing a dash there would hide what WAS read.
+            std::string ord = ftc::orderText(r.order), ver = r.version, ser = fmtSerial(r.serial);
+            if (ord.empty() && r.bcuApp.size() >= 6) ord = "App " + r.bcuApp.substr(0, 4);
+            if (ver.empty() && r.bcuApp.size() >= 6) ver = "V" + r.bcuApp.substr(4, 1) + "." + r.bcuApp.substr(5, 1);
+            char pei[8] = {0};
+            if (r.pei != 0xFF) std::snprintf(pei, sizeof(pei), "0x%02X", r.pei);
+            // Load state where the device has one, BCU run state where it has not -- both answer "what
+            // state is the application in", and a device reports exactly one of the two.
+            std::string rst = r.appState != 0xFF ? ftcLoadNameH(r.appState) : "";
+            if (rst.empty() && r.appState != 0xFF) rst = "LS " + std::to_string(r.appState); // named 0..5 only
+            if (rst.empty() && r.runState != 0xFF) rst = "Run " + std::to_string(r.runState);
+            if (r.progMode) rst += rst.empty() ? L.tr("prog", "Prog") : L.tr(" · prog", " · Prog");
+            t.tableRow({t.statusDot('g'), pa,
+                        c.txt(m == 0 ? L.tr("acknowledged only", "nur quittiert") : (cls[0] ? cls : "—")),
+                        cell(ord), cell(ver), cell(r.ftm), cell(pei), cell(rst), cell(ser)}, w);
+        }
+    }
+    else
+    {
+        const std::vector<int> wn = {2, 11, 26, 0};
+        t.tableRow({c.dim("ST"), c.dim("PA"), c.dim(L.tr("CLASS", "KLASSE")), c.dim("INFO")}, wn);
+        for (const auto& e : devices)
+        {
+            unsigned na = 0, nl = 0, nd = 0;
+            std::sscanf(e.name, "%u.%u.%u", &na, &nl, &nd);
+            int slot = 0;
+            // The same classification the wide table makes: a tunnel slot acknowledges like a device and
+            // is only distinguishable by its owner's list.
+            const IfaceOwner* own = ownerOf(owners, (uint16_t)((na << 12) | (nl << 8) | nd), slot);
+            if (own && (uint16_t)e.crc != 0) own = nullptr;
+            if (own)
+            {
+                char lbl[40];
+                std::snprintf(lbl, sizeof(lbl), "Tunnel %d \xC2\xB7 ", slot);
+                t.tableRow({c.violet(g_term.glyph("\xE2\x97\x8D", "o")), c.txt(e.name),
+                            c.violet(lbl) + t.chip(paToStr(own->ia), 'c'), c.dim(own->name)}, wn);
+                continue;
+            }
+            const char* cls = ftc::knxMaskName((uint16_t)e.crc);
+            std::string info = e.isOpenKnx ? (std::string() + t.chip("OpenKNX")) : c.dim("");
+            t.tableRow({t.statusDot('g'), c.txt(e.name), c.txt(cls[0] ? cls : "—"), info}, wn);
+        }
+    }
+    renderScanSummary(devices, cols ? &det : nullptr, owners);
+}
+
+static void renderScanSummary(const std::vector<FtcEntry>& devices,
+                              const std::unordered_map<std::string, ftc::DetailRow>* det,
+                              const std::vector<IfaceOwner>& owners)
 {
     ftc::Theme& c = g_theme;
     ftc::I18n& L = g_i18n;
     std::vector<std::pair<std::string, int>> byClass;
+    unsigned nTun = 0, nAck = 0, nDev = 0, nOkx = 0;
     for (const auto& e : devices)
     {
+        // A tunnel slot is not a device and must not be counted as one -- it used to land under
+        // "acknowledged only", which is exactly the sentence this map exists to stop.
+        unsigned a = 0, l = 0, d = 0;
+        std::sscanf(e.name, "%u.%u.%u", &a, &l, &d);
+        int slot = 0;
         // Mask 0 means the address acknowledged but never answered — present on the bus, silent above.
-        const char* cls = e.crc == 0 ? L.tr("acknowledged only", "nur quittiert") : ftc::knxMaskName((uint16_t)e.crc);
+        const uint16_t m = scanMask(e, det);
+        // Same rule as the table: a device that named its mask is a device, not a configured tunnel slot.
+        if (m == 0 && ownerOf(owners, (uint16_t)((a << 12) | (l << 8) | d), slot)) { nTun++; continue; }
+        if (m == 0) nAck++; else nDev++;
+        if (e.isOpenKnx) nOkx++;
+        const char* cls = m == 0 ? L.tr("acknowledged only", "nur quittiert") : ftc::knxMaskName(m);
         std::string k = (cls && cls[0]) ? cls : "unknown";
         bool found = false;
         for (auto& p : byClass)
@@ -3952,10 +4047,16 @@ static void renderScanSummary(const std::vector<FtcEntry>& devices)
         if (!found) byClass.push_back({k, 1});
     }
     std::sort(byClass.begin(), byClass.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    std::string s = c.bold(std::to_string(devices.size()) + L.tr(" devices", " Geräte"));
-    for (const auto& p : byClass)
-        s += c.dim("   \xC2\xB7   ") + c.txt(std::to_string(p.second) + "\xC3\x97 " + p.first);
+    const std::string sep = c.dim("   \xC2\xB7   ");
+    std::string s = c.bold(std::to_string(devices.size()) + L.tr(" addresses", " Adressen"));
+    s += sep + c.bold(std::to_string(nDev)) + c.dim(L.tr(" devices", " Geräte"));
+    if (nOkx) s += c.dim(L.tr(", of those ", ", davon ")) + c.bold(std::to_string(nOkx)) + c.dim(" OpenKNX");
+    if (nTun) s += sep + c.violet(std::to_string(nTun)) + c.dim(L.tr(" tunnel addresses", " Tunnel-Adressen"));
+    if (nAck) s += sep + c.amber(std::to_string(nAck)) + c.dim(L.tr(" acknowledged only", " nur quittiert"));
     std::printf("  %s\n", s.c_str());
+    std::string by;
+    for (const auto& p : byClass) by += (by.empty() ? "" : c.dim("   \xC2\xB7   ")) + c.txt(std::to_string(p.second) + "\xC3\x97 " + p.first);
+    if (!by.empty()) std::printf("  %s\n", by.c_str());
 }
 
 
@@ -4378,23 +4479,75 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
     // because only those can be OpenKNX. The reads run in child processes over their own tunnels, started
     // while the sweep is still going, so they cost almost no extra wall clock.
     bool wantDetails = false, wantOpenKnx = false;
+    // The maximum is the default: a scan reads what each device says about itself unless told not to.
+    // `details` stays accepted and does nothing, so an older command line still works.
+    bool noDetails = false;
     for (const auto& a : pos)
     {
         if (a == "details") wantDetails = true;
         if (a == "openknx") wantOpenKnx = true;
+        if (a == "--no-details") noDetails = true;
     }
+    // `openknx` is the narrow form and must stay narrow: it asks only the System B candidates, so it must
+    // not be overruled by the full-details default.
+    if (k == K_Scan && !noDetails && !wantOpenKnx) wantDetails = true;
+    // An explicit "off" wins over both spellings of "on". `details --no-details` used to run full details
+    // and `openknx --no-details` still built the pool, so the switch did nothing in either combination.
+    if (noDetails) { wantDetails = false; wantOpenKnx = false; }
     std::unique_ptr<ftc::DetailPool> pool;
-    if (k == K_Scan && (wantDetails || wantOpenKnx) && !g_pchild && !g_ip.empty())
+    if (k == K_Scan && (wantDetails || wantOpenKnx) && !g_ip.empty())
         pool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
-                                       g_tunnels > 0 ? g_tunnels : FTC_DETAIL_WORKERS));
+                                       g_workers > 0 ? g_workers : FTC_DETAIL_WORKERS));
+
+    // What this run is about to do, before it does it: which probe, what it costs on the bus, and how
+    // many identity reads will run alongside. Two LED rows because they are two separate tunnel groups.
+    auto announceScan = [&](uint16_t aStart, uint16_t aEnd, bool coScan, int workers) {
+        ftc::Theme& cc = g_theme;
+        ftc::I18n& LL = g_i18n;
+        ftc::Tpl& tt = g_tpl;
+        const unsigned span = (unsigned)(aEnd - aStart + 1);
+        char hdr[80];
+        std::snprintf(hdr, sizeof(hdr), "%s \xC2\xB7 %s\xE2\x80\xA6%s", LL.tr("Sweep", "Suchlauf"),
+                      paToStr(aStart).c_str(), paToStr(aEnd).c_str());
+        tt.section(hdr);
+        tt.kv(LL.tr("method", "Verfahren"),
+              coScan ? cc.txt(LL.tr("CO probe (ets)", "CO-Probe (ets)")) + cc.dim(LL.tr("   ·   T_Connect per address — reaches BCU1/BCU2",
+                                                                                       "   ·   T_Connect je Adresse — erreicht BCU1/BCU2"))
+                     : cc.txt(LL.tr("sweep (connectionless)", "Sweep (verbindungslos)")) +
+                           cc.dim(LL.tr("   ·   one telegram per address, presence from the TP1 acknowledge",
+                                        "   ·   ein Telegramm je Adresse, Anwesenheit aus der TP1-Quittung")));
+        char bus[96];
+        std::snprintf(bus, sizeof(bus), "~%u %s", coScan ? span * 3u : span, LL.tr("telegrams on TP1", "Telegramme auf TP1"));
+        tt.kv(LL.tr("bus load", "Buslast"), cc.txt(bus));
+        tt.kv(LL.tr("search", "Suche"), tt.ledRow(1, 16, 'g') + cc.dim(LL.tr("   1 tunnel · one request in flight",
+                                                                            "   1 Tunnel · eine Anfrage unterwegs")));
+        char idn[96];
+        std::snprintf(idn, sizeof(idn), "   %d %s", workers,
+                      workers ? (wantDetails ? LL.tr("in parallel · order no., version, FTM, serial per device",
+                                                     "parallel · Bestellnr., Version, FTM, Seriennr. je Gerät")
+                                             : LL.tr("in parallel · identity of the System B candidates only (openknx)",
+                                                     "parallel · Identität nur der System-B-Kandidaten (openknx)"))
+                              : LL.tr("— identity not read (--no-details)", "— Identität wird nicht gelesen (--no-details)"));
+        tt.kv(LL.tr("identity", "Identität"), tt.ledRow(workers, 16, 'c') + cc.dim(idn));
+    };
+
+    // Who owns which address. Costs one multicast search plus one management read per answering device
+    // (no tunnel slot), and is what turns a tunnel slot in the hit list from "acknowledged only" into
+    // "tunnel 3 of 1.1.11". Only for a scan, and only when there is a network to ask.
+    std::vector<IfaceOwner> owners;
+    if (k == K_Scan && !g_ip.empty())
+    {
+        owners = buildOwnerMap(g_port);
+        if (!owners.empty() && !quiet) renderOwnerMap(owners); // before the sweep: it frames what follows
+    }
 
     std::string cmd = "ftc";
     for (const auto& p : pos)
     {
-        if (p == "details") continue; // handled here, the shared parser does not know it
+        if (k == K_Scan && (p == "details" || p == "--no-details")) continue; // handled here, the shared parser knows neither
         // With the pool running, the sweep's post-probe would re-ask the same devices over the shared
         // tunnel (double traffic, mutual starvation); the pool's answer already carries the manufacturer.
-        if (p == "openknx" && pool) continue;
+        if (p == "openknx" && (pool || noDetails)) continue; // off means off: do not let the device probe either
         cmd += ' ';
         cmd += p;
     }
@@ -4402,9 +4555,20 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
     bool ackFeed = false;
     if (k == K_Scan)
     {
+        // Only for the connectionless sweep: requestScan clears _scanAckArmed for a CO scan
+        // (_scanAckArmed = !_scanCo), so arming it there costs two TP telegrams and feeds nothing.
         uint16_t aStart = 0, aEnd = 0;
-        if (parseScanRange(pos, aStart, aEnd) && (aStart >> 8) == (aEnd >> 8))
+        const bool coScan = std::find(pos.begin(), pos.end(), std::string("ets")) != pos.end();
+        if (!coScan && parseScanRange(pos, aStart, aEnd) && (aStart >> 8) == (aEnd >> 8))
             ackFeed = armScanAckFeed((uint16_t)(aStart & 0xFF00));
+    }
+
+    if (k == K_Scan && !quiet)
+    {
+        uint16_t bStart = 0, bEnd = 0;
+        if (parseScanRange(pos, bStart, bEnd))
+            announceScan(bStart, bEnd, std::find(pos.begin(), pos.end(), std::string("ets")) != pos.end(),
+                         pool ? (g_workers > 0 ? g_workers : FTC_DETAIL_WORKERS) : 0);
     }
 
     g_ftcSuppress = true;
@@ -4422,11 +4586,16 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             onNew = [&](const FtcEntry& e) {
                 // The class comes from the sweep; only a System B device can be OpenKNX. An address that
                 // merely acknowledged (mask 0) says nothing about itself, so `details` includes it too.
-                const bool candidate = wantDetails || (e.crc & 0xFFF0) == 0x07B0;
-                if (candidate) pool->submit(e.name, e.crc != 0); // mask 0 = only acknowledged, never answers up
+                // One definition of "could be OpenKNX", taken from the stack's own classifier. The old
+                // `& 0xFFF0 == 0x07B0` matched TP1 only, so a device reporting 0x57B0 (TP1/IP System B)
+                // or an OpenKNX router (0x091A) was never asked who it is.
+                const bool candidate =
+                    wantDetails || KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB;
+                if (candidate) pool->submit(e.name);
             };
         openknxFileTransferClient.processCommand(cmd, false);
-        ftcPumpStructured(snap, k == K_Scan, k == K_Scan && !quiet, pool ? &onNew : nullptr); // live progress line for the scan (unless -q)
+        ftcPumpStructured(snap, k == K_Scan, k == K_Scan && !quiet, k == K_InfoGa,
+                          pool ? &onNew : nullptr); // live progress line for the scan (unless -q)
     }
     if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
     g_ftcSuppress = false;
@@ -4497,7 +4666,23 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 std::printf("features\t%s\n", featTokens.c_str());
                 if (d.ftmLegacy) std::printf("ftm_legacy\t1\nftm_derived\t%d\n", d.ftmDerived ? 1 : 0);
                 std::printf("progmode\t%d\n", d.progMode ? 1 : 0);
-                if (d.appState != 0xFF) std::printf("app_state\t%s\n", ftcLoadNameH(d.appState));
+                // The BCU1/BCU2 identity block. Without these keys a BCU answers the child in full and the
+                // caller still sees an empty row: those families have no order number and no KNX serial,
+                // their identity IS the manufacturer code plus the 6-digit application number.
+                if (d.haveBcu1)
+                {
+                    if (d.bcuMfr) std::printf("bcu_manufacturer\t0x%02X\n", d.bcuMfr);
+                    if (d.haveBcuApp)
+                        std::printf("bcu_app\t%02X%02X%02X\n", d.bcuApp[0], d.bcuApp[1], d.bcuApp[2]);
+                    if (d.haveBcuRunState) std::printf("bcu_runstate\t%u\n", d.bcuRunState);
+                    if (d.haveBcuPei) std::printf("bcu_pei\t0x%02X\n", d.bcuPeiType);
+                    if (d.haveBcuRunError) std::printf("bcu_runerror\t0x%02X\n", d.bcuRunError);
+                }
+                if (d.appState != 0xFF)
+                {
+                    std::printf("app_state\t%s\n", ftcLoadNameH(d.appState));
+                    std::printf("app_state_id\t%u\n", (unsigned)d.appState); // the name is translated; the id is not
+                }
                 if (d.addrTableState != 0xFF) std::printf("addr_table\t%s\n", ftcLoadNameH(d.addrTableState));
                 if (d.assocTableState != 0xFF) std::printf("assoc_table\t%s\n", ftcLoadNameH(d.assocTableState));
                 if (d.goTableState != 0xFF) std::printf("go_table\t%s\n", ftcLoadNameH(d.goTableState));
@@ -4597,11 +4782,25 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     std::snprintf(ib, sizeof(ib), "%u.%u V", d.busVoltmV / 1000, (d.busVoltmV % 1000) / 100);
                     p.kv(L.tr("Bus voltage", "Busspannung"), c.txt(ib));
                 }
-                p.kv(L.tr("Run state", "Ausführungszustand"), c.txt(std::to_string((unsigned)d.bcuRunState)));
-                std::snprintf(ib, sizeof(ib), "0x%02X", d.bcuRunError);
-                p.kv(L.tr("Run error", "Ausführungsfehler"), c.txt(ib) + (d.bcuRunError >= 0xFE ? c.green("  · OK") : c.red("  · error")));
-                std::snprintf(ib, sizeof(ib), "0x%02X", d.bcuPeiType);
-                p.kv(L.tr("PEI type", "PEI-Typ"), c.txt(ib));
+                // Each byte is shown only if the identity block reached it. 0xFF is also the device's own
+                // "no error", so an unread runError used to be rendered as a green OK.
+                const std::string unread = c.dim(L.tr("not read", "nicht gelesen"));
+                p.kv(L.tr("Run state", "Ausführungszustand"),
+                     d.haveBcuRunState ? c.txt(std::to_string((unsigned)d.bcuRunState)) : unread);
+                if (d.haveBcuRunError)
+                {
+                    std::snprintf(ib, sizeof(ib), "0x%02X", d.bcuRunError);
+                    p.kv(L.tr("Run error", "Ausführungsfehler"), c.txt(ib) + (d.bcuRunError >= 0xFE ? c.green("  · OK") : c.red("  · error")));
+                }
+                else
+                    p.kv(L.tr("Run error", "Ausführungsfehler"), unread);
+                if (d.haveBcuPei)
+                {
+                    std::snprintf(ib, sizeof(ib), "0x%02X", d.bcuPeiType);
+                    p.kv(L.tr("PEI type", "PEI-Typ"), c.txt(ib));
+                }
+                else
+                    p.kv(L.tr("PEI type", "PEI-Typ"), unread);
             }
             const bool anyLoad = d.appState != 0xFF || d.addrTableState != 0xFF || d.assocTableState != 0xFF || d.goTableState != 0xFF;
             if (anyLoad)
@@ -4623,7 +4822,12 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
         {
             uint16_t n = 0;
             const FtcGaEntry* gos = openknxFileTransferClient.groupObjects(n);
-            rc = n > 0 ? 0 : 1;
+            // A run the safety cap cut short is a PREFIX, whatever arrived - say so and fail the exit
+            // code, instead of printing it as the device's full table.
+            const bool cut = g_pumpCapped || openknxFileTransferClient.groupObjectsTruncated();
+            // A prefix is not a result -> `cut`, not just the pump cap. Zero group objects IS a result
+            // (an unloaded device, or an application without KOs), but only if the read itself succeeded.
+            rc = (cut || !openknxFileTransferClient.deviceInfo().valid) ? 1 : 0;
             // canonical flag letters (data side) -> the set-letter string koFlags() expects
             auto flagsActive = [](uint8_t f) { std::string s; static const char* code = "CRWTU"; for (int b = 0; b < 5; ++b) if (f & (1 << b)) s += code[b]; return s; };
             static const char* const SZ[21] = {"1 bit", "2 bit", "3 bit", "4 bit", "5 bit", "6 bit", "7 bit", "1 byte",
@@ -4846,16 +5050,8 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
         case K_Scan:
         {
             rc = 0;
-            if (quiet)
-            {
-                for (const auto& e : snap)
-                    std::printf("%s\t0x%04X\t%s\t%d\n", e.name, (unsigned)e.crc, ftc::knxMaskName((uint16_t)e.crc), e.isOpenKnx ? 1 : 0);
-                break;
-            }
-            t.status(ftc::Tpl::Stat::Ok, L.tr("scan complete", "Scan fertig"),
-                     {std::to_string(snap.size()) + L.tr(" device(s)", " Gerät(e)")});
-            if (snap.empty()) break;
-
+            // Drained BEFORE the quiet branch: -q used to break out first, so a scripted scan got the
+            // identity read started and never collected it.
             // The devices were asked who they are while the sweep ran; wait out whatever is still in flight.
             std::unordered_map<std::string, ftc::DetailRow> det;
             if (pool)
@@ -4890,43 +5086,65 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     if (it != det.end() && it->second.mfr == ftc::MFR_OPENKNX) e.isOpenKnx = true;
                 }
             }
+            if (quiet)
+            {
+                // One key, one tab, one value -- and the same facts the table shows, so a script does not
+                // have to re-derive them: who owns which block, which hit is a tunnel slot, and the counts.
+                for (const auto& o : owners)
+                {
+                    std::printf("ipdev\t%s\t%s\t%s", o.ia ? paToStr(o.ia).c_str() : "?", o.ip.c_str(), o.name.c_str());
+                    if (o.refused) std::printf("\trefused");
+                    else
+                        for (uint16_t ta : o.tun) std::printf("\t%s", paToStr(ta).c_str());
+                    std::printf("\n");
+                }
+                unsigned qTun = 0, qDev = 0, qAck = 0, qOkx = 0;
+                for (const auto& e : snap)
+                {
+                    unsigned a2 = 0, l2 = 0, d2 = 0;
+                    std::sscanf(e.name, "%u.%u.%u", &a2, &l2, &d2);
+                    int slot = 0;
+                    const IfaceOwner* own = ownerOf(owners, (uint16_t)((a2 << 12) | (l2 << 8) | d2), slot);
+                    if (own && scanMask(e, &det) != 0) own = nullptr;
+                    if (own)
+                    {
+                        std::printf("%s\ttunnel\t%s\t%d\n", e.name, paToStr(own->ia).c_str(), slot);
+                        qTun++;
+                        continue;
+                    }
+                    const uint16_t m = scanMask(e, &det);
+                    const auto dit = det.find(e.name);
+                    const ftc::DetailRow dr = dit != det.end() ? dit->second : ftc::DetailRow{};
+                    // Same fields the table shows, in fixed positions: a caller must not have to run a
+                    // second pass to learn what this scan already read.
+                    // Field 10 is the load state as a NUMBER. Every other field here is raw or an
+                    // untranslated name; a translated word would make the stream depend on the locale.
+                    char ls[8] = {0};
+                    if (dr.appState != 0xFF) std::snprintf(ls, sizeof(ls), "%u", (unsigned)dr.appState);
+                    std::printf("%s\t0x%04X\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", e.name, (unsigned)m,
+                                ftc::knxMaskName(m), e.isOpenKnx ? 1 : 0, ftc::orderText(dr.order).c_str(),
+                                dr.bcuApp.c_str(), dr.version.c_str(), dr.ftm.c_str(), dr.serial.c_str(), ls);
+                    if (m == 0) qAck++; else qDev++;
+                    if (e.isOpenKnx) qOkx++;
+                }
+                // The rows are capped, so counting lines under-reports the line. Both numbers, always.
+                std::printf("found\t%u\nshown\t%u\n", (unsigned)openknxFileTransferClient.scanFound(), (unsigned)snap.size());
+                std::printf("devices\t%u\nopenknx\t%u\ntunnel_addrs\t%u\nacked_only\t%u\n", qDev, qOkx, qTun, qAck);
+                break;
+            }
+            {
+                // snap is capped (FTC_SCAN_MAX_LIST); scanFound() counted every responder. Printing snap.size()
+                // as THE count turned a fully populated line into a confident "128 device(s)".
+                const unsigned found = (unsigned)openknxFileTransferClient.scanFound();
+                std::string note = std::to_string(snap.size()) + L.tr(" device(s)", " Gerät(e)");
+                if (found > snap.size())
+                    note += L.tr(" shown of ", " angezeigt von ") + std::to_string(found) +
+                            L.tr(" found (list limit)", " gefunden (Listengrenze)");
+                t.status(ftc::Tpl::Stat::Ok, L.tr("scan complete", "Scan fertig"), {note});
+            }
+            if (snap.empty()) break;
 
-            const bool cols = !det.empty();
-            auto fmtSerial = [](const std::string& hex) {
-                // The device answers 12 hex digits: manufacturer, then the serial itself.
-                if (hex.size() != 12) return hex;
-                return hex.substr(0, 4) + ":" + hex.substr(4);
-            };
-            if (cols)
-            {
-                const std::vector<int> w = {2, 9, 20, 18, 9, 8, 0};
-                t.tableRow({c.dim("ST"), c.dim("PA"), c.dim(L.tr("CLASS", "KLASSE")),
-                            c.dim(L.tr("ORDER NO.", "BESTELLNR.")), c.dim(L.tr("VERSION", "VERSION")),
-                            c.dim("FTM"), c.dim(L.tr("SERIAL NO.", "SERIENNR."))}, w);
-                for (const auto& e : snap)
-                {
-                    const char* cls = ftc::knxMaskName((uint16_t)e.crc);
-                    const auto it = det.find(e.name);
-                    const ftc::DetailRow r = it != det.end() ? it->second : ftc::DetailRow{};
-                    std::string pa = c.txt(e.name);
-                    if (e.isOpenKnx) pa = c.cyan(e.name);
-                    auto cell = [&](const std::string& v) { return v.empty() ? c.dim("—") : c.txt(v); };
-                    t.tableRow({t.statusDot('g'), pa,
-                                c.txt(e.crc == 0 ? L.tr("acknowledged only", "nur quittiert") : (cls[0] ? cls : "—")),
-                                cell(ftc::orderText(r.order)), cell(r.version), cell(r.ftm), cell(fmtSerial(r.serial))}, w);
-                }
-            }
-            else
-            {
-                t.tableRow({c.dim("ST"), c.dim("PA"), c.dim("CLASS"), c.dim("INFO")}, {2, 10, 26, 0});
-                for (const auto& e : snap)
-                {
-                    const char* cls = ftc::knxMaskName((uint16_t)e.crc);
-                    std::string info = e.isOpenKnx ? (std::string() + t.chip("OpenKNX")) : c.dim("");
-                    t.tableRow({t.statusDot('g'), c.txt(e.name), c.txt(cls[0] ? cls : "—"), info}, {2, 10, 26, 0});
-                }
-            }
-            renderScanSummary(snap); // total + per-class breakdown footer (parity with the parallel scan)
+            renderScanTable(snap, det, owners);
             break;
         }
         case K_Simple:
@@ -5017,6 +5235,7 @@ int main(int argc, char** argv)
     bool fileBrowser = false;      // --file-browser: open the file chooser and print what was picked
     bool knxotaScan = false;       // the assistant will search the bus for a target once connected
     bool knxotaScanAsk = false;    // ...and lets the user name the line first (c instead of s)
+    bool showAllPick = false;      // the picker lists only what knxOTA can update; `alle` lifts that
     std::string knxotaLine;        // the line last searched: searching again must not fall back to another one
     bool knxotaResume = false;     // continuing an unfinished run: every answer is already known
     uint16_t knxotaResumePa = 0;   // ...including the target, so the device search is skipped too
@@ -5084,12 +5303,19 @@ int main(int argc, char** argv)
             ip = argv[++i];
         else if (a == "--port" && i + 1 < argc)
             port = (uint16_t)std::atoi(argv[++i]);
-        else if ((a == "--tunnels" || a == "-T") && i + 1 < argc)
-            g_tunnels = std::atoi(argv[++i]); // N parallel tunnels for the scan; 0 = as many as the interface allows
+        else if ((a == "--workers" || a == "-W") && i + 1 < argc)
+            g_workers = std::atoi(argv[++i]); // identity readers for `details`/`openknx`; each takes one tunnel
+        // Retired with the parallel range scan. Named explicitly because a long option after a command is
+        // otherwise handed to the shared parser, which does not know it and would drop it without a word.
         else if (a == "--tunnels" || a == "-T")
-            g_tunnels = 0; // bare --tunnels = auto (max)
-        else if (a == "--_pchild")
-            g_pchild = true; // internal: parallel-scan child -> emit the P/D line protocol
+        {
+            std::fprintf(stderr, "%s\n", g_i18n.tr("error: --tunnels is gone. The parallel range scan was removed (it returned a "
+                                                   "different subset every run); --workers N now sets the identity readers.",
+                                                   "Fehler: --tunnels gibt es nicht mehr. Der parallele Bereichsscan ist entfernt (er lieferte "
+                                                   "jeden Lauf eine andere Teilmenge); --workers N setzt jetzt die Identitaets-Leser."));
+            socketCleanup();
+            return 1;
+        }
         else if (a == "--_probeslot")
             g_probeSlot = true; // internal: tunnel-slot probe child -> connect, emit SLOT, hold, exit
         else if (a == "--frames" && i + 1 < argc)
@@ -5183,7 +5409,6 @@ int main(int argc, char** argv)
             pos.push_back(a);
     }
 
-    if (g_pchild) quiet = true; // a parallel-scan child emits only the P/D line protocol (no chrome)
 
     // --- internal: tunnel-slot probe child --------------------------------------------------------
     // Open ONE tunnel; on success print the assigned free PA and hold it briefly so sibling probes each get a
@@ -5191,7 +5416,14 @@ int main(int argc, char** argv)
     if (g_probeSlot)
     {
         int rc = 3; // 3 = refused / no free slot
-        if (!ip.empty() && g_knxTunnel.connect(ip, port))
+        if (ip.empty() || !g_knxTunnel.connect(ip, port))
+        {
+            // The reason matters to the parent: 0x24 = the interface says it is full, anything else
+            // (notably -1 = no CONNECT_RESPONSE) means this probe failed, not that the slot is taken.
+            std::printf("NOSLOT\t%d\n", g_knxTunnel.lastConnectStatus());
+            std::fflush(stdout);
+        }
+        else
         {
             const uint16_t a = g_knxTunnel.assignedPA();
             std::printf("SLOT\t%u.%u.%u\n", (a >> 12) & 0x0F, (a >> 8) & 0x0F, a & 0xFF);
@@ -5831,8 +6063,15 @@ int main(int argc, char** argv)
                     }
                     continue;
                 }
-                const int pick = k - '0';
-                if (pick >= 1 && pick <= (int)found.size()) { ip = found[pick - 1].ip; break; }
+                // The whole number, not its first digit: a network with more than nine interfaces made
+                // rows 10+ unreachable and resolved "12" to row 1.
+                std::string sel(in);
+                while (!sel.empty() && (sel.back() == '\n' || sel.back() == '\r' || sel.back() == ' ')) sel.pop_back();
+                bool selNum = !sel.empty();
+                for (char ch : sel)
+                    if (ch < '0' || ch > '9') selNum = false;
+                const long selN = selNum ? std::strtol(sel.c_str(), nullptr, 10) : 0;
+                if (selN >= 1 && selN <= (long)found.size()) { ip = found[selN - 1].ip; break; }
             }
         }
 
@@ -6740,52 +6979,20 @@ int main(int argc, char** argv)
         g_color = false;
     }
 
-    // --- parallel scan (--tunnels != 1): N child scans over range chunks, each on its own tunnel; the parent needs
-    // no tunnel of its own. Only for the CO ("ets") scan of a parseable a.l / a.l.d range; else fall back to serial.
+    // `scan ... fast` and the parallel range scan are gone: measured 2026-10-02/03, N tunnels bought at
+    // most ~2x while the result set moved between runs (8 of 68 addresses reproducible). What does pay is
+    // the identity read of the FOUND devices, which is what --workers drives. See doc/findings/.
+    if (!pos.empty() && pos[0] == "scan" && std::find(pos.begin(), pos.end(), std::string("fast")) != pos.end())
     {
-        uint16_t pStart = 0, pEnd = 0;
-        const bool isEts = std::find(pos.begin(), pos.end(), std::string("ets")) != pos.end();
-        if (!g_pchild && g_tunnels != 1 && pos.size() && pos[0] == "scan" && isEts && !ip.empty() && parseScanRange(pos, pStart, pEnd))
-        {
-            ftc::I18n& L = g_i18n;
-            ftc::Theme& c = g_theme;
-            if (!quiet)
-                std::printf("\n  %s %s\n", c.amber(g_term.glyph("\xE2\x9A\xA1", "!")).c_str(),
-                            c.dim(L.tr("parallel scan", "Parallel-Scan") + std::string(" \xC2\xB7 ") + paToStr(pStart) + "\xE2\x80\xA6" + paToStr(pEnd) +
-                                  (g_tunnels > 0 ? ("  \xC2\xB7  " + std::to_string(g_tunnels) + "\xC3\x97 tunnels") : std::string("  \xC2\xB7  auto tunnels")))
-                                .c_str());
-            bool allBusy = false;
-            std::vector<FtcEntry> found = parallelScan(pStart, pEnd, g_tunnels, ip, port, allBusy);
-            if (allBusy && found.empty()) // interface out of tunnel slots -> one clean message, not a flood
-            {
-                std::printf("  %s %s\n    %s\n", c.red(g_term.glyph("\xE2\x9C\x96", "x")).c_str(),
-                            c.bold(L.tr("no free tunnel slots", "keine freien Tunnel-Slots")).c_str(),
-                            c.dim(L.tr("all tunnels on this interface are busy -- free one, use another interface, or wait",
-                                       "alle Tunnel dieses Interfaces sind belegt -- gib einen frei, nimm ein anderes Interface, oder warte"))
-                                .c_str());
-                socketCleanup();
-                return 1;
-            }
-            auto paNum = [](const char* s) { unsigned a = 0, l = 0, d = 0; std::sscanf(s, "%u.%u.%u", &a, &l, &d); return (a << 12) | (l << 8) | d; };
-            std::sort(found.begin(), found.end(), [&](const FtcEntry& a, const FtcEntry& b) { return paNum(a.name) < paNum(b.name); });
-            if (quiet)
-                for (const auto& e : found)
-                    std::printf("%s\t0x%04X\t%s\t%d\n", e.name, (unsigned)e.crc, ftc::knxMaskName((uint16_t)e.crc), e.isOpenKnx ? 1 : 0);
-            else
-            {
-                g_tpl.tableRow({c.dim("ST"), c.dim("PA"), c.dim("CLASS"), c.dim("INFO")}, {2, 10, 26, 0});
-                for (const auto& e : found)
-                {
-                    const char* cls = ftc::knxMaskName((uint16_t)e.crc);
-                    std::string info = e.isOpenKnx ? (std::string() + g_tpl.chip("OpenKNX")) : std::string();
-                    g_tpl.tableRow({g_tpl.statusDot('g'), c.txt(e.name), c.txt(cls[0] ? cls : "\xE2\x80\x94"), info}, {2, 10, 26, 0});
-                }
-                renderScanSummary(found);
-            }
-            socketCleanup();
-            return g_abort ? 130 : 0;
-        }
+        ftc::I18n& L2 = g_i18n;
+        std::fprintf(stderr, "%s\n", L2.tr("error: `scan ... fast` no longer exists -- the parallel range scan returned a different "
+                                           "subset on every run. Use `details` (parallel identity read) or `ets` (serial, reproducible).",
+                                           "Fehler: `scan ... fast` gibt es nicht mehr -- der parallele Bereichsscan lieferte bei jedem "
+                                           "Lauf eine andere Teilmenge. Nimm `details` (parallele Identitaet) oder `ets` (seriell, reproduzierbar)."));
+        socketCleanup();
+        return 1;
     }
+
 
     g_ip = ip; // the detail children reach the same interface
     g_port = port;
@@ -6887,7 +7094,7 @@ int main(int argc, char** argv)
         std::printf("  %s %s  %s  %s%s\n", c.green(g_term.glyph("●", "*")).c_str(),
                     c.green(L.tr("tunnel up", "Tunnel steht")).c_str(),
                     c.dim(ip + ":" + std::to_string((unsigned)port)).c_str(),
-                    c.dim(std::string(L.tr("as ", "als ")) + pa).c_str(),
+                    (c.dim(L.tr("as ", "als ")) + g_tpl.chip(pa, 'c')).c_str(),
                     prioTag.empty() ? "" : ("   " + prioTag).c_str());
     }
 
@@ -7059,6 +7266,7 @@ int main(int argc, char** argv)
             std::sscanf(line, "%u.%u", &sa, &sl);
             const uint16_t lineBase = (uint16_t)((sa << 12) | (sl << 8));
             std::vector<std::pair<std::string, bool>> pick;
+            size_t nOther = 0; // answered, but nothing knxOTA can update -- hidden unless `alle` is typed
             std::vector<FtcEntry> hits;
             const bool ackFeed = armScanAckFeed(lineBase);
             if (!ackFeed)
@@ -7071,15 +7279,17 @@ int main(int argc, char** argv)
             std::unique_ptr<ftc::DetailPool> dpool;
             if (!g_ip.empty())
                 dpool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
-                                                g_tunnels > 0 ? g_tunnels : FTC_DETAIL_WORKERS));
+                                                g_workers > 0 ? g_workers : FTC_DETAIL_WORKERS));
             std::function<void(const FtcEntry&)> onNew = [&](const FtcEntry& e) {
-                if (dpool && (e.crc & 0xFFF0) == 0x07B0) dpool->submit(e.name); // System B: the only OpenKNX candidates
+                // Same predicate as the scan, or the picker and the table disagree about who is a candidate.
+                if (dpool && KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB)
+                    dpool->submit(e.name);
             };
             g_ftcSuppress = true;
             // Without the pool the sweep would run its own identity probe over the one shared tunnel; with
             // it that is the same question asked twice, and the two starve each other.
             openknxFileTransferClient.processCommand(std::string("ftc scan ") + line + (dpool ? "" : " openknx"), false);
-            ftcPumpStructured(hits, true, g_term.isTty() && !quiet, dpool ? &onNew : nullptr);
+            ftcPumpStructured(hits, true, g_term.isTty() && !quiet, false, dpool ? &onNew : nullptr);
             g_ftcSuppress = false;
             if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
 
@@ -7117,6 +7327,7 @@ int main(int argc, char** argv)
                 const auto it = det.find(e.name);
                 const bool isOk = e.isOpenKnx || (it != det.end() && it->second.mfr == ftc::MFR_OPENKNX);
                 pick.emplace_back(e.name, isOk);
+                if (!isOk) ++nOther;
             }
             // Same rule for the devices: OpenKNX first, then by address -- and by address means
             // numerically, or 5.0.11 would sort between 5.0.1 and 5.0.2.
@@ -7128,6 +7339,11 @@ int main(int argc, char** argv)
                 return ((xa << 12) | (xl << 8) | xd) < ((ya << 12) | (yl << 8) | yd);
             });
 
+            // Only what can be updated: the numbers a person picks from must all lead somewhere. On the
+            // test line that is 5 of 28 -- the other 23 are foreign devices and tunnel slots.
+            if (!showAllPick)
+                pick.erase(std::remove_if(pick.begin(), pick.end(), [](const std::pair<std::string, bool>& p) { return !p.second; }),
+                           pick.end());
             if (!pick.empty())
             {
                 const std::vector<int> w = {3, 10, 0};
@@ -7150,10 +7366,24 @@ int main(int argc, char** argv)
                 }
             }
             else
-                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("nothing answered on this line", "auf dieser Linie hat nichts geantwortet"),
+                g_tpl.status(ftc::Tpl::Stat::Warn,
+                             showAllPick ? L.tr("nothing answered on this line", "auf dieser Linie hat nichts geantwortet")
+                                         : L.tr("no OpenKNX device on this line", "kein OpenKNX-Gerät auf dieser Linie"),
                              {std::string(L.tr("line ", "Linie ")) + line});
-            g_tpl.keybar({{"1-9", L.tr("take it", "nehmen")},
+            if (!showAllPick && nOther)
+            {
+                char note[160];
+                std::snprintf(note, sizeof(note), "%u %s", (unsigned)nOther,
+                              L.tr("further addresses answered; knxOTA cannot update them (foreign devices, tunnel slots) -- `alle` shows them",
+                                   "weitere Adressen haben geantwortet; knxOTA kann sie nicht aktualisieren (fremde Geräte, Tunnel-Plätze) -- `alle` zeigt sie"));
+                g_tpl.note(note);
+            }
+            char rngPick[16];
+            if (pick.size() == 1) std::snprintf(rngPick, sizeof(rngPick), "1");
+            else std::snprintf(rngPick, sizeof(rngPick), "1-%u", (unsigned)pick.size());
+            g_tpl.keybar({{rngPick, L.tr("take it", "nehmen")},
                           {L.tr("address", "Adresse"), L.tr("type one instead", "stattdessen eingeben")},
+                          {"alle", L.tr("show non-OpenKNX too", "auch Nicht-OpenKNX zeigen")},
                           {"L", L.tr("search again", "erneut suchen")},
                           {"c", L.tr("another line", "andere Linie")},
                           {"q", L.tr("quit", "Ende")}});
@@ -7165,6 +7395,7 @@ int main(int argc, char** argv)
             while (!t2.empty() && (t2.back() == '\n' || t2.back() == '\r' || t2.back() == ' ')) t2.pop_back();
             unsigned qa = 0, ql = 0, qd = 0;
             if (t2 == "q" || t2 == "Q") { socketCleanup(); return 130; }
+            if (t2 == "alle" || t2 == "all") { showAllPick = true; knxotaScanAsk = false; continue; }
             if (std::sscanf(t2.c_str(), "%u.%u.%u", &qa, &ql, &qd) == 3) paText = t2; // a typed address always wins
             else if (t2 == "L" || t2 == "l")
             {
@@ -7178,8 +7409,13 @@ int main(int argc, char** argv)
             }
             else
             {
-                const int n = t2.empty() ? 0 : (t2[0] - '0');
-                if (n >= 1 && n <= (int)pick.size()) paText = pick[n - 1].first;
+                // The whole number, not its first digit: after `alle` the list is longer than nine rows,
+                // and reading one character silently resolved "12" to row 1 -- a different device.
+                bool allDigits = !t2.empty();
+                for (char ch : t2)
+                    if (ch < '0' || ch > '9') allDigits = false;
+                const long n = allDigits ? std::strtol(t2.c_str(), nullptr, 10) : 0;
+                if (n >= 1 && n <= (long)pick.size()) paText = pick[n - 1].first;
                 else { socketCleanup(); return 130; }
             }
         }
@@ -8314,7 +8550,7 @@ int main(int argc, char** argv)
     // when not (instead of a bare timeout, or minutes of retries). Excluded: ping/cancel/status.
     const bool paCmd = pos.size() >= 2 && pos[1] != "ping" && pos[1] != "p" && pos[1] != "cancel" &&
                        pos[1] != "c" && pos[1] != "status" && pos[1] != "s";
-    if ((paCmd || consoleMode) && !knxotaActive && !g_pchild && reachHasPa && !knxotaForce)
+    if ((paCmd || consoleMode) && !knxotaActive && reachHasPa && !knxotaForce)
     {
         const uint16_t tgt = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
         ftc::ReachDeps rd;
