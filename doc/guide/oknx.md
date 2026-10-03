@@ -30,8 +30,6 @@ ever disagree, the binary is right.
 | `-i` / `--ip A.B.C.D` · `--port N` | the interface to tunnel through |
 | `-D` / `--discover` | list the KNXnet/IP interfaces on the LAN and stop |
 | `-W` / `--workers N` | how many identity reads run in parallel (default 5); the sweep itself stays on one tunnel |
-| `--no-details` | sweep only — skip the identity read, which is on by default |
-| `openknx` | read the identity of the System B candidates only |
 | `-V` / `--verbose` | full interface and target profile first, and the control block during a transfer |
 | `-q` / `--quiet` | no chrome, tab-separated — scriptable, and automatic when the output is not a terminal |
 | `--log[=path]` | record the session; always complete, whatever the console shows |
@@ -61,8 +59,34 @@ rename this variable was named FTC_LANG; that name is not read any more.
 | `con` / `console` | the interface's **own** console over its web console (WebSocket, no tunnel) |
 | `scan <a.l \| a b> [ets] [deep N]` | find devices on a line or area |
 | `scan … pace <ms>` / `drain <ms>` / `tmo <ms>` | spacing between questions · wait at the end for slow answers · how long one may stay unacknowledged |
-| `scan … openknx` / `details` | read identities while scanning: OpenKNX candidates only, or every device |
+| `scan … --no-details` | sweep only, without reading identities (they are read by default) |
+| `scan … openknx` | read the identity of the System B candidates only, not of every device |
+| `scan … --workers N` / `-W N` | how many identity reads run at once (default 5); the sweep itself stays on one tunnel |
+| `<pa> con [N\|max] [apdu M]` | the console of a DEVICE over the tunnel; `/job` schedules repeats, `/stat` prints the counters |
+| `browse` | walk a device's filesystem interactively |
 | `install` / `uninstall` · `config <key> <value>` | put `oknx` on the PATH · persistent defaults |
+
+**Group addresses** — read and write values on the bus, and give them names from an ETS export.
+
+| | |
+|---|---|
+| `ga read <x/y/z>` · `ga write <x/y/z> <value>` | A_GroupValue_Read / _Write; six bits or less ride in the compact form |
+| `ga import <GA-Export.xml>` | store addresses, names and datapoint types of an ETS export, per interface |
+| `ga table` · `ga table rm <name>` | list the stored tables · remove one (both work without `--ip`) |
+| `ga table move <from> <to>` | re-point a stored table at another interface |
+| `ga monitor <x/y/z>` | the group monitor narrowed to one address |
+| `gm <x/y/z>` · `gm <a>,<b>` · `gm <x/y/z>:<DPT>` | the same filters on the monitor, optionally with an explicit datapoint type |
+
+**Driving one device** — what ETS does besides transferring files. Everything here WRITES to a foreign
+device; on a productive line use it per device and deliberately.
+
+| | |
+|---|---|
+| `<pa> progmode [on\|off\|blink]` · `<pa> led …` | write PID_PROGMODE (54); `led` is the older spelling |
+| `<pa> restart` · `<pa> masterreset <code> yes` | A_Restart; a basic restart is answered by nothing |
+| `setpa <x.y.z>` | give the one device in programming mode a new individual address |
+| `<pa> unload yes` | set the address, association and application objects to LS_UNLOAD |
+| `<pa> runstate` | the load states and the run state, read only |
 
 **KNX properties** — the interface objects of a device, independent of the file transfer. Which objects and
 PIDs exist, and how to read the answers: [knx-properties.md](../reference/knx-properties.md).
@@ -121,8 +145,12 @@ ignored.
 | `knxota <file>` | the assistant: pick interface and device, compare versions, transfer, apply, verify |
 | `knxota … --check` · `--force` | say what would happen · allow a downgrade or an unidentified file |
 | `<pa> fwupdate <remote>` | trigger only: apply a file that is already on the target |
-| `delta <old> <new>` · `gzip <file>` | build a difference image · pack one, without sending |
-| `decode <file>` | read an image back: what it is, which device, which version |
+| `delta make <old> <new> <out.okd>` | build a difference image, without sending |
+| `delta show <file.okd>` · `delta apply <old> <okd> <out>` | describe one · rebuild the new image locally |
+| `gzip <file>` | pack a firmware image, without sending |
+| `knxota … --from <file>` · `--no-delta` · `--no-compress` · `--keep-temp` · `--dry-run` | force the base image · send the full image · send it unpacked · keep the temporaries · say what would happen |
+| `knxota resume [list]` · `knxota resume clear <pa>\|all` | the interrupted runs that are offered again · forget them |
+| `decode <hex LPDU>` | decode one TP1 telegram offline, no bus and no interface |
 
 An interrupted `knxota` run is offered again on the next start, recognised by the firmware's checksum:
 [firmware-update.md](firmware-update.md).
