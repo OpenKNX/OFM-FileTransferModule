@@ -414,7 +414,10 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         return true;
     }
 #endif
-    if (strcmp(sub, "led") == 0)
+    // The real name: this writes PID_PROGMODE (54) - 03_05_01 4.3.5 p.45, "1 = device is in
+    // Programming Mode". The prog LED is only how the device shows that state. `led` stays as the
+    // older spelling so existing scripts keep working.
+    if (strcmp(sub, "progmode") == 0 || strcmp(sub, "led") == 0)
     {
         uint8_t m = strcmp(arg, "on") == 0 ? 1 : strcmp(arg, "blink") == 0 ? 2
                                                                            : 0;
