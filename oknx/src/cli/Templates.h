@@ -781,6 +781,9 @@ class Tpl
      */
     std::string koFlags(const std::string& active) const
     {
+        // "?" = the descriptor was not read. Five dots would say "every flag is off", which is a statement
+        // about the device; not knowing is a statement about the read. They must not look the same.
+        if (active == "?") return _c.mut("  ?  ");
         static const char* code = "CRWTU";                    // canonical mask letters (data side)
         static const char* en[5] = {"C", "R", "W", "T", "U"}; // Comm/Read/Write/Transmit/Update
         static const char* de[5] = {"K", "L", "S", "Ü", "A"}; // Komm./Lesen/Schreiben/Übertr./Aktual.

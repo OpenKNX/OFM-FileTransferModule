@@ -1499,12 +1499,18 @@ static void usage()
     // Each role keeps one fixed colour (violet=who, bold=what, teal=thing, blue=how) so the line doubles
     // as the legend; role colours don't follow the theme accent (which can be the danger colour).
     U.section(L.tr("USAGE", "AUFRUF"));
-    std::printf("  %s %s %s %s %s %s\n\n", c.dim("oknx").c_str(),
+    std::printf("  %s %s %s %s %s %s\n", c.dim("oknx").c_str(),
                 c.blue(L.tr("[global options]", "[globale optionen]")).c_str(),
                 c.violet(L.tr("<subject>", "<subjekt>")).c_str(),
                 c.bold(L.tr("<verb>", "<verb>")).c_str(),
                 c.oper(L.tr("[operands]", "[operanden]")).c_str(),
                 c.blue(L.tr("[options]", "[optionen]")).c_str());
+    // The shape above is also the colour legend for every command line below - but only say so when
+    // colour is actually being printed (NO_COLOR, a pipe or -q turn it off and the claim would be false).
+    if (g_term.useColor())
+        std::printf("  %s\n", c.dim(L.tr("these colours repeat in every line below: <pa> violet · verb bold · <operand> teal · --option blue",
+                                         "diese Farben wiederholen sich in jeder Zeile unten: <pa> violett · Verb fett · <operand> türkis · --option blau")).c_str());
+    std::printf("\n");
     // One column for the shapes, one for what they are for -- the same grid the rest of the help uses.
     {
         // The coloured form carries escape codes, so its byte length is not its width. The plain shape is
@@ -1541,67 +1547,100 @@ static void usage()
             std::printf("  %s%*s %s\n", sh.form.c_str(), pad > 1 ? pad : 1, "", c.dim(note).c_str());
         }
     }
-    std::printf("\n  %s = %s  %s\n", c.violet("<pa>").c_str(),
-                c.dim(L.tr("the device you mean — not the interface/router you tunnel through",
-                           "das gemeinte Gerät — nicht das Interface/der Router, durch das getunnelt wird")).c_str(),
-                c.dim(L.tr("e.g. 5.0.3", "z.B. 5.0.3")).c_str());
-    std::printf("  %s\n\n", c.dim(L.tr("--version · --help · a persisted default: oknx config <key> <value>",
-                                        "--version · --help · dauerhafte Vorgabe: oknx config <key> <wert>")).c_str());
+    std::printf("\n  %s = %s\n", c.violet("<pa>").c_str(),
+                c.dim(L.tr("the individual address of the device you mean — not the one of the interface",
+                           "die physikalische Adresse (Individualadresse) des gemeinten Geräts — nicht die des Interfaces")).c_str());
+    // The most common mistake with this tool is confusing the two addresses, so they stand next to each
+    // other once, labelled, in a line that runs as printed.
+    std::printf("  %s %s %s %s\n", c.dim("oknx").c_str(), c.blue("-i 192.168.1.50").c_str(),
+                c.violet("1.1.42").c_str(), c.bold("ping").c_str());
+    std::printf("      %s\n", c.dim(L.tr("192.168.1.50 = the WAY there (the IP interface) · 1.1.42 = the TARGET (the KNX device)",
+                                          "192.168.1.50 = der WEG dorthin (das IP-Interface) · 1.1.42 = das ZIEL (das KNX-Gerät)")).c_str());
+    std::printf("      %s\n", c.dim(L.tr("the tunnel is that connection: oknx speaks IP to the interface, the interface speaks KNX to the device",
+                                          "der Tunnel ist diese Verbindung: oknx spricht IP mit dem Interface, das Interface spricht KNX mit dem Gerät")).c_str());
+    std::printf("\n  %s\n", c.dim(L.tr("ready-made command lines, sorted by the job:  oknx --examples",
+                                        "fertige Befehlszeilen, nach Aufgabe sortiert:  oknx --examples")).c_str());
+    std::printf("  %s\n\n", c.dim(L.tr("--version · --help · a persisted default: oknx config <key> <value> (kept in ~/.config/oknx/)",
+                                        "--version · --help · dauerhafte Vorgabe: oknx config <key> <wert> (liegt unter ~/.config/oknx/)")).c_str());
 
     U.section(L.tr("OPTIONS", "OPTIONEN"));
     U.cmdRow("--ip A.B.C.D | -i", L.tr("interface / router to tunnel through", "Interface/Router, durch das getunnelt wird"));
-    U.cmdRow("--port N", L.tr("KNXnet/IP port (default 3671)", "KNXnet/IP-Port (Default 3671)"));
-    U.cmdRow("--tunnels N | -T", L.tr("parallel scan over N tunnels (bare = auto/max)", "Parallel-Scan über N Tunnel (ohne Wert = auto/max)"));
+    U.cmdRow("--port N", L.tr("KNXnet/IP port (default 3671)", "KNXnet/IP-Port (Vorgabe 3671)"));
+    U.cmdRow("--workers N | -W", L.tr("how many identity reads run in parallel (each takes one tunnel)",
+                                     "wie viele Identitäten parallel gelesen werden (je ein Tunnel)"));
     U.cmdRow("--discover | -D", L.tr("list interfaces on the LAN and exit", "Interfaces im LAN auflisten und beenden"));
     U.cmdRow("--verbose | -V", L.tr("full interface + target steckbrief first", "voller Interface-+Ziel-Steckbrief vorweg"));
-    U.cmdRow("--quiet | -q", L.tr("no chrome, TSV — scriptable (auto on non-TTY)", "kein Chrome, TSV — skriptbar (auto bei Nicht-TTY)"));
+    U.cmdRow("--quiet | -q", L.tr("no chrome, TSV — scriptable (auto on non-TTY)", "keine Deko, TSV — skriptbar (automatisch bei Nicht-TTY)"));
     U.cmdRow("--log [=path]", L.tr("log console session to a file (auto: ~/con_<pa>_<ts>.log)", "Konsolen-Sitzung mitschreiben (auto: ~/con_<pa>_<ts>.log)"));
     U.cmdRow("--prio low|normal|urgent|system", L.tr("KNX priority of the FTC frames (default low; elevated warns + gates)",
-                                                     "KNX-Priorität der FTC-Frames (Default low; erhöht warnt + fragt)"));
+                                                     "KNX-Priorität der FTC-Frames (Vorgabe low; erhöht warnt + fragt)"));
     U.cmdRow("--prio-force", L.tr("confirm an elevated --prio in a non-TTY/scripted run", "erhöhtes --prio in Nicht-TTY/Skript bestätigen"));
     U.cmdRow("--lang de|en", L.tr("force language (else OKNX_LANG / locale)", "Sprache erzwingen (sonst OKNX_LANG/Locale)"));
     U.cmdRow("--theme green|amber|cyan", L.tr("accent theme (persist: oknx config theme <name>)", "Akzent-Theme (dauerhaft: oknx config theme <name>)"));
-    U.cmdRow("--ascii", L.tr("ASCII fallback for box/marks", "ASCII-Fallback für Rahmen/Marken"));
+    U.cmdRow("--ascii", L.tr("ASCII instead of box/mark glyphs — colour is NOT affected",
+                             "ASCII statt Rahmen- und Markenzeichen — die Farbe bleibt davon unberührt"));
+    U.cmdRow("", L.tr("plain text without colour: NO_COLOR=1, a pipe, or --quiet",
+                      "reiner Text ohne Farbe: NO_COLOR=1, eine Pipe, oder --quiet"));
+    U.cmdRow("--examples", L.tr("worked examples, grouped by the job", "Beispiele, nach Aufgabe sortiert"));
     U.cmdRow("-VqD (bundled)", L.tr("these bundle: -VD = -V -D. They belong BEFORE the command; the transfer flags "
                                     "(-faknqv) come after it",
                                     "diese bündeln: -VD = -V -D. Sie stehen VOR dem Kommando; die Transfer-Flags "
                                     "(-faknqv) danach"));
-    std::printf("\n");
 
-    U.section(L.tr("INTERFACE", "INTERFACE"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
+    U.section(L.tr("THE INTERFACE ITSELF", "DAS INTERFACE SELBST"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
     U.cmdRow("info", L.tr("full interface report (DESCRIPTION + device-mgmt)", "kompletter Interface-Report (DESCRIPTION + Device-Mgmt)"));
+    U.cmdRow("con | console", L.tr("the interface's OWN console via its webconsole (WebSocket, no tunnel)",
+                                   "die EIGENE Konsole des Interfaces über dessen Webconsole (WebSocket, kein Tunnel)"));
+    U.cmdRow("prop dump", L.tr("every readable property of every interface object",
+                              "jede lesbare Eigenschaft jedes Interface-Objekts"));
+    U.section(L.tr("GROUP ADDRESSES", "GRUPPENADRESSEN"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
+    U.cmdRow("ga read <x/y/z>", L.tr("read a group address (GroupValue_Read)", "Gruppenadresse lesen (GroupValue_Read)"));
+    U.cmdRow("ga write <x/y/z> <v>", L.tr("write it: 0-63 plain, or hex octets", "schreiben: 0-63 blank, oder Hex-Oktette"));
+    U.cmdRow("ga import <export>", L.tr("learn an ETS group address export: names + datapoint types",
+                                       "ETS-Gruppenadressexport einlesen: Namen + Datenpunkttypen"));
+    U.cmdRow("", L.tr("XML or CSV, all four ETS layouts; CSV only WITH header lines. Kept per interface",
+                      "XML oder CSV, alle vier ETS-Formate; CSV nur MIT Kopfzeilen. Je Interface abgelegt"));
+    U.cmdRow("ga table", L.tr("which interface has which table", "welches Interface hat welche Tabelle"));
+    U.cmdRow("ga table move <from> <to>", L.tr("re-point a table after the interface changed address",
+                                              "Tabelle umhängen, wenn das Interface eine neue Adresse hat"));
+    U.cmdRow("ga table rm <iface>", L.tr("drop one table", "eine Tabelle entfernen"));
+    U.section(L.tr("WATCHING THE BUS", "DEN BUS BEOBACHTEN"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
     U.cmdRow("groupmon | gm", L.tr("live group monitor — decoded telegrams", "Live-Gruppenmonitor — dekodierte Telegramme"));
+    U.cmdRow("gm <x/y/z>", L.tr("the same, restricted to one group address", "dasselbe, auf eine Gruppenadresse beschränkt"));
+    U.cmdRow("gm <x/y/z>,<x/y/z>,…", L.tr("several addresses at once (comma or space)",
+                                         "mehrere Adressen gleichzeitig (Komma oder Leerzeichen)"));
+    U.cmdRow("gm <x/y/z>:<DPT>", L.tr("give the datapoint type for this run, without importing",
+                                     "den Datenpunkttyp für diesen Lauf angeben, ohne Import"));
+    U.cmdRow("ga monitor <x/y/z>", L.tr("alias for gm <x/y/z>", "Kurzform für gm <x/y/z>"));
     U.cmdRow("busmon | bm", L.tr("live bus monitor — raw LPDU, ETS ACK colour", "Live-Busmonitor — Roh-LPDU, ETS-ACK-Farbe"));
     U.cmdRow("gm|bm compare <ipB> [--grace ms] [--raw]", L.tr("A/B busmon fidelity diff (reassembles fragments; --raw = per-piece; --multi = two-stream)",
                                                               "A/B-Busmon-Treuevergleich (setzt Fragmente zusammen; --raw = Einzelstücke; --multi = Zweistrom)"));
     U.cmdRow("  compare readability", L.tr("keys f/c/m/t · flags --only-diff --collapse --no-markers --skew",
                                           "Tasten f/c/m/t · Flags --only-diff --collapse --no-markers --skew"));
     U.cmdRow("gm|bm --frames N | --seconds N", L.tr("stop the monitor after N (scripted)", "Monitor nach N stoppen (skriptbar)"));
+    U.section(L.tr("FINDING DEVICES", "GERÄTE FINDEN"));
+    U.cmdRow("scan <a.l | a b> [ets] [deep N]", L.tr("discover devices on a line / range (ets = CO probe, slower, finds BCU1/BCU2)",
+                                                    "Geräte auf Linie/Bereich finden (ets = CO-Probe, langsamer, findet BCU1/BCU2)"));
+    U.cmdRow("scan … --no-details", L.tr("skip the identity read — a scan reads it by default",
+                                         "Identität nicht lesen — ein Scan liest sie standardmäßig"));
+    U.cmdRow("scan … pace <ms> | drain <ms> | tmo <ms>",
+             L.tr("sweep tuning: gap between probes · wait for slow answers at the end · how long one probe "
+                  "may stay unconfirmed. Defaults find everything; raise pace on a slow interface",
+                  "Feineinstellung: Abstand zwischen Abfragen · Wartezeit am Ende für langsame Antworten · "
+                  "wie lange eine Abfrage unbestätigt bleiben darf. Die Vorgaben finden alles; pace erhöhen "
+                  "bei einem trägen Interface"));
+    U.cmdRow("scan … --no-details", L.tr("sweep only — skip the identity read (identity is read by default)",
+                                         "nur suchen — die Identität nicht lesen (sie wird sonst gelesen)"));
+    U.cmdRow("scan … openknx", L.tr("read the identity of the System B candidates only, not of every device",
+                                    "Identität nur der System-B-Kandidaten lesen, nicht jedes Geräts"));
+    U.cmdRow("scan … --workers N | -W N", L.tr("how many identity reads run in parallel (default 5)",
+                                               "wie viele Identitätsabfragen parallel laufen (Vorgabe 5)"));
     U.cmdRow("progscan | ps [global|locate]", L.tr("find devices in programming mode + localise the line",
                                                    "Geräte im Programmiermodus finden + Linie lokalisieren"));
     U.cmdRow("ps --seconds 0", L.tr("continuous watch — devices in prog mode appear/disappear live · Ctrl+C",
                                     "Dauer-Überwachung — Geräte im Prog-Modus erscheinen/verschwinden live · Ctrl+C"));
-    U.cmdRow("con | console", L.tr("the interface's OWN console via its webconsole (WebSocket, no tunnel)",
-                                   "die EIGENE Konsole des Interfaces über dessen Webconsole (WebSocket, kein Tunnel)"));
-    std::printf("\n");
 
-    U.section(L.tr("PROPERTIES", "PROPERTIES"), L.tr("(interface objects)", "(Interface-Objekte)"));
-    U.cmdRow("prop read|write <iot> <inst> <pid> [start] [hex]",
-             L.tr("the INTERFACE's own objects (local device management, by object TYPE + instance)",
-                  "die EIGENEN Objekte des Interfaces (lokales Device Management, nach Objekt-TYP + Instanz)"));
-    U.cmdRow("busprop read|write <pa> <objIdx> <pid> [start] [hex]",
-             L.tr("a REMOTE device's objects over the bus, by object INDEX (A_PropertyValue_Read/Write)",
-                  "die Objekte eines ENTFERNTEN Geräts über den Bus, nach Objekt-INDEX (A_PropertyValue_Read/Write)"));
-    U.cmdRow("<pa> runstate [start|stop]",
-             L.tr("read or control the application: 0 halted · 1 running · 3 terminated (03_05_01 4.24)",
-                  "Applikation lesen oder steuern: 0 angehalten · 1 laeuft · 3 beendet (03_05_01 4.24)"));
-    U.cmdRow("", L.tr("stop holds GROUP communication only - properties, memory and restart stay reachable",
-                      "stop haelt nur die GRUPPEN-Kommunikation an - Properties, Speicher und Neustart bleiben erreichbar"));
-    U.cmdRow("", L.tr("the state lives in RAM: a device reset brings the application back",
-                      "der Zustand liegt im RAM: ein Geraete-Reset holt die Applikation zurueck"));
-    std::printf("\n");
-
-    U.section(L.tr("INFO", "INFO"), L.tr("(read-only)", "(nur lesen)"));
+    U.section(L.tr("READING ONE DEVICE", "EIN GERÄT LESEN"), L.tr("(read-only)", "(nur lesen)"));
     U.cmdRow("<pa> ping", L.tr("is the target there? round-trip + ms", "ist das Ziel da? Round-Trip + ms"));
     U.cmdRow("", L.tr("send/get/perf/fwupdate/con ask this first, in one frame; a silent target is reported "
                       "in ~2.5 s instead of after minutes of retries. --force skips the question",
@@ -1610,21 +1649,69 @@ static void usage()
     U.cmdRow("<pa> feat | f", L.tr("what the target supports, and why a write is refused",
                                    "was das Ziel kann — und warum ein Schreibzugriff abgelehnt wird"));
     U.cmdRow("<pa> exists | e <path>", L.tr("is that file or folder there?", "gibt es diese Datei / diesen Ordner?"));
-    U.cmdRow("<pa> info [ga|<file>]", L.tr("device fingerprint / group comm / file info", "Steckbrief / Gruppenkomm. / Datei-Info"));
-    U.cmdRow("<pa> df [sd|efc]", L.tr("target filesystem usage (drive optional)", "Dateisystem-Belegung des Ziels (Drive optional)"));
+    U.cmdRow("<pa> info [ga|<file>]", L.tr("device fingerprint / group comm / file info", "Geräte-Steckbrief (Maske, Hersteller, Applikation) / Gruppenkomm. / Datei-Info"));
+    U.cmdRow("<pa> df [sd|efc]", L.tr("target filesystem usage (drive optional)", "Dateisystem-Belegung des Ziels (Laufwerk optional)"));
     U.cmdRow("<pa> ll|ls [sd/|efc/][dir]", L.tr("list a directory (+ CRC, storage bar)", "Verzeichnis listen (+ CRC, Speicher-Balken)"));
-    U.cmdRow("scan <a.l | a b> [ets] [deep N]", L.tr("discover devices on a line / range (ets = CO probe; + --tunnels)", "Geräte auf Linie/Bereich finden (ets = CO-Probe; + --tunnels)"));
-    U.cmdRow("scan … pace <ms> | drain <ms> | tmo <ms>",
-             L.tr("sweep tuning: gap between probes · wait for slow answers at the end · how long one probe "
-                  "may stay unconfirmed. Defaults find everything; raise pace on a slow interface",
-                  "Feineinstellung: Abstand zwischen Abfragen · Wartezeit am Ende für langsame Antworten · "
-                  "wie lange eine Abfrage unbestätigt bleiben darf. Die Vorgaben finden alles; pace erhöhen "
-                  "bei einem trägen Interface"));
-    U.cmdRow("scan … openknx | details", L.tr("read identity while scanning: openknx = OpenKNX candidates, details = every device",
-                                              "Identität schon beim Suchen lesen: openknx = OpenKNX-Kandidaten, details = jedes Gerät"));
-    std::printf("\n");
 
-    U.section(L.tr("FILES", "DATEIEN"));
+    U.section(L.tr("DRIVING ONE DEVICE", "EIN GERÄT STEUERN"));
+    U.cmdRow("<pa> led [on|off|blink]",
+             L.tr("light the device's prog LED to find it in the cabinet - this SETS PROGRAMMING MODE (PID 54)",
+                  "die Prog-LED am Gerät leuchten lassen, um es im Schrank zu finden - das setzt den PROGRAMMIERMODUS (PID 54)"));
+    U.cmdRow("", L.tr("while it is on, ANY tool on the bus can overwrite this device's address - switch it off again",
+                      "solange er an ist, kann JEDES Werkzeug am Bus die Adresse dieses Geräts überschreiben - wieder ausschalten"));
+    U.cmdRow("", L.tr("blink switches it on and off once a second until the next command",
+                      "blink schaltet ihn im Sekundentakt an und aus, bis zum nächsten Befehl"));
+    U.cmdRow("<pa> progmode [on|off|blink]", L.tr("the same thing, named after what it does",
+                                                 "dasselbe, benannt nach dem, was es tut"));
+    U.cmdRow("", L.tr("who is in programming mode right now:  oknx -i <ip> ps",
+                      "wer gerade im Programmiermodus ist:  oknx -i <ip> ps"));
+    U.cmdRow("<pa> restart", L.tr("reboot it (A_Restart over a connection - the form every profile must support)",
+                                 "neu starten (A_Restart über eine Verbindung - die Form, die jedes Profil können muss)"));
+    U.cmdRow("<pa> masterreset <code> yes",
+             L.tr("master reset, erase code BY NAME: confirmedrestart (restart only, erases nothing) · "
+                  "resetparam (parameters) · resetlinks (group addresses + associations) · resetap "
+                  "(application program) · resetia (address -> 15.15.255) · factoryresetwithoutia "
+                  "(all but the address) · factoryreset (EVERYTHING)",
+                  "Master-Reset, Erase-Code als NAME: confirmedrestart (nur Neustart, löscht nichts) · "
+                  "resetparam (Parameter) · resetlinks (Gruppenadressen + Assoziationen) · resetap "
+                  "(Applikationsprogramm) · resetia (Adresse -> 15.15.255) · factoryresetwithoutia "
+                  "(alles außer der Adresse) · factoryreset (ALLES)"));
+    U.cmdRow("setpa <x.y.z>", L.tr("give the one device in PROGRAMMING MODE this address (no <pa> needed)",
+                                   "dem einen Gerät im PROGRAMMIERMODUS diese Adresse geben (kein <pa> nötig)"));
+    U.cmdRow("", L.tr("refuses unless exactly one device answers, and reads the new address back as proof",
+                      "verweigert, wenn nicht genau eines antwortet, und liest die neue Adresse zur Kontrolle zurück"));
+    U.cmdRow("<pa> unload yes", L.tr("ERASE its configuration: address + association table and application go to UNLOADED",
+                                     "Konfiguration LÖSCHEN: Adress- + Assoziationstabelle und Applikation auf UNLOADED"));
+    U.cmdRow("", L.tr("only an ETS download brings it back; asks again on a terminal",
+                      "nur ein ETS-Download holt sie zurück; fragt am Terminal zusätzlich nach"));
+    U.cmdRow("<pa> runstate [start|stop]",
+             L.tr("read or control the application: 0 halted · 1 running · 3 terminated (03_05_01 4.24)",
+                  "Applikation lesen oder steuern: 0 angehalten · 1 läuft · 3 beendet (03_05_01 4.24)"));
+    U.cmdRow("", L.tr("stop holds GROUP communication only - properties, memory and restart stay reachable",
+                      "stop hält nur die GRUPPEN-Kommunikation an — Properties, Speicher und Neustart bleiben erreichbar"));
+    U.cmdRow("", L.tr("the state lives in RAM: a device reset brings the application back",
+                      "der Zustand liegt im RAM: ein Geräte-Reset holt die Applikation zurück"));
+
+    U.section(L.tr("PROPERTIES", "EIGENSCHAFTEN"), L.tr("(prop = the interface · busprop = a device on the bus)", "(prop = das Interface · busprop = ein Gerät am Bus)"));
+    U.cmdRow("prop read|write <iot> <inst> <pid> [start] [hex]",
+             L.tr("the INTERFACE's own objects (local device management, by object TYPE + instance)",
+                  "die EIGENEN Objekte des Interfaces (lokales Device Management, nach Objekt-TYP + Instanz)"));
+    U.cmdRow("busprop read|write <pa> <objIdx> <pid> [start] [hex]",
+             L.tr("a REMOTE device's objects over the bus, by object INDEX (A_PropertyValue_Read/Write)",
+                  "die Objekte eines ENTFERNTEN Geräts über den Bus, nach Objekt-INDEX (A_PropertyValue_Read/Write)"));
+    U.cmdRow("busprop dump <pa>", L.tr("every readable property of a remote device",
+                                      "jede lesbare Eigenschaft eines entfernten Geräts"));
+
+    U.section(L.tr("CONSOLE", "KONSOLE"));
+    U.cmdRow("<pa> con [N|max] [apdu M]", L.tr("remote console · N = output drain 4-246 B/answer (max = full · omit = auto from APDU) · apdu M overrides the APDU · ? = help inside",
+                                               "Remote-Konsole · N = Ausgabe-Drain 4-246 B/Antwort (max = voll · leer = auto aus APDU) · apdu M überschreibt die APDU · ? = Hilfe drin"));
+    U.cmdRow("  · /job add watch every <int> <cmd>", L.tr("in console: recurring auto-command · /job list · /job help",
+                                                          "in der Konsole: wiederkehrender Auto-Befehl · /job list · /job help"));
+    U.cmdRow("  · /stat  ·  ?", L.tr("in console: full session stats · local shortcut help",
+                                     "in der Konsole: komplette Session-Statistik · lokale Shortcut-Hilfe"));
+
+#ifdef OPENKNX_FTC_SECURITY
+    U.section(L.tr("FILES ON A DEVICE", "DATEIEN AUF EINEM GERÄT"));
     U.cmdRow("<pa> send <src> [sd/|efc/]<dst>", L.tr("upload a host file (alias: upload)", "Host-Datei hochladen (Alias: upload)"));
     U.cmdRow("<pa> get [sd/|efc/]<remote> [local]", L.tr("download a file (alias: download/receive)", "Datei herunterladen (Alias: download/receive)"));
     U.cmdRow("<pa> rm | mkdir | rmdir | mv", L.tr("delete / create / remove / rename", "löschen / anlegen / entfernen / umbenennen"));
@@ -1633,7 +1720,41 @@ static void usage()
                                                  "Durchsatz-Test, ohne Datei — sd|efc wählt das Ziel-Laufwerk"));
     U.cmdRow("sd/ | efc/", L.tr("prefix a REMOTE path (else LittleFS): df ll ls rm mkdir rmdir mv info get perf",
                                 "REMOTE-Pfad voranstellen (sonst LittleFS): df ll ls rm mkdir rmdir mv info get perf"));
-    std::printf("\n");
+
+    U.section(L.tr("UPDATING FIRMWARE", "FIRMWARE AKTUALISIEREN"), L.tr("(knxOTA — over the KNX bus)", "(knxOTA — über den KNX-Bus)"));
+    U.cmdRow("knxota <file.uf2|.bin>", L.tr("update a device from a firmware file on THIS computer; without --ip and "
+                                            "address it asks for interface and device",
+                                            "ein Gerät aus einer Firmware-Datei auf DIESEM Rechner aktualisieren; ohne "
+                                            "--ip und Adresse fragt es Interface und Gerät ab"));
+    U.cmdRow("knxota ... --from <folder|.app.bin>",
+             L.tr("send only the difference to that release; without it knxota offers what it finds",
+                  "nur die Differenz zu diesem Release senden; ohne die Angabe bietet knxota an, was es findet"));
+    U.cmdRow("knxota ... --no-delta",
+             L.tr("always send the whole image, even where a difference would do",
+                  "immer das Voll-Image senden, auch wo eine Differenz genügen würde"));
+    U.cmdRow("--check | --dry-run", L.tr("only compare and report — writes nothing (try this first)",
+                             "nur prüfen und berichten — schreibt nichts (damit zuerst testen)"));
+    U.cmdRow("--force", L.tr("allow a downgrade, or a file that states no identity",
+                             "Downgrade zulassen, oder eine Datei ohne Kennung"));
+    U.cmdRow("--no-compress", L.tr("send it uncompressed (takes about twice as long)",
+                                   "unkomprimiert senden (dauert etwa doppelt so lang)"));
+    U.cmdRow("--keep-temp", L.tr("keep the prepared firmware on disk", "die vorbereitete Firmware behalten"));
+    U.cmdRow("delta make <old> <new> <out.okd>", L.tr("build a difference file from two firmware images - no bus",
+                                                      "Differenzdatei aus zwei Firmware-Abbildern bauen - ohne Bus"));
+    U.cmdRow("delta show <file.okd>", L.tr("what is in it", "was darin steht"));
+    U.cmdRow("delta apply <old> <okd> <out>", L.tr("replay it locally with the same interpreter the device runs",
+                                                   "lokal nachspielen, mit demselben Interpreter wie im Gerät"));
+    U.cmdRow("", L.tr("--pack compresses the patch · --limit <n> caps the rebuilt size",
+                      "--pack komprimiert den Patch · --limit <n> begrenzt die Größe beim Nachbauen"));
+    U.cmdRow("knxota resume [list]", L.tr("firmware runs that were interrupted - no bus involved",
+                                          "abgebrochene Firmware-Läufe anzeigen - ohne Bus"));
+    U.cmdRow("knxota resume clear <pa>|all", L.tr("forget one of them, or all",
+                                                 "einen davon vergessen, oder alle"));
+    U.cmdRow("<pa> fwupdate <remote>", L.tr("flash a firmware the device already has -> reboots it",
+                                            "eine Firmware flashen, die das Gerät schon hat -> Reboot"));
+    U.cmdRow("", L.tr("exit: 0 ok · 1 nothing to do · 2 usage · 3 device refuses writes · 6 no answer",
+                      "Ende: 0 ok · 1 nichts zu tun · 2 Aufruf · 3 Gerät sperrt · 6 keine Antwort"));
+
 
     U.section(L.tr("TRANSFER OPTIONS", "TRANSFER-OPTIONEN"), L.tr("(order-independent, three equal spellings)",
                                                                   "(reihenfolgeunabhängig, drei gleichwertige Schreibweisen)"));
@@ -1649,8 +1770,11 @@ static void usage()
                                  "Fragment auf dem Ziel ignorieren; von vorn hochladen"));
     U.cmdRow("--keep", L.tr("perf: leave the test file behind instead of deleting it",
                             "perf: die Testdatei stehen lassen statt sie zu löschen"));
-    U.cmdRow("--progress | --quiet", L.tr("output level for this one command: live 1 Hz · result line only",
-                                          "Ausgabestufe für diesen einen Aufruf: live 1 Hz · nur die Ergebniszeile"));
+    U.cmdRow("retry [max|transfer|backoff [n]]",
+             L.tr("show or set how often a transfer retries and how long it waits between attempts",
+                  "anzeigen oder setzen, wie oft ein Transfer wiederholt wird und wie lange er dazwischen wartet"));
+    U.cmdRow("--progress | --quiet", L.tr("output level for THIS command: live 1 Hz · result line only — not the global --quiet above",
+                                          "Ausgabestufe für DIESEN Aufruf: live 1 Hz · nur die Ergebniszeile — nicht das globale --quiet oben"));
     U.cmdRow("", L.tr("same things, shorter: -f -a -k -n -q -v[0-2], bundled as -fa. And the bare words the "
                       "device console always took: fast · safe · auto · w16 · apply · nr · keep · verbose",
                       "dieselben Dinge, kürzer: -f -a -k -n -q -v[0-2], gebündelt als -fa. Und die bloßen "
@@ -1660,36 +1784,11 @@ static void usage()
                       "silently ignored",
                       "ein Wert außerhalb des Bereichs, ein Fenster ohne fast oder ein unbekanntes Wort wird "
                       "abgelehnt — nie stillschweigend übergangen"));
-    std::printf("\n");
 
-    U.section("knxOTA", L.tr("firmware update over the KNX bus", "Firmware-Update über den KNX-Bus"));
-    U.cmdRow("knxota <file.uf2|.bin>", L.tr("update a device from a firmware file on THIS computer; without --ip and "
-                                            "address it asks for interface and device",
-                                            "ein Gerät aus einer Firmware-Datei auf DIESEM Rechner aktualisieren; ohne "
-                                            "--ip und Adresse fragt es Interface und Gerät ab"));
-    U.cmdRow("knxota ... --from <folder|.app.bin>",
-             L.tr("send only the difference to that release; without it knxota offers what it finds",
-                  "nur die Differenz zu diesem Release senden; ohne die Angabe bietet knxota an, was es findet"));
-    U.cmdRow("knxota ... --no-delta",
-             L.tr("always send the whole image, even where a difference would do",
-                  "immer das Voll-Image senden, auch wo eine Differenz genügen würde"));
-    U.cmdRow("--check", L.tr("only compare and report — writes nothing (try this first)",
-                             "nur prüfen und berichten — schreibt nichts (damit zuerst testen)"));
-    U.cmdRow("--force", L.tr("allow a downgrade, or a file that states no identity",
-                             "Downgrade zulassen, oder eine Datei ohne Kennung"));
-    U.cmdRow("--no-compress", L.tr("send it uncompressed (takes about twice as long)",
-                                   "unkomprimiert senden (dauert etwa doppelt so lang)"));
-    U.cmdRow("--keep-temp", L.tr("keep the prepared firmware on disk", "die vorbereitete Firmware behalten"));
-    U.cmdRow("<pa> fwupdate <remote>", L.tr("flash a firmware the device already has -> reboots it",
-                                            "eine Firmware flashen, die das Gerät schon hat -> Reboot"));
-    U.cmdRow("", L.tr("exit: 0 ok · 1 nothing to do · 2 usage · 3 device refuses writes · 6 no answer",
-                      "Ende: 0 ok · 1 nichts zu tun · 2 Aufruf · 3 Gerät sperrt · 6 keine Antwort"));
-    std::printf("\n");
-
-    U.cmdRow("retry [max|transfer|backoff [n]]",
-             L.tr("show or set how often a transfer retries and how long it waits between attempts",
-                  "anzeigen oder setzen, wie oft ein Transfer wiederholt wird und wie lange er dazwischen wartet"));
-    std::printf("\n");
+    U.section(L.tr("ACCESS", "ZUGRIFF"), L.tr("(password-protected targets)", "(passwortgeschützte Ziele)"));
+    U.cmdRow("<pa> login <pw>", L.tr("unlock write actions (password -> MAC locally)", "Schreibaktionen freischalten (Passwort -> MAC lokal)"));
+    U.cmdRow("<pa> logout", L.tr("lock the write actions again", "Schreibaktionen wieder sperren"));
+#endif
 
     U.section(L.tr("SHORT FORMS & FLAGS", "KURZFORMEN & FLAGS"), L.tr("(everywhere)", "(überall)"));
     U.cmdRow("p i d l u g a m", L.tr("ping · info · df · ll · send · get · apply · mv", "ping · info · df · ll · send · get · apply · mv"));
@@ -1702,88 +1801,32 @@ static void usage()
                                        "NACH dem Kommando: f fast · a apply · k keep · n no-resume · q leise · "
                                        "v[0-2] Stufe. Ein unbekannter Buchstabe wird gemeldet, nie halb angewendet"));
     U.cmdRow("-v0 | -v1 | -v2", L.tr("output level: quiet · compact (default) · live 1 Hz",
-                                     "Ausgabestufe: leise · kompakt (Standard) · live 1 Hz"));
+                                     "Ausgabestufe: leise · kompakt (Vorgabe) · live 1 Hz"));
     U.cmdRow("verbose [0|1|2]", L.tr("set that level permanently (no value = show it)",
                                      "diese Stufe dauerhaft setzen (ohne Wert = anzeigen)"));
-    std::printf("\n");
 
     U.section(L.tr("LOCAL TOOLS", "LOKALE WERKZEUGE"), L.tr("(no bus, no interface)", "(ohne Bus, ohne Interface)"));
     U.cmdRow("gzip <in> <out>", L.tr("gzip a local file (RP firmware prep)", "lokale Datei gzip'en (RP-Firmware vorbereiten)"));
     U.cmdRow("decode <hex LPDU>", L.tr("decode a raw TP1 frame offline (APCI + FTC/console)",
                                        "Roh-TP1-Frame offline dekodieren (APCI + FTC/Console)"));
+    U.cmdRow("--ui-demo", L.tr("show every output element this tool draws - for checking a theme",
+                               "alle Ausgabebausteine dieses Werkzeugs zeigen - zum Prüfen eines Themes"));
+    U.cmdRow("_conprobe <a.l | a b>", L.tr("presence by LINK-LAYER confirm only: finds devices that answer nothing else",
+                                           "Anwesenheit nur über die Sicherungsschicht: findet Geräte, die sonst nichts beantworten"));
+    U.cmdRow("browse [<start>]", L.tr("the file chooser on its own, no bus involved (also --browse / --file-browser)",
+                                     "der Dateiwähler allein, ganz ohne Bus (auch --browse / --file-browser)"));
+    U.cmdRow("config <key> <value>", L.tr("a persistent default (theme, lang, ip, …); bare = show all",
+                                         "dauerhafte Vorgabe (theme, lang, ip, …); ohne Wert = alles zeigen"));
+    U.cmdRow("--force-install", L.tr("install without asking, even when it is a downgrade (scripts)",
+                                     "installieren ohne Rückfrage, auch bei einem Downgrade (für Skripte)"));
     U.cmdRow("install | uninstall", L.tr("put this oknx on the PATH, or take it off again — version-aware, asks before a "
                                          "downgrade. --system = /usr/local/bin, else ~/.local/bin, --dir <path> overrides",
                                          "dieses oknx in den PATH legen oder entfernen — versionsbewusst, fragt vor einem "
                                          "Downgrade. --system = /usr/local/bin, sonst ~/.local/bin, --dir <pfad> überschreibt"));
-    std::printf("\n");
 
-    U.section(L.tr("DEVICE", "GERÄT"));
-    U.cmdRow("<pa> led [on|off|blink]", L.tr("drive the prog-mode LED (locate)", "Prog-Modus-LED steuern (lokalisieren)"));
-    std::printf("\n");
-
-    U.section(L.tr("CONSOLE", "KONSOLE"));
-    U.cmdRow("<pa> con [N|max] [apdu M]", L.tr("remote console · N = output drain 4-246 B/answer (max = full · omit = auto from APDU) · apdu M overrides the APDU · ? = help inside",
-                                               "Remote-Konsole · N = Ausgabe-Drain 4-246 B/Antwort (max = voll · leer = auto aus APDU) · apdu M überschreibt die APDU · ? = Hilfe drin"));
-    U.cmdRow("  · /job add watch every <int> <cmd>", L.tr("in console: recurring auto-command · /job list · /job help",
-                                                          "in der Konsole: wiederkehrender Auto-Befehl · /job list · /job help"));
-    U.cmdRow("  · /stat  ·  ?", L.tr("in console: full session stats · local shortcut help",
-                                     "in der Konsole: komplette Session-Statistik · lokale Shortcut-Hilfe"));
-    std::printf("\n");
-
-#ifdef OPENKNX_FTC_SECURITY
-    U.section(L.tr("ACCESS", "ZUGRIFF"), L.tr("(password-protected targets)", "(passwortgeschützte Ziele)"));
-    U.cmdRow("<pa> login <pw>", L.tr("unlock write actions (password -> MAC locally)", "Schreibaktionen freischalten (Passwort -> MAC lokal)"));
-    U.cmdRow("<pa> logout", L.tr("lock the write actions again", "Schreibaktionen wieder sperren"));
-    std::printf("\n");
-#endif
-
-    U.section(L.tr("EXAMPLES", "BEISPIELE"), L.tr("(a working day, top to bottom)", "(ein Arbeitstag, von oben nach unten)"));
-    // Grouped the way the work actually happens: find the interface, look at the device, then act on it.
-    // Each line is runnable as printed -- only the addresses need changing.
-    struct Ex { const char* cmd; const char* en; const char* de; };
-    static const Ex ex[] = {
-        {"oknx --discover", "which interfaces are on the network?", "welche Interfaces gibt es im Netz?"},
-        {"oknx -i 11.11.0.126 info", "what can this interface do?", "was kann dieses Interface?"},
-        {"oknx -i 11.11.0.126 scan 5.0 openknx",
-         "find the OpenKNX devices on line 5.0, with their identity",
-         "OpenKNX-Geräte auf Linie 5.0 finden, samt Identität"},
-        {"", "", ""},
-        {"oknx -i 11.11.0.126 5.0.3 p", "is it there, and how fast does it answer?", "ist es da, und wie schnell antwortet es?"},
-        {"oknx -i 11.11.0.126 5.0.3 i", "device fingerprint: version, features, tables", "Steckbrief: Version, Funktionen, Tabellen"},
-        {"oknx -i 11.11.0.126 5.0.3 f", "why does it refuse a write?", "warum lehnt es einen Schreibzugriff ab?"},
-        {"oknx -i 11.11.0.126 5.0.3 l sd/", "list the SD card, with CRCs", "SD-Karte auflisten, mit Prüfsummen"},
-        {"", "", ""},
-        {"oknx -i 11.11.0.126 5.0.3 u cfg.json /cfg.json", "upload a file", "eine Datei hochladen"},
-        {"oknx -i 11.11.0.126 5.0.3 u fw.bin.gz -fa", "upload fast, then flash and reboot", "schnell hochladen, dann flashen und neu starten"},
-        {"oknx -i 11.11.0.126 5.0.3 g /log.txt ./log.txt", "fetch a file from the device", "eine Datei vom Gerät holen"},
-        {"oknx knxota firmware.uf2 --check", "compare a firmware file against the device, write nothing",
-         "Firmware-Datei mit dem Gerät vergleichen, nichts schreiben"},
-        {"oknx knxota firmware.uf2 --from ../MyProduct-0.7.0",
-         "send only what changed since 0.7.0 - minutes instead of half an hour",
-         "nur senden, was sich seit 0.7.0 geändert hat - Minuten statt einer halben Stunde"},
-        {"", "", ""},
-        {"oknx -i 11.11.0.126 5.0.3 con", "open the device's console over the bus", "die Konsole des Geräts über den Bus öffnen"},
-        {"oknx -i 11.11.0.126 bm", "watch the raw bus", "den Bus roh mitlesen"},
-        {"oknx -i 11.11.0.126 5.0.3 led blink", "make it blink so you find it in the cabinet",
-         "blinken lassen, um es im Schrank zu finden"},
-        {"oknx -i 11.11.0.126 5.0.3 pf 64 fast", "how fast is this link, without touching a file",
-         "wie schnell ist diese Strecke, ohne eine Datei anzufassen"},
-    };
-    // The note sits in its own column while there is room for it; in a narrow window it moves below the
-    // command instead of wrapping into it -- a command line must stay copy-pasteable.
-    constexpr int EXCOL = 46;
-    const bool wide = ftc::Tpl::cols() >= EXCOL + 56; // the longest note still has to fit beside it
-    for (const Ex& e : ex)
-    {
-        if (!e.cmd[0]) { std::printf("\n"); continue; }
-        const char* note = L.tr(e.en, e.de);
-        const int pad = EXCOL - (int)std::strlen(e.cmd);
-        if (wide)
-            std::printf("  %s%*s %s\n", c.txt(e.cmd).c_str(), pad > 1 ? pad : 1, "", c.dim(note).c_str());
-        else
-            std::printf("  %s\n      %s\n", c.txt(e.cmd).c_str(), c.dim(note).c_str());
-    }
-    std::printf("\n");
+    U.flushHelp();
+    std::printf("\n  %s\n\n", c.dim(L.tr("more, grouped by the job:  oknx --examples",
+                                        "mehr, nach Aufgabe sortiert:  oknx --examples")).c_str());
 }
 
 /**
@@ -5402,6 +5445,12 @@ int main(int argc, char** argv)
             }
             continue;
         }
+        if (a == "--examples")
+        {
+            examples();
+            socketCleanup();
+            return 0;
+        }
         if (a == "--help" || a == "-h")
         {
             usage();
@@ -6175,7 +6224,10 @@ int main(int argc, char** argv)
                     g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("nothing answered", "nichts geantwortet"),
                                  {L.tr("the interface may be on another network, or a firewall is blocking it",
                                        "das Interface hängt evtl. in einem anderen Netz, oder eine Firewall blockt")});
-                g_tpl.keybar({{"1-9", L.tr("take it", "nehmen")}, {"r", L.tr("search again", "erneut suchen")},
+                char rngIf[16];
+                if (found.size() == 1) std::snprintf(rngIf, sizeof(rngIf), "1");
+                else std::snprintf(rngIf, sizeof(rngIf), "1-%u", (unsigned)found.size());
+                g_tpl.keybar({{rngIf, L.tr("take it", "nehmen")}, {"r", L.tr("search again", "erneut suchen")},
                               {"i", L.tr("type an IP", "IP eingeben")}, {"q", L.tr("quit", "Ende")}});
                 std::printf("  %s ", c.amber("?").c_str());
                 std::fflush(stdout);
