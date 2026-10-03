@@ -360,3 +360,6 @@ MigrationBackup/
 # Generated conformance / hardening reports
 scripts/Test/Reports/
 scripts/Hardening/Reports/
+
+# Dated analyses stay local: they are working notes, not part of the module.
+doc/findings/

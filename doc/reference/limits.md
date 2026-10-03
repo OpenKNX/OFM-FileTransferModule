@@ -28,9 +28,8 @@ the server, through its received-bitmap. A malformed or out-of-order classic wri
 device.
 
 **`info ga` fails against an IP-Interface target.** The connection-oriented read that works against a
-plain device does not complete against an interface. Analysis, candidate root causes and the
-disambiguating experiments: [ANALYSIS-infoga-co.md](../findings/2026-09-infoga-co.md). No fix attempted -- it
-points into the shared `knx` stack.
+plain device does not complete against an interface. The lead is the single shared transport connection
+left half-open. No fix attempted -- it points into the shared `knx` stack.
 
 ## Settled -- do not re-investigate
 

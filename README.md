@@ -225,7 +225,6 @@ audience of every document.
 | [guide/](doc/guide/quickstart.md) | operating a device: quickstart, firmware update, console, unlocking, throughput, result codes, the web page, the desktop client |
 | [reference/](doc/reference/architecture.md) | building with it: architecture, integration, build flags, the protocol and its byte layout, the host shim, delta updates, the bottleneck, known limits, the KNX objects and PIDs a device exposes, the test scripts |
 | [concept/](doc/concept/access-control.md) | why it is so: the access-control rationale, the build-switch cut, where the desktop front ends are going |
-| [findings/](doc/findings/) | dated analyses of open problems — expected to disappear once they are closed |
 | [oknx/README.md](oknx/README.md) | building and installing the desktop client |
 
 `pwsh scripts/Test-DocLinks.ps1` checks every link in the set, including the ones that resolve on a

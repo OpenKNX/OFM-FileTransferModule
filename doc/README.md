@@ -56,7 +56,6 @@ guide is the shorter one.
 | Why is the access control built this way? | [access-control.md](concept/access-control.md) |
 | Why are the build switches cut the way they are? | [build-defines.md](concept/build-defines.md) |
 | Where are the desktop front-ends going? | [desktop-api.md](concept/desktop-api.md) |
-| Why does `info ga` fail against an IP-Interface? | [ANALYSIS-infoga-co.md](findings/2026-09-infoga-co.md) |
 
 ## The four sentences that explain everything
 

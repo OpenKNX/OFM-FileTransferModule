@@ -7394,7 +7394,7 @@ int main(int argc, char** argv)
 
     // `scan ... fast` and the parallel range scan are gone: measured 2026-10-02/03, N tunnels bought at
     // most ~2x while the result set moved between runs (8 of 68 addresses reproducible). What does pay is
-    // the identity read of the FOUND devices, which is what --workers drives. See doc/findings/.
+    // the identity read of the FOUND devices, which is what --workers drives.
     if (!pos.empty() && pos[0] == "scan" && std::find(pos.begin(), pos.end(), std::string("fast")) != pos.end())
     {
         ftc::I18n& L2 = g_i18n;
