@@ -46,6 +46,11 @@ using sock_t = int;
 // ---------------------------------------------------------------------------------------------------
 static constexpr uint16_t APCI_FUNC_PROP_CMD = 0x2C7;
 static constexpr uint16_t APCI_DEVDESC_READ = 0x300;
+static constexpr uint16_t APCI_INDADDR_WRITE = 0x0C0;
+static constexpr uint16_t APCI_INDADDR_READ = 0x100;
+static constexpr uint16_t APCI_GROUPVALUE_READ = 0x000;
+static constexpr uint16_t APCI_GROUPVALUE_WRITE = 0x080;
+static constexpr uint16_t APCI_RESTART = 0x380;
 static constexpr uint16_t APCI_PROPVALUE_READ = 0x3D5;
 static constexpr uint16_t APCI_PROPVALUE_WRITE = 0x3D7;
 static constexpr uint16_t APCI_MEMORY_READ = 0x200;
@@ -127,6 +132,39 @@ static uint8_t buildMemoryRead(uint8_t* out, uint8_t number, uint16_t memoryAddr
     out[1] = (uint8_t)((APCI_MEMORY_READ & 0xFF) | (number & 0x3F));
     out[2] = (uint8_t)(memoryAddress >> 8);
     out[3] = (uint8_t)(memoryAddress & 0xFF);
+    return 4;
+}
+
+/**
+ * @brief Build A_GroupValue_Read/Write (APCI 0x000 / 0x080).
+ *
+ * A value of six bits or less rides in the low bits of the second octet (APDU length 1); anything larger
+ * follows as its own octets (03_03_07 A_GroupValue). `len` 0 with `small` sends the compact form.
+ */
+static uint8_t buildGroupValue(uint8_t* out, bool write, uint8_t small, const uint8_t* data, uint8_t len)
+{
+    const uint16_t apci = write ? APCI_GROUPVALUE_WRITE : APCI_GROUPVALUE_READ;
+    out[0] = (uint8_t)((apci >> 8) & 0x03);
+    out[1] = (uint8_t)((apci & 0xFF) | (len == 0 ? (small & 0x3F) : 0));
+    for (uint8_t i = 0; i < len; i++) out[2 + i] = data[i];
+    return (uint8_t)(2 + len);
+}
+
+/**
+ * @brief Build A_Restart (APCI 0x380): [0x03][0x80 | restartType].
+ *
+ * Byte layout taken from the stack's own parser (knx application_layer.cpp, case Restart): the octet
+ * after the APCI carries the restart type in bits 5-0, its bits 4-1 are reserved and must be zero, and
+ * a master reset appends the erase code and the channel. A basic restart is answered by nothing; only a
+ * master reset sends a response.
+ */
+static uint8_t buildRestart(uint8_t* out, bool masterReset, uint8_t eraseCode, uint8_t channel)
+{
+    out[0] = (uint8_t)((APCI_RESTART >> 8) & 0x03);
+    out[1] = (uint8_t)((APCI_RESTART & 0xFF) | (masterReset ? 0x01 : 0x00));
+    if (!masterReset) return 2;
+    out[2] = eraseCode;
+    out[3] = channel;
     return 4;
 }
 
@@ -326,7 +364,7 @@ void putLocalHpai(uint8_t* p)
  * @param tpdu full TPDU starting at byte0.
  */
 uint16_t buildCemi(uint8_t* out, uint16_t sa, uint16_t da, const uint8_t* tpdu, uint8_t tpduLen,
-                   uint8_t priority, bool ackReq)
+                   uint8_t priority, bool ackReq, bool groupDest = false)
 {
     uint8_t len = (uint8_t)(tpduLen - 1); // NPDU octetCount = TPDU bytes after byte0
     uint8_t ctrl1 = 0;
@@ -335,7 +373,9 @@ uint16_t buildCemi(uint8_t* out, uint16_t sa, uint16_t da, const uint8_t* tpdu, 
     ctrl1 |= 0x10;                      // broadcast domain
     ctrl1 |= (uint8_t)((priority & 0x03) << 2);
     ctrl1 |= ackReq ? 0x02 : 0x00; // AckRequest
-    uint8_t ctrl2 = 0x60;          // individual dest, hopcount 6, EFF 0
+    // bit7 = destination address type: 0 individual, 1 group. Group is what a GroupValue service needs;
+    // everything else this tunnel sends is addressed to one device.
+    uint8_t ctrl2 = (uint8_t)((groupDest ? 0x80 : 0x00) | 0x60); // hopcount 6, EFF 0
 
     out[0] = MC_LDATA_REQ;
     out[1] = 0x00; // AddIL
@@ -498,6 +538,9 @@ struct DispatchCbs
     FtcMemCb mem;
     FtcAdcCb adc;
     FtcConCb con;   // L_Data.con of our own TX -> link-layer presence
+    GroupCb grp;    // group-addressed bus traffic (GroupValue services) -- not part of the FTC contract
+    RestartRespCb restart; // master-reset answer (a basic restart answers nothing)
+    BroadcastCb bcast;     // broadcast traffic (the individual-address procedure)
 };
 
 } // namespace
@@ -533,6 +576,21 @@ static void dispatchResponse(const DispatchCbs& cb, uint16_t sa, uint8_t tpduByt
             uint8_t* payload = &apduData[3];
             uint8_t len = (uint8_t)(apduLen - 3);
             if (cb.resp) cb.resp(sa, objIdx, pid, payload, len);
+            break;
+        }
+        // A_Restart_Response. The response BIT lives in the same octet as the APCI low bits, so the
+        // 10-bit opcode on the wire is 0x3A0/0x3A1, NOT the request's 0x380/0x381 - matching the request
+        // opcodes here made the arm unreachable and every master reset report "no answer". Derived from
+        // the stack's own encoder: application_layer.cpp restartResponse sets data[0] |= (1 << 5) | 1.
+        case APCI_RESTART | 0x20:
+        case APCI_RESTART | 0x21:
+        {
+            // Layout from the stack's own encoder (knx application_layer.cpp restartResponse): bit5 of
+            // data[0] marks the response, then the error code and a 16-bit process time in seconds.
+            if ((apduData[0] & 0x20) == 0) return; // a request we overheard, not an answer to us
+            if (apduLen < 4) return;               // errorCode + processTime(2) behind data[0]
+            if (cb.restart != nullptr)
+                cb.restart(sa, apduData[1], (uint16_t)((apduData[2] << 8) | apduData[3]));
             break;
         }
         case APCI_PROPVALUE_RESP: // §5.2
@@ -615,18 +673,50 @@ static void handleCemi(uint16_t selfPa, const DispatchCbs& cb, uint8_t* cemi, in
     if (mc != MC_LDATA_IND) return;
     g_rxActivity++; // a received bus indication (RX activity for the status bar)
 
+    // A group-addressed indication is bus traffic, not an answer to us: it carries no TPCI sequence and
+    // must not enter the connection-oriented machinery below. Ctrl2 bit7 is the destination address type.
+    if ((cemi[base + 1] & 0x80) != 0)
+    {
+        // Address type "group" also covers T_Data_Broadcast (destination 0) and T_Data_Tag_Group (LTE,
+        // TPCI 000001xx) - 03_03_04 Figure 3. Only plain T_Data_Group is a group value; the others would
+        // otherwise be shown as a group address they are not.
+        const uint16_t ga = (uint16_t)((cemi[base + 4] << 8) | cemi[base + 5]);
+        if (ga == 0 && cb.bcast != nullptr && tpduLen >= 2 && (tpdu[0] & 0xFC) == 0x00)
+        {
+            const uint16_t apci = (uint16_t)(((tpdu[0] & 0x03) << 8) | tpdu[1]);
+            cb.bcast(sa, apci, &tpdu[2], (uint8_t)(tpduLen - 2));
+            return;
+        }
+        if (cb.grp != nullptr && tpduLen >= 2 && ga != 0 && (tpdu[0] & 0xFC) == 0x00)
+        {
+            const uint16_t apci = (uint16_t)(((tpdu[0] & 0x03) << 8) | tpdu[1]);
+            cb.grp(sa, ga, apci, &tpdu[2], (uint8_t)(tpduLen - 2));
+        }
+        return;
+    }
+
     uint8_t tpci = tpdu[0];
 
     // CO control TPDUs (§6.1)
     if (tpci == TPCI_DISCONNECT)
     {
-        s.coConnected = false;
-        s.coAwaitingAck = false;
+        // Only the connection partner can close the connection. 03_03_04 5.4: a T_Disconnect whose source
+        // IS connection_address closes it (E02), one from any other address leaves the state untouched
+        // (E03, action A0). Unguarded, a late T_Disconnect from the PREVIOUS scanned address closed the
+        // session of the CURRENT one, which then ran into its timeout and was recorded absent.
+        if (s.coConnected && sa == s.coPa)
+        {
+            s.coConnected = false;
+            s.coAwaitingAck = false;
+        }
         return;
     }
     if ((tpci & 0xC3) == TPCI_ACK) // T_ACK: our numbered send was acknowledged
     {
-        if (s.coAwaitingAck)
+        // By the connection partner, not by whoever answers first. The scan reads presence off this flag,
+        // so a late T_ACK from the PREVIOUS address marked the NEXT one present -- 03_03_04 5.4 binds every
+        // connection-oriented event to connection_address, and lib/knx does the same (transport_layer.cpp).
+        if (s.coAwaitingAck && sa == s.coPa)
         {
             s.coSeqSend = (uint8_t)((s.coSeqSend + 1) & 0x0F);
             s.coAwaitingAck = false;
@@ -636,6 +726,11 @@ static void handleCemi(uint16_t selfPa, const DispatchCbs& cb, uint8_t* cemi, in
     }
     if ((tpci & 0xC0) == TPCI_DATA_CONN) // numbered T_Data_Connected: CO response data
     {
+        // From the connection partner only. A KNXnet/IP server copies every indication into every open
+        // tunnel, so a foreign device's numbered data used to be ACKed here and delivered as if it were
+        // our partner's answer -- and it advanced coSeqRecv, after which our own device's seq-0 answer
+        // was classified a duplicate and dropped. 03_03_04 5.4 binds E04/E05 to connection_address.
+        if (!s.coConnected || sa != s.coPa) return;
         uint8_t seq = (uint8_t)((tpci >> 2) & 0x0F);
         if (seq == s.coSeqRecv)
         {
@@ -836,7 +931,7 @@ void KnxIpTunnel::pump()
                 s.rxSeqValid = true;
                 int cemiOff = KNXIP_HEADER_LEN + 4;
                 int cemiLen = (int)total - cemiOff;
-                DispatchCbs cb{_responseCb, _ddCb, _propCb, _memCb, _adcCb, _conCb};
+                DispatchCbs cb{_responseCb, _ddCb, _propCb, _memCb, _adcCb, _conCb, _grpCb, _restartCb, _bcastCb};
                 if (cemiLen > 0 && cemiOff + cemiLen <= n) handleCemi(_assignedPA, cb, &buf[cemiOff], cemiLen);
                 break;
             }
@@ -1018,6 +1113,65 @@ bool KnxIpTunnel::sendMemoryRead(uint16_t pa, uint8_t number, uint16_t memoryAdd
     uint8_t apdu[4];
     uint8_t n = buildMemoryRead(apdu, number, memoryAddress);
     return txApdu(this, pa, apdu, n, false); // AckDontCare for the connectionless case (CO path forces its own)
+}
+
+/**
+ * @brief Send one broadcast APDU: destination 0x0000 with the GROUP address type (03_03_04 Figure 3,
+ *        T_Data_Broadcast). Used by the individual-address procedure, which has no addressee yet.
+ */
+bool KnxIpTunnel::sendBroadcast(const uint8_t* apdu, uint8_t len)
+{
+    if (!connected() || len > 16) return false;
+    uint8_t cemi[64];
+    uint16_t cl = buildCemi(cemi, assignedPA(), 0x0000, apdu, len, PRIO_SYSTEM, false, true);
+    return sendTunnel(cemi, cl);
+}
+
+/**
+ * @brief Broadcast A_IndividualAddress_Read - every device in programming mode answers with its address.
+ */
+bool KnxIpTunnel::sendIndividualAddressRead()
+{
+    const uint8_t apdu[2] = {(uint8_t)((APCI_INDADDR_READ >> 8) & 0x03), (uint8_t)(APCI_INDADDR_READ & 0xFF)};
+    return sendBroadcast(apdu, 2);
+}
+
+/**
+ * @brief Broadcast A_IndividualAddress_Write - the device in programming mode takes @p pa as its address.
+ */
+bool KnxIpTunnel::sendIndividualAddressWrite(uint16_t pa)
+{
+    const uint8_t apdu[4] = {(uint8_t)((APCI_INDADDR_WRITE >> 8) & 0x03), (uint8_t)(APCI_INDADDR_WRITE & 0xFF),
+                             (uint8_t)(pa >> 8), (uint8_t)(pa & 0xFF)};
+    return sendBroadcast(apdu, 4);
+}
+
+/**
+ * @brief Send A_GroupValue_Read/Write to the group address `ga`.
+ *
+ * Group telegrams are connectionless by definition, so this never routes through the CO session that
+ * txApdu() would re-stamp a device-addressed frame into.
+ */
+bool KnxIpTunnel::sendGroupValue(uint16_t ga, bool write, uint8_t small, const uint8_t* data, uint8_t len)
+{
+    if (!connected()) return false;
+    uint8_t apdu[16];
+    if (len > 14) return false;
+    uint8_t n = buildGroupValue(apdu, write, small, data, len);
+    uint8_t cemi[64];
+    uint16_t cl = buildCemi(cemi, assignedPA(), ga, apdu, n, txPriority(), false, true);
+    return sendTunnel(cemi, cl);
+}
+
+/**
+ * @brief Send an A_Restart to `pa`. A basic restart reboots the device; a master reset additionally
+ *        applies `eraseCode` (knx_types.h EraseCode) to `channel`.
+ */
+bool KnxIpTunnel::sendRestart(uint16_t pa, bool masterReset, uint8_t eraseCode, uint8_t channel)
+{
+    uint8_t apdu[4];
+    uint8_t n = buildRestart(apdu, masterReset, eraseCode, channel);
+    return txApdu(this, pa, apdu, n, false); // AckDontCare (see sendPropertyValueRead)
 }
 
 /**
