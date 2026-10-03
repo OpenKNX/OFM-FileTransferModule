@@ -6,12 +6,20 @@ stack.
 
 ## Files in scope (compiled verbatim by `oknx`)
 
+The shim exists for the four files below -- everything the rest of this document calls "the four files".
+`FirmwarePatch.cpp` is compiled too but needs no shim: it does its I/O through callbacks and includes
+nothing of the device facade.
+
 | File | Lines | Real path |
 |------|------:|-----------|
-| `FileTransferClient.h` | 618 | `OFM-FileTransferModule/src/FileTransferClient.h` |
-| `FileTransferClient.cpp` | 4987 | `OFM-FileTransferModule/src/FileTransferClient.cpp` |
+| `FileTransferClient.h` | 1133 | `OFM-FileTransferModule/src/FileTransferClient.h` |
+| `FileTransferClient.cpp` | 8454 | `OFM-FileTransferModule/src/FileTransferClient.cpp` |
 | `FileTransferClientConsole.h` | 34 | `OFM-FileTransferModule/src/FileTransferClientConsole.h` |
-| `FileTransferClientConsole.cpp` | 548 | `OFM-FileTransferModule/src/FileTransferClientConsole.cpp` |
+| `FileTransferClientConsole.cpp` | 733 | `OFM-FileTransferModule/src/FileTransferClientConsole.cpp` |
+
+`oknx` additionally compiles four files of the stack, which the shim does **not** cover and which are
+self-contained: `knx/src/knx/aes.c` and `dptconvert.cpp` + `dpt.cpp` + `knx_value.cpp` (the datapoint
+converter, so a decoded value cannot differ between device and tool). See `oknx/platformio.ini:33-46`.
 
 Path note: in this repo `lib/knx -> ../../knx` and `lib/OFM-FileTransferModule -> ../../OFM-FileTransferModule`
 (`ls -l lib/knx`). All `knx/...` citations below live under the resolved target
@@ -317,7 +325,7 @@ No `print()`/`println()` (the knx facade console) are used — verified zero hit
 Reproduced exactly from `FileTransferClient.h:27-52`:
 
 ```cpp
-// FileTransferClient.h:27-32
+// FileTransferClient.h:41-47
 struct FtcFileSource
 {
     int32_t (*open)(const char *path); // returns file size, or -1 on failure
@@ -325,15 +333,18 @@ struct FtcFileSource
     void (*close)();
 };
 
-// FileTransferClient.h:36-41
+// FileTransferClient.h:49-58
 struct FtcFileSink
 {
     bool (*open)(const char *path);                 // create/truncate; false on failure
     int (*write)(const uint8_t *buf, uint16_t len); // append; bytes written, or -1 on error
     void (*close)();
+    // Download resume: truncate to exactly keepBytes and position for append; keepBytes on success,
+    // <0 on failure. A provider that cannot resume leaves it nullptr -> resume is not offered.
+    int32_t (*resumeOpen)(const char *path, uint32_t keepBytes) = nullptr;
 };
 
-// FileTransferClient.h:45-52
+// FileTransferClient.h:62-69
 struct FtcBackend
 {
     const char *prefix; // "" = default (matched when no named prefix fits); "sd" / "efc" = named
@@ -344,24 +355,22 @@ struct FtcBackend
 };
 ```
 
-These are **project-owned** structs (no shim), but the `oknx` backends plug into them. Registration API:
-`void registerFileBackend(const char* prefix, const FtcFileSource& src, const FtcFileSink& sink,
-bool (*available)() = nullptr, uint64_t (*freeBytes)() = nullptr)` — decl `FileTransferClient.h:124-125`,
-def `FileTransferClient.cpp:44-54`, bounded to 4 slots (`_backends[4]`, `FileTransferClient.h:603`).
+These are **project-owned** structs (no shim). **There is no registration API** — an earlier version of
+this document described `registerFileBackend()` and a `_backends[4]` table; neither exists. Backends are
+resolved statically in `FileTransferClient::ftcResolveBackend` (`FileTransferClient.cpp:134`), whose own
+comment says so: *"Resolve a local path's prefix to a backend WITHOUT any registry"*.
 
-**Built-in backend the files self-register:** the default `""` (LittleFS) in `setup()`
-(`FileTransferClient.cpp:131-136`, backed by `littleFsOpen/ftcSharedRead/ftcSharedClose` +
-`littleFsSinkOpen/ftcSharedSinkWrite/ftcSharedSinkClose` + `littleFsAvailable/littleFsFree`,
-`:105-127`). For the host this means: with the `LittleFS.h` shim of §1.3, the default backend "just works"
-against the host filesystem — no extra `oknx` backend is strictly required to run.
+**The three backends are compiled in, not registered:** `""` = LittleFS, always present
+(`littleFsOpen/ftcSharedRead/ftcSharedClose` + `littleFsSinkOpen/ftcSharedSinkWrite/ftcSharedSinkClose/
+littleFsResumeOpen` + `littleFsAvailable/littleFsFree`); `sd` under `OPENKNX_SDCARD` and `efc` under
+`OPENKNX_EXTFLASH`, each adapting that provider's `IFileStore` through captureless lambdas. For the
+host this means: with the `LittleFS.h` shim of §1.3 the default backend works against the host filesystem,
+and `sd`/`efc` are simply absent — nothing has to be registered to run.
 
-**Prefixes the resolver recognizes** (`ftcResolveBackend`, `FileTransferClient.cpp:57-81`): a named prefix
-matches when `path` starts with `prefix` **and** the next char is `'/'` (e.g. `"sd/x"` → backend `"sd"`,
-stripped `"/x"`); `""` is the default fallback (unstripped). Named backends `sd/` (SD) and `efc/`
-(ext-flash) self-register **from other modules** (`FileTransferClient.h:44-52,122-123` comments) — those
-modules are **not** in the four-file scope, so on host only `/` (LittleFS/default) exists unless
-`oknx` registers its own `sd`/`efc`. The `test` source is not a backend prefix; it is the `_ftcTestSource`
-generated RAM pattern path (`FileTransferClient.h:321`), selected internally by perf, not via prefix.
+**Prefixes the resolver recognizes:** a named prefix matches when `path` starts with `prefix` **and** the
+next char is `'/'` (e.g. `"sd/x"` → backend `"sd"`, stripped `"/x"`); `""` is the fallback, unstripped, and
+also catches an unknown prefix. The `test` source is not a backend prefix; it is the `_ftcTestSource`
+generated RAM pattern path, selected internally by perf.
 
 `extern FileTransferClient openknxFileTransferClient;` (`FileTransferClient.h:617`) is **defined inside the
 compiled set** at `FileTransferClient.cpp:4986` — `oknx` does **not** need to provide it.

@@ -112,8 +112,11 @@ have is a bus connection — that is what the tunnel is for.
 
 `FileTransferClient.{h,cpp}` + `FileTransferClientConsole.{h,cpp}` from `../src/` are compiled
 **byte-identical**. A host-only shim replaces the OpenKNX/knx/Arduino stack with just the thin slice those
-four files touch, and the `knx.bau().ftc*` calls forward to a KNXnet/IP tunnel. The wire format is the same
-one the firmware speaks — see [../doc/reference/protocol.md](../doc/reference/protocol.md). **No `lib/knx` changes.**
+four files touch, and the `knx.bau().ftc*` calls forward to a KNXnet/IP tunnel. `../src/FirmwarePatch.cpp`
+is compiled too and needs no shim, and four self-contained files of the stack come along — `aes.c` and the
+datapoint converter `dptconvert.cpp` + `dpt.cpp` + `knx_value.cpp`, so a decoded value cannot differ
+between device and tool. The wire format is the same one the firmware speaks — see
+[../doc/reference/protocol.md](../doc/reference/protocol.md). **No `lib/knx` is modified.**
 
 ```
   ../src/FileTransferClient.cpp  (UNCHANGED state machine)
