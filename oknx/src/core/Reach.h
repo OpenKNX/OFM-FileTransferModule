@@ -41,6 +41,7 @@ namespace detail
 // One bus round trip is 10-45 ms on a healthy line; this covers a busy one plus a coupler hop.
 constexpr uint32_t REACH_TMO_MS = 1200;
 constexpr int REACH_TRIES = 2; // a single lost frame on a loaded bus must not condemn the device
+constexpr uint32_t REACH_CO_LINK_MS = 800; // how long to wait for the T_Connect of the last-resort try
 
 inline volatile bool g_reachSeen = false;
 inline uint16_t g_reachPa = 0;
@@ -79,6 +80,38 @@ inline bool deviceAnswers(KnxIpTunnel& tunnel, uint16_t pa, const ReachDeps& d, 
             d.pump();
         }
         alive = detail::g_reachSeen;
+    }
+
+    // Last resort: the SAME read inside a T_Connect. The connectionless DeviceDescriptor is not required
+    // of System 1/2, BCU1/2 or BIM M112 (06 Profiles 4.3 p.42), and ETS opens a T_Connect first against a
+    // Siemens 0025. Without this the probe declares those devices dead and the command never starts.
+    if (!alive && !(d.aborted && d.aborted()) && tunnel.scanConnect(pa))
+    {
+        const uint64_t linkUntil = d.nowMs() + detail::REACH_CO_LINK_MS;
+        while (!tunnel.scanConnected() && d.nowMs() < linkUntil)
+        {
+            if (d.aborted && d.aborted()) break;
+            d.pump();
+        }
+        if (tunnel.scanConnected())
+        {
+            ++triesUsed;
+            detail::g_reachSeen = false;
+            detail::g_reachPa = pa;
+            if (tunnel.sendDeviceDescriptorRead(pa))
+            {
+                const uint64_t until = d.nowMs() + detail::REACH_TMO_MS;
+                while (!detail::g_reachSeen && d.nowMs() < until)
+                {
+                    if (d.aborted && d.aborted()) break;
+                    d.pump();
+                }
+                alive = detail::g_reachSeen;
+            }
+        }
+        // Always closed again: the probe must not leave a session open, or txApdu would silently re-stamp
+        // every following frame - including a file transfer - as connection-oriented.
+        tunnel.scanDisconnect();
     }
 
     tunnel.setDeviceDescriptorCallback(prev);
