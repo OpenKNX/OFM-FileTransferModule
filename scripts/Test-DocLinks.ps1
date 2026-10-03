@@ -44,12 +44,12 @@ param(
     [switch] $Quiet
 )
 
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 
-Write-Host ''
-Write-Host '  Open ■' -ForegroundColor Green
-Write-Host '  ┬────┴  Test-DocLinks' -ForegroundColor Green
-Write-Host '  ■ KNX   2026 OpenKNX - Erkan Çolak' -ForegroundColor DarkGray
-Write-Host ''
+
+Write-KnxLogo -Title 'Test-DocLinks'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 

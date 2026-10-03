@@ -49,19 +49,11 @@ if ($null -eq (Get-Variable -Name 'IsMacOS' -ErrorAction SilentlyContinue)) {
     $IsMacOS = $false; $IsLinux = $false; $IsWindows = $true
 }
 
-function OpenKNX_ShowLogo($AddCustomText = $null) {
-    Write-Host ""
-    Write-Host "Open " -NoNewline
-    Write-Host "$( [char]::ConvertFromUtf32(0x25A0) )" -ForegroundColor Green
-    $u = "$( [char]::ConvertFromUtf32(0x252C) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2534) ) "
-    if ($AddCustomText) { Write-Host "$u $AddCustomText" -ForegroundColor Green }
-    else                { Write-Host $u                  -ForegroundColor Green }
-    Write-Host "$( [char]::ConvertFromUtf32(0x25A0) )" -NoNewline -ForegroundColor Green
-    Write-Host " KNX"
-    Write-Host ""
-}
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 
-OpenKNX_ShowLogo "Compress-Firmware"
+Write-KnxLogo -Title "Compress-Firmware"
 
 if (-not (Test-Path -PathType Leaf -LiteralPath $InputPath)) {
     Write-Host "Error: input file not found: $InputPath" -ForegroundColor Red

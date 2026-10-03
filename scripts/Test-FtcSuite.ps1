@@ -70,17 +70,9 @@ param(
     [switch] $FullUpload # run the upload to COMPLETION ("verified OK") instead of the quick start-smoke
 )
 
-function OpenKNX_ShowLogo($AddCustomText = $null) {
-    Write-Host ""
-    Write-Host "Open " -NoNewline
-    Write-Host "$( [char]::ConvertFromUtf32(0x25A0) )" -ForegroundColor Green
-    $u = "$( [char]::ConvertFromUtf32(0x252C) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2534) ) "
-    if ($AddCustomText) { Write-Host "$u $AddCustomText" -ForegroundColor Green }
-    else                { Write-Host $u                  -ForegroundColor Green }
-    Write-Host "$( [char]::ConvertFromUtf32(0x25A0) )" -NoNewline -ForegroundColor Green
-    Write-Host " KNX"
-    Write-Host ""
-}
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 
 # Strip ANSI CSI + the console's "[2K$ cmd" line-redraw echo; keep only the timestamped log lines.
 function CleanConsole([string] $raw) {
@@ -119,7 +111,7 @@ function Invoke-Console {
 
 # ---- help / arg check ------------------------------------------------------
 if ($Help) {
-    OpenKNX_ShowLogo "FTC Test Suite"
+    Write-KnxLogo -Title "FTC Test Suite"
     @'
   Drive an OpenKNX device's USB console, run the ftc command battery against a
   target device, and write a PASS/FAIL Markdown report.
@@ -202,7 +194,7 @@ if (-not $SkipUpload) {
 }
 
 # ---- open the console (NO reset: DTR/RTS stay deasserted) -------------------
-OpenKNX_ShowLogo "FTC Test Suite"
+Write-KnxLogo -Title "FTC Test Suite"
 Write-Host "  Console : $Port @ $Baud" -ForegroundColor Cyan
 Write-Host "  Target  : $Target        Upload src: $Fw" -ForegroundColor Cyan
 Write-Host ""

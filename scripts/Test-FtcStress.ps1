@@ -59,12 +59,9 @@ param(
     [int] $Baud = 115200
 )
 
-function OpenKNX_ShowLogo($t = $null) {
-    Write-Host ""; Write-Host "Open " -NoNewline; Write-Host "$([char]::ConvertFromUtf32(0x25A0))" -ForegroundColor Green
-    $u = "$([char]::ConvertFromUtf32(0x252C))$([char]::ConvertFromUtf32(0x2500))$([char]::ConvertFromUtf32(0x2500))$([char]::ConvertFromUtf32(0x2500))$([char]::ConvertFromUtf32(0x2500))$([char]::ConvertFromUtf32(0x2534)) "
-    if ($t) { Write-Host "$u $t" -ForegroundColor Green } else { Write-Host $u -ForegroundColor Green }
-    Write-Host "$([char]::ConvertFromUtf32(0x25A0))" -NoNewline -ForegroundColor Green; Write-Host " KNX"; Write-Host ""
-}
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 function CleanConsole([string] $raw) {
     $t = ([regex]::Replace($raw, "`e\[[0-9;]*[A-Za-z]", "")) -replace "`r", ""
     (($t -split "`n") | ForEach-Object { $m = [regex]::Match($_, '(\d{2}:\d{2}:\d{2}:\s.*)$'); if ($m.Success) { $m.Groups[1].Value } }) -join "`n"
@@ -110,7 +107,7 @@ $fileBound = (-not $NoFile) -or $SeedFromTarget        # run the real upload + f
 $srcFw = if ($SeedFromTarget) { $remote } else { $Fw } # source for the real upload (LittleFS copy when seeding)
 if (-not $ReportPath) { $ReportPath = Join-Path $PSScriptRoot ("ftc-stressreport-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".md") }
 
-OpenKNX_ShowLogo "FTC STRESS Suite"
+Write-KnxLogo -Title "FTC STRESS Suite"
 $mode = if ($SeedFromTarget) { "NoSD+seed-from-target" } elseif ($NoFile) { "NoFile (perf-only)" } else { "full (SD source)" }
 Write-Host "  Console $Port (Dtr=$([bool]$Dtr))  Target $Target  mode $mode  src $srcFw  remote $remote  fwupdate=$DoFwUpdate format=$([bool]$DoFormat)" -ForegroundColor Cyan
 Write-Host ""

@@ -44,13 +44,9 @@ param(
     [int] $Perf = 0    # >0 = use a `perf <Perf>kb` RAM transfer instead of a file upload (no SD source needed; same resume path)
 )
 
-function OpenKNX_ShowLogo($AddCustomText = $null) {
-    Write-Host ""
-    Write-Host "Open " -NoNewline; Write-Host "$( [char]::ConvertFromUtf32(0x25A0) )" -ForegroundColor Green
-    $u = "$( [char]::ConvertFromUtf32(0x252C) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2500) )$( [char]::ConvertFromUtf32(0x2534) ) "
-    if ($AddCustomText) { Write-Host "$u $AddCustomText" -ForegroundColor Green } else { Write-Host $u -ForegroundColor Green }
-    Write-Host "$( [char]::ConvertFromUtf32(0x25A0) )" -NoNewline -ForegroundColor Green; Write-Host " KNX"; Write-Host ""
-}
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 function CleanConsole([string] $raw) {
     $t = ([regex]::Replace($raw, "`e\[[0-9;]*[A-Za-z]", "")) -replace "`r", ""
     (($t -split "`n") | ForEach-Object { $m = [regex]::Match($_, '(\d{2}:\d{2}:\d{2}:\s.*)$'); if ($m.Success) { $m.Groups[1].Value } }) -join "`n"
@@ -64,7 +60,7 @@ if ($Perf -gt 0) {
     $xfer = "ftc $Target send $Fw fast verbose"        # real file upload -> the send writes $remote
 }
 
-OpenKNX_ShowLogo "FTC Resume Test (bcu rst mid-upload)"
+Write-KnxLogo -Title "FTC Resume Test (bcu rst mid-upload)"
 Write-Host "  Console : $Port @ $Baud   (Dtr=$([bool]$Dtr))" -ForegroundColor Cyan
 Write-Host "  Target  : $Target   src $Fw   remote $remote   inject bcu rst @ ${InjectSec}s" -ForegroundColor Cyan
 Write-Host ""

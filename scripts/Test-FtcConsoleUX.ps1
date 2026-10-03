@@ -63,13 +63,9 @@ param(
     [switch] $Help
 )
 
-function OpenKNX_ShowLogo {
-    Write-Host ""
-    Write-Host "Open " -NoNewline; Write-Host "$([char]0x25A0)" -ForegroundColor Green
-    Write-Host "$([char]0x252C)$([char]0x2500)$([char]0x2500)$([char]0x2500)$([char]0x2534)  Test-FtcConsoleUX"
-    Write-Host "$([char]0x25A0) KNX   OpenKNX - Erkan " -NoNewline; Write-Host ([char]0x00C7 + "olak")
-    Write-Host ""
-}
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 
 # Strip ANSI + prompt-redraw noise; split CR so each logical line stands alone.
 function CleanConsole([string] $raw) {
@@ -108,14 +104,14 @@ function Set-TargetStage {
 }
 
 if ($Help -or -not $ClientPort -or -not $TargetPort) {
-    OpenKNX_ShowLogo
+    Write-KnxLogo
     Write-Host "  Usage: ./Test-FtcConsoleUX.ps1 -ClientPort <port> -TargetPort <port> [-TargetPa 5.0.11]"
     Write-Host "  RP client (native CDC): add -ClientDtr.  ESP/CH340 target: omit -TargetDtr."
     exit 0
 }
 if (-not $ReportPath) { $ReportPath = Join-Path $PSScriptRoot ("ftc-consoleux-{0}.md" -f (Get-Date -Format "yyyyMMdd-HHmmss")) }
 
-OpenKNX_ShowLogo
+Write-KnxLogo
 Write-Host "  Client $ClientPort  ->  Target $TargetPa on $TargetPort   (pw '$TestPw', window ${Window}s)"
 Write-Host ""
 

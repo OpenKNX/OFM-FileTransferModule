@@ -52,12 +52,12 @@ param(
     [string[]] $Ignore = @('Arduino.h', 'Build-knxprods.ps1', 'Prepare-Firmware.ps1')
 )
 
+# The logo is a dot-sourced script, so it is sourced at SCRIPT scope: a function defined
+# inside a function body does not escape that scope.
+. (Join-Path $PSScriptRoot 'lib/KnxLogo.ps1')
 
-Write-Host ''
-Write-Host '  Open ■' -ForegroundColor Green
-Write-Host '  ┬────┴  Test-DocCurrency' -ForegroundColor Green
-Write-Host '  ■ KNX   2026 OpenKNX - Erkan Çolak' -ForegroundColor DarkGray
-Write-Host ''
+
+Write-KnxLogo -Title 'Test-DocCurrency'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
