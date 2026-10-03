@@ -99,12 +99,30 @@ struct MonFrame
 };
 
 /**
+ * @brief The L2 acknowledge as a stable protocol token: ACK · NAK · BUSY · none.
+ * @details Four bus events, four words. They were rendered as ACK/NAK for a while, which made "nobody
+ *          acknowledged this telegram" and "a device answered BUSY" read as "a device answered NAK".
+ */
+static inline const char* knxAckToken(uint8_t ackKind)
+{
+    return ackKind == 1 ? "ACK" : ackKind == 2 ? "NAK"
+                              : ackKind == 3   ? "BUSY"
+                                               : "none";
+}
+
+/**
  * @brief Live group / bus monitor over a self-owned KNXnet/IP tunnel.
  * @details Construct over the shared CLI refs, then run(Mode). Header-only like the rest of cli/.
  */
 class Monitor
 {
   public:
+    /// @brief Decode a group value and name its address, both from the imported ETS table. Set by the
+    ///        CLI; without them the monitor shows the raw octets exactly as before.
+    using GaDecode = std::function<std::string(uint16_t ga, const uint8_t* data, uint8_t len, uint8_t small)>;
+    using GaName = std::function<std::string(uint16_t ga)>;
+    void setGaLookup(GaDecode d, GaName n) { _gaDecode = std::move(d); _gaName = std::move(n); }
+
     /**
      * @brief Which monitor to run: Group = decoded L_Data.ind group telegrams · Bus = raw L_Busmon.ind LPDUs.
      */
@@ -127,6 +145,7 @@ class Monitor
     {
         _quiet = quiet;
         _verbose = verbose;
+        _ownRun = true; // this object drives its own loop -> the silence watchdog may re-dial
         std::string err;
         if (!open(mode, err))
         {
@@ -294,7 +313,14 @@ class Monitor
     bool _rxSeqValid = false;
     uint64_t _lastKeepalive = 0;
     uint64_t _lastAlive = 0; // last proof-of-life FROM the server (any datagram); stale -> tunnel dead -> reconnect
+    // Proof that the tunnel still carries BUS traffic, which _lastAlive does not prove: the keep-alive
+    // answer refreshes _lastAlive every 30 s, so an interface that stops forwarding indications while it
+    // still answers CONNECTIONSTATE looks perfectly healthy and the monitor goes silent for good
+    // (observed 2026-10-03: a group monitor stopped after 36378 telegrams and only a restart helped).
+    uint64_t _lastIndication = 0;
+    static constexpr uint64_t SILENT_MS = 600000; // 10 min without one indication -> say so and re-dial
     bool _quiet = false, _verbose = false;
+    bool _ownRun = false; ///< set by run(); false when another loop (Compare) drives tick()
     int _frames = 0;
 
     // Cooperative (non-blocking) connect state: sendConnect() arms these, pollConnect() drains without blocking.
@@ -310,6 +336,9 @@ class Monitor
     bool _capture = false;
     bool _capWarned = false;
     bool _paused = false;
+    std::vector<uint16_t> _gaFilter; // group addresses to show exclusively; empty = no filter
+    GaDecode _gaDecode;
+    GaName _gaName;
     std::vector<MonFrame> _cap;
 
     // Deferred busmon telegram (for the ETS ACK colour): the L2 ACK is a SEPARATE single-octet frame that
@@ -446,7 +475,7 @@ class Monitor
             _channelId = buf[6];
             // CRD at header(6)+ch(1)+status(1)+HPAI(8) = 16: [len][type][iaHi][iaLo]
             if (n >= 20 && buf[17] == 0x04) _assignedPA = (uint16_t)((buf[18] << 8) | buf[19]);
-            _lastKeepalive = _lastAlive = nowMs();
+            _lastKeepalive = _lastAlive = _lastIndication = nowMs();
             _rxSeqValid = false; // fresh tunnel: no prior RX seq to dedup against
             _pend.active = false;
             _connecting = false;
@@ -509,7 +538,7 @@ class Monitor
                 if (st == ST_TUNNEL_REQ)
                 {
                     if (n < 10 || buf[6] != 0x04 || buf[7] != _channelId) continue;
-                    _lastAlive = nowMs(); // tunnel traffic = proof of life
+                    _lastAlive = _lastIndication = nowMs(); // tunnel traffic = proof of life AND of bus flow
                     const uint8_t seq = buf[8];
                     sendTunnelAck(seq);                         // ALWAYS ack (even a duplicate) or we get dropped
                     if (_rxSeqValid && seq == _rxSeq) continue; // duplicate -> ack only
@@ -544,6 +573,20 @@ class Monitor
         }
         // Liveness: silent for 2+ keep-alive rounds -> the tunnel died without a DISCONNECT -> signal dead.
         if ((nowMs() - _lastAlive) >= TUNNEL_DEAD_MS) return false;
+        // Second watchdog: the tunnel answers but carries no bus traffic. Group monitor only (a busmon
+        // holds the interface's exclusive slot, 03_08_04 2.2.4) and only when this object drives its own
+        // loop, because `gm compare` would record the re-dial as a tunnel loss on the side under test.
+        if (_ownRun && mode != Mode::Bus && (nowMs() - _lastIndication) >= SILENT_MS)
+        {
+            if (!_quiet)
+                _p.status(Tpl::Stat::Warn,
+                          _i.tr("no telegram for 10 minutes — reconnecting",
+                                "seit 10 Minuten kein Telegramm — verbinde neu"),
+                          {_i.tr("the tunnel still answers; either the bus is quiet or the interface stopped forwarding",
+                                 "der Tunnel antwortet noch; entweder ist der Bus ruhig oder das Interface liefert nicht mehr")});
+            _lastIndication = nowMs(); // re-dial once per window, not once per pass
+            return false;              // -> run() reconnects
+        }
         return true;
     }
 
@@ -619,6 +662,7 @@ class Monitor
      */
     bool pushFrame(const MonFrame& f)
     {
+
         if (_sink)
         {
             _sink(f);
@@ -717,6 +761,8 @@ class Monitor
      */
     void emitP2P(uint16_t src, uint16_t dst, const std::string& dec, const uint8_t* tpdu = nullptr, int tpduLen = 0)
     {
+        // A point-to-point telegram is never "this group address", so watching one address hides it.
+        if (filteredOut(false, dst)) return;
         if (_sink || _capture)
         {
             MonFrame f;
@@ -758,6 +804,7 @@ class Monitor
     void emitGroup(char s, uint16_t src, uint16_t dst, const std::string& val, const std::string& rawApdu,
                    const uint8_t* tpdu = nullptr, int tpduLen = 0)
     {
+        if (filteredOut(true, dst)) return; // not the watched group address
         if (_sink || _capture)
         {
             MonFrame f;
@@ -783,11 +830,40 @@ class Monitor
             return;
         }
         Theme& c = _c;
-        std::string value = val.empty() ? c.dim("—") : c.bold(val);
+        // The datapoint type is on neither the bus nor the device, so a decoded value appears only when
+        // the imported table knows this address. Without it the raw octets stay, never a guessed meaning.
+        std::string shown = val;
+        if (_gaDecode && tpduLen >= 2)
+        {
+            const uint8_t smallV = (uint8_t)(tpdu[1] & 0x3F);
+            const uint8_t plen = (uint8_t)(tpduLen > 2 ? tpduLen - 2 : 0);
+            const std::string dec = _gaDecode(dst, tpdu + 2, plen, smallV);
+            if (!dec.empty()) shown = dec;
+        }
+        std::string value = shown.empty() ? c.dim("—") : c.bold(shown);
         if (_verbose && !rawApdu.empty()) value += c.dim("   [" + rawApdu + "]");
+        // Address and name are two columns: GA_W fits the widest address (31/7/255), and the name column
+        // follows the terminal because ETS names reach 38 characters. A long name is cut, not wrapped.
+        constexpr size_t GA_W = 8;
+        const int termw = Tpl::cols();
+        const size_t NAME_W = termw >= 140 ? 30u : (termw >= 112 ? 22u : 14u);
+        std::string dest = ga;
+        if (_gaName)
+        {
+            while (dest.size() < GA_W) dest += ' ';
+            std::string nm = _gaName(dst);
+            if (!nm.empty())
+            {
+                size_t glyphs = 0, cut = nm.size();
+                for (size_t i = 0; i < nm.size(); i++)
+                    if (((unsigned char)nm[i] & 0xC0) != 0x80 && ++glyphs > NAME_W) { cut = i; break; }
+                if (cut < nm.size()) nm = nm.substr(0, cut) + "…";
+                dest += " " + nm;
+            }
+        }
         _p.tableRow({c.dim(std::to_string(_frames + 1)), c.txt(timeStr()), c.txt(Tpl::pa(src)),
-                     c.cyan(ga), _p.svcTag(s), value},
-                    {5, 13, 8, 9, 9, 0});
+                     c.cyan(dest), _p.svcTag(s), value},
+                    {5, 13, 8, _gaName ? (int)(GA_W + 1 + NAME_W + 2) : 9, 9, 0});
         std::fflush(stdout); // live: don't let a redirected sink block-buffer the monitor lines
     }
 
@@ -1245,6 +1321,7 @@ class Monitor
     {
         if (!_pend.active) return;
         _pend.active = false;
+        if (filteredOut(_pend.group, _pend.dst)) return; // not the watched group address
         const bool acked = (ackKind == 1); // ETS colour rule: only a real ACK (0xCC) is "acknowledged"
         if (_sink || _capture)
         {
@@ -1273,14 +1350,15 @@ class Monitor
         if (_paused) return;
         if (_quiet)
         {
-            std::printf("%s\t%s\t%s\n", _pend.raw.c_str(), stripAnsi(_pend.dec).c_str(), acked ? "ACK" : "NAK");
+            std::printf("%s\t%s\t%s\n", _pend.raw.c_str(), stripAnsi(_pend.dec).c_str(), knxAckToken(ackKind));
             std::fflush(stdout);
             return;
         }
         Theme& c = _c;
         // ETS: acknowledged -> normal (grey/white) · NOT acknowledged -> green (both the line and its tag hint).
         std::string dec = acked ? _pend.dec : c.green(stripAnsi(_pend.dec));
-        std::string ackTag = acked ? c.dim("ACK") : c.green(_t.glyph("— NAK", "- NAK"));
+        std::string ackTag = acked ? c.dim("ACK")
+                                   : c.green(_t.glyph("— ", "- ") + std::string(knxAckToken(ackKind)));
         std::printf("  %s %s   %s   %s\n", _pend.tag.c_str(), c.dim(_pend.time).c_str(), dec.c_str(), ackTag.c_str());
         _p.wrap(_pend.raw, Tpl::cols() - 4, 6); // FULL bytes, hanging indent, resize-safe (no truncation)
         std::fflush(stdout);
@@ -1435,6 +1513,21 @@ class Monitor
     /**
      * @brief Set the target before run(): the interface IP + control port.
      */
+    /// @brief Drop everything that is not this group address. A point-to-point telegram is not "this
+    ///        address" either, so it goes too - otherwise watching one address still shows the line.
+    bool filteredOut(bool group, uint16_t dst) const
+    {
+        if (_gaFilter.empty()) return false;
+        if (!group) return true; // a point-to-point telegram is none of the watched addresses
+        for (uint16_t g : _gaFilter)
+            if (g == dst) return false;
+        return true;
+    }
+
+    /// @brief Show only these group addresses; an empty list shows everything.
+    void setGroupFilter(std::vector<uint16_t> gas) { _gaFilter = std::move(gas); }
+    size_t groupFilterCount() const { return _gaFilter.size(); }
+
     void target(const std::string& ip, uint16_t port)
     {
         _ip = ip;
@@ -1461,7 +1554,7 @@ class Monitor
     /** @brief Open the tunnel (mode's KNX layer). Public wrapper over the setup path. */
     bool openTunnel(Mode mode, std::string& err) { return open(mode, err); }
     /** @brief Graceful DISCONNECT + socket close. Idempotent. */
-    void closeTunnel() { close(); }
+    void closeTunnel() { _ownRun = false; close(); } // a reused instance must not inherit the watchdog
     /** @brief One bounded non-blocking pass (drain + decode + keep-alive). false = tunnel died. */
     bool tick(Mode mode) { return pump(mode); }
     /** @brief Emit any still-pending (un-acked) busmon telegram (call at teardown). */
@@ -1517,7 +1610,7 @@ class Monitor
         s += " destination=\"" + dstStr + "\"";
         s += " service=\"" + xmlEsc(f.body) + "\"";
         s += " raw=\"" + xmlEsc(f.raw) + "\"";
-        if (f.hasAck) s += " ack=\"" + std::string(f.acked ? "ACK" : "NAK") + "\"";
+        if (f.hasAck) s += " ack=\"" + std::string(knxAckToken(f.ackKind)) + "\"";
         s += extra;
         s += "/>";
         return s;

@@ -1011,12 +1011,7 @@ class Compare
     }
 
     /** @brief The L2 acknowledge kind as a stable protocol token (verbatim in both languages). */
-    static const char* ackStr(uint8_t kind)
-    {
-        return kind == 1 ? "ACK" : kind == 2 ? "NAK"
-                               : kind == 3   ? "BUSY"
-                                             : "none";
-    }
+    static const char* ackStr(uint8_t kind) { return knxAckToken(kind); }
 
     /** @brief The 0x03 F/B/P integrity for an XML attribute: `F0B0P0` or `notReported`. */
     static std::string statAttr(const MonFrame& f)
