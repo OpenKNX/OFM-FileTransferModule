@@ -63,10 +63,24 @@ and interpreter drifting apart in seconds, where hardware would take an hour ([D
 Image preparation itself lives in OGM-Common, because it is not FTC-specific:
 
 ```powershell
-pwsh Prepare-Firmware.ps1        # menu: full image, gzip or delta, with a file browser
+pwsh Prepare-Firmware-Generic.ps1        # menu: full image, gzip or delta, with a file browser
 ```
 
 See [FIRMWARE-UPDATE.md](../guide/firmware-update.md).
+
+## Keeping the documents honest
+
+| Script | What it does |
+|---|---|
+| `Test-DocLinks.ps1` | every relative link in every `.md` resolves, and matches the file name's case |
+| `Test-DocCurrency.ps1` | every file name, switch and identifier a document names still exists in the sources |
+
+`Test-DocCurrency.ps1` needs the neighbouring modules as extra roots, or it reports every identifier that
+lives in one of them: `pwsh scripts/Test-DocCurrency.ps1 -Extra ../knx,../TPUart,../OGM-Common,../OFM-Network`.
+Without `-Extra` it exits 1 on a healthy tree, by design.
+
+`scripts/release/Post.ps1` is a release hook, not a user script: it places the built `oknx` binaries into
+a product release under `Tools/oknx/<OS>/<arch>/`.
 
 ## Building oknx
 

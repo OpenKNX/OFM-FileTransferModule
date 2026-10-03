@@ -97,13 +97,13 @@ writes. `--check` runs the probes without transferring, `--force` skips the ques
 
 ## Preparing an image
 
-`Prepare-Firmware.ps1` (OGM-Common) offers the three kinds from a menu, with a file browser:
+`Prepare-Firmware-Generic.ps1` (OGM-Common) offers the three kinds from a menu, with a file browser:
 
 ```
-pwsh Prepare-Firmware.ps1              menu
-pwsh Prepare-Firmware.ps1 -Gzip        pack a full image
-pwsh Prepare-Firmware.ps1 -Delta       build a difference against an older firmware
-pwsh Prepare-Firmware.ps1 -All -NoMenu unattended
+pwsh Prepare-Firmware-Generic.ps1              menu
+pwsh Prepare-Firmware-Generic.ps1 -Gzip        pack a full image
+pwsh Prepare-Firmware-Generic.ps1 -Delta       build a difference against an older firmware
+pwsh Prepare-Firmware-Generic.ps1 -All -NoMenu unattended
 ```
 
 `oknx gzip <file>` does the packing without PowerShell.

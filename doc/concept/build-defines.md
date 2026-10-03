@@ -81,7 +81,7 @@ them. The guard is not convenience, it is the only place where this error shows 
 
 **`FirmwarePatch.cpp` did not include the config header** and still checked `OPENKNX_FTC_DELTA_UPDATE` — with
 profiles in the header the file compiled to nothing, the host aborted with missing `FirmwarePatch::Job` symbols.
-All four module `.cpp` files now include it first, as the header demands at the top.
+All five module `.cpp` files now include it first, as the header demands at the top.
 
 **`DOWNLOAD` violated R5.** It also switched off `FileTransferClient*.cpp`, `FASTUPLOAD` and `DIROPS`
 did not. A management device that did not offer download itself could therefore not fetch anything from

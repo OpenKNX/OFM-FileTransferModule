@@ -86,7 +86,7 @@ The short version. The long one, including what to do when it fails: [FIRMWARE-U
 
 ```bash
 # 1. prepare the image (optional but worth it)
-pwsh Prepare-Firmware.ps1              # offers full image, gzip or delta
+pwsh Prepare-Firmware-Generic.ps1              # offers full image, gzip or delta
 
 # 2. transfer it
 oknx --ip <interface> <pa> send firmware.bin fast

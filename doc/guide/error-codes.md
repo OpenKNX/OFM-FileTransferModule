@@ -77,7 +77,10 @@ These are answers, not failures. The same byte means different things after diff
 | `Exists` (1) | `0x00` + `0x00/0x01` | always succeeds; the **second** byte carries the answer |
 | `DeltaProbe` (106) | `0x00` | the base image matches — the patch can be applied |
 | | `0x02` | still reading the base image; ask again |
+| | `0x03` + bytes | a rebuild is running; the four bytes are how much it has produced |
+| | `0x05` + err | the last apply failed; the byte is the `FirmwarePatch::Error` |
 | | `0x42` | the base image is a different one |
+| | `0x4B` | the request length is not what the probe expects |
 
 ## Codes that no longer exist
 

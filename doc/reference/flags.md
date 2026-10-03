@@ -10,9 +10,13 @@
 **Set means on, unset means off.** No values, no `=0`, no default you have to take away. Whoever sets
 nothing gets the server core.
 
-Build switches are exclusively the names with **`OPENKNX_`** in front. Next to them the module has about
+Build switches are, with one exception, the names with **`OPENKNX_`** in front. Next to them the module has about
 seventy `FTC_…` and `FTM_…` names (command numbers, timeouts, buffer sizes) — those are internal and are
 never set by a product.
+
+The exception is **`FTC_HOST_BUILD`** (`FileTransferConfig.h:142`): it marks a build that is not a device,
+so the usage lines name `oknx` instead of the device console. Only `oknx/platformio.ini` sets it; a
+product never does.
 
 ## What you write into your `ini`
 

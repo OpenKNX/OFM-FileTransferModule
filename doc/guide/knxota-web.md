@@ -13,8 +13,8 @@ The page is two files under `web/assets/`, gzipped into the firmware and served 
 
 | | | |
 |---|--:|---|
-| `knxota.js` | 70 KB | the page — **markup included**. The route `/knxota` returns only a shell; everything the user sees is built in the browser |
-| `knxota.css` | 7 KB | the styling, served from `/assets/knxota.css` |
+| `knxota.js` | 81 KB | the page — **markup included**. The route `/knxota` returns only a shell; everything the user sees is built in the browser |
+| `knxota.css` | 9 KB | the styling, served from `/assets/knxota.css` |
 
 Building the markup in JavaScript instead of shipping HTML is what keeps the device side small: the
 firmware serves two static blobs and a handful of small JSON endpoints, and never assembles a page.

@@ -73,7 +73,9 @@ guide is the shorter one.
 ```
 src/FileTransferModule.*        server in the device — files, directories, firmware, console
 src/FileTransferClient*.*       client              — on the device (console) AND on the PC
+src/FileTransferWebClient.*     the knxOTA web page: routes, status JSON, device-to-device update
 src/FirmwarePatch.*             delta interpreter (both sides, the same source)
+src/KnxDeviceMap.h              mask -> device family, and the fixed identity map of the BCU families
 oknx/                           native desktop client (macOS · Linux · Windows · Raspberry Pi)
 ```
 
