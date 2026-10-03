@@ -57,7 +57,6 @@ guide is the shorter one.
 | Why are the build switches cut the way they are? | [build-defines.md](concept/build-defines.md) |
 | Where are the desktop front-ends going? | [desktop-api.md](concept/desktop-api.md) |
 | Why does `info ga` fail against an IP-Interface? | [ANALYSIS-infoga-co.md](findings/2026-09-infoga-co.md) |
-| Why is the desktop tool being renamed to `oknx`, and what has to happen? | [rename-to-oknx.md](concept/rename-to-oknx.md) — German, a work order; it goes away once done |
 
 ## The four sentences that explain everything
 

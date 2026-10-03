@@ -1,6 +1,111 @@
 # Changes
 
 
+## 2026-10-03 -- the scan reads every device by default; the parallel range scan is gone
+
+* `scan` now reads each found device's identity by default. `--no-details` turns that off, `openknx` narrows it to the System B candidates, and `--workers N` / `-W N` says how many of those reads run at once (5). `details` is still accepted and does nothing
+* The parallel range scan (`--tunnels N` / `scan … fast`) is removed. Measured over three interleaved blocks of three runs each, it returned a different set every time -- 47 to 60 of 49 to 68 addresses moved between runs, against 1 to 5 for the sweep -- while the serial sweep found every address the connection-oriented scan found and 29 more. Both spellings now exit 1 with a message instead of being silently ignored
+* A scan names the KNXnet/IP devices on the network and the block of tunnel addresses each one owns, so an address that is a tunnel slot is shown as one instead of as a silent device. A device that answered with its own mask outranks that list: the list is configuration, the answer is evidence
+* `-q` under `--no-details` printed the full decorated table. The quiet branch sat inside the `if (pool)` block, and `pool` is null exactly when no identity read runs
+* The state column is filled for a device with interface objects too: it shows the load state of the application program where a device has one and the BCU run state where it has not
+* Both device pickers read only the first character of the selection, so after `alle` row 12 silently resolved to row 1 -- a different device, which was then the knxOTA update target
+* The silence watchdog added yesterday is confined to a monitor that drives its own loop. `gm compare` drives two monitors from its own full-screen loop, where a re-dial would have been recorded as a tunnel loss on the side under test
+* The tunnel keep-alive runs only from `pump()`, which did not run while the network map was built (1.5 s plus 1.2 s per device). On an installation with many KNXnet/IP devices that window outlasted the 60 s heartbeat
+* `unload`'s read-back stored an answer by the loop's current index without checking which object it came from, so a late answer for the address table was reported as the association table's state
+* `ga table <verb>` without `--ip` listed the stored tables and exited 0 for every verb it cannot do offline, including `move`
+* A `FtcGaPtr` read that timed out was reported as "this table does not exist" instead of "this table was not read" -- `FtcGaRef` sets `_gaTruncated` on the same path, `FtcGaPtr` did not
+* `info ga` returned 0 for a table it had itself marked as a prefix; the exit code now follows the truncation flag, not only the pump cap
+* `FtcGaPtr` was the one chained memory read with neither a retry nor a cleared duplicate window, so a single lost pointer answer ended the table. It now retries `FTC_GA_RETRY` times and clears `_ftcRespT` before each send, like `FtcGaMem` and `FtcGaDesc`
+* `scan openknx` compared the mask as `& 0xFFF0`, which keeps the medium nibble, so it matched TP1 System B only. A device reporting `0x57B0` ("TP1/IP System B device") was never asked who it is, never got the OpenKNX mark and never reached the knxOTA picker. The test is medium-agnostic now
+* `--no-details` did nothing when combined with either `details` or `openknx` -- the first set the flag before it ran, the second built the pool on its own. An explicit "off" now wins over both
+* The load state travels as a number. The child process emits `app_state_id` beside the translated `app_state`, and the state column and the quiet scan field are rendered from the number, so neither depends on the child's locale
+* A load state no longer counts as "this address answered", so a device that returns its load state while its order number and serial time out still gets its one retry
+* `ga table` had two listings, offline and online, and only the offline one spoke the quiet protocol. The same command printed a tab record without `--ip` and a decorated line with it
+* The `unload` read-back accepted a `PropertyValue_Response` from any device on the line; it now also checks the source address
+* `info ga` exited 1 for a device with no group objects at all. Zero objects is a complete read -- an unloaded device, or an application without KOs -- so the exit code now follows only the truncation flag
+* A tunnel slot the interface did not hand out was printed as "busy" whatever the reason. Only `E_NO_MORE_CONNECTIONS` means the interface is full; an unanswered probe now reads "unknown", and the panel says that a probe went unanswered instead of attributing the slot to somebody else
+
+## 2026-10-02 -- "no group address" and "unknown" are decided per row
+
+* `?` ("the address table could not be read") was a RUN-wide flag but printed on every empty row, so an object that legitimately has no group address -- TSAP 0 is the device's own address -- was reported as unreadable. It is a bit in `FtcGaEntry` now, set where the row is built, and `groupAddressesMissing()` is gone with the flag. The row stays 8 bytes: `cfgValid` and the new bit share one octet as bitfields
+* `oknx` groups its rows by KO, so it folds the bit over a KO's associations: an object whose resolved addresses are complete prints them, and one with an unresolved association prints `?` behind them -- "and at least one more we could not read", instead of claiming the list is whole
+* The knxOTA web page printed `0/0/0` for a row without an address -- an address that does not exist. It prints `—` or `?` now, from the new per-row `unk` field in the status JSON (the object-level `unknown` field is gone; nothing read it)
+* The duplicate-answer guard stamped its timestamp before the anchor check ran, so a late or mirrored telegram for a different address could push the real answer that followed it into the 12 ms window and the read fell to a timeout. The anchor check runs first in all three memory states (`FtcGaPtr`, `FtcGaMem`, `FtcGaDesc`)
+* Two chained table reads did not disarm that guard when they sent the next chunk, unlike the five other chained reads in the file. With the anchor in front of it the guard could then only ever hit a legitimate answer: on a link whose round trip is under 12 ms every second chunk was discarded and cost a 6 s timeout
+* `_gaAddrRead` counted a table as fully read when the entry index reached the declared count -- but the index advances for an entry the row cap threw away too. A table whose last chunk crossed `FTC_GA_MAX` therefore reported "this object has no group address" for addresses the client itself had discarded
+
+
+## 2026-10-02 -- the group-comm report no longer blocks the device loop
+
+* The report is printed a slice at a time (8 rows per `loop()` pass) instead of queueing the whole thing at once. With `FTC_GA_MAX = 300` that burst was ~39 KB of queued lines plus ~300 `vsnprintf` in a single pass on a device with 264 KB; it is ~1 KB now. `loop()` drains the queue before it runs the state machine again, so the slices keep it short by themselves
+* The row limit was deliberately NOT lowered: the knxOTA web page reads the same `_gaObjects` array and would have lost rows with it
+* The bus is released BEFORE the report is printed. Splitting the report had deferred the `T_Disconnect` across the whole printing, which can take seconds on a slow console — holding a foreign device in a point-to-point connection that dies after ~6 s of silence anyway
+* `oknx info ga` had a 60 s absolute cap on a walk that is hundreds of round trips. It now gets 5 minutes, and if the cap does end a running read, the result is reported as a prefix with a non-zero exit code instead of being printed as the device's complete table
+* The knxOTA web page says when a read was cut short. It showed a partial table exactly like a complete one, which is the failure the incompleteness marker was built for; the console report now also prints that marker FIRST, before "no group objects"
+* Chained memory reads no longer look like duplicates of each other: on a fast IP link the answer arrives inside the 12 ms duplicate window and was being dropped, costing three timeouts per chunk
+* `FTC_MEM_BUF` 32 → 48. It was exactly the length of the BCU identity block, so a device answering more octets than asked for on the last chunk had the whole block silently time out
+
+## oknx 1.0.5 -- the help reads like the job now: 2026-10-02
+
+* Violet is reserved for `<pa>`, the device a line acts on. The command word used to get the same colour, which said "ga is a device" and undid the one thing this tool has to teach; commands are bold now, and a bare word after an option is its value, not a verb
+* The USAGE block says out loud that its colours are the legend for every line below -- and only when colour is actually being printed, so a piped or `NO_COLOR` run does not claim colours it did not use
+* `<pa>` is spelled out as the individual address, the tunnel is explained in one line, and both addresses stand next to each other once, labelled: `-i 192.168.1.50` is the way, `1.1.42` is the target. Confusing those two is the most common mistake with this tool
+* `--discover` is the fourth call shape, named as step 1, and `oknx --examples` is pointed at from the top instead of only after 270 lines
+* The firmware section is called FIRMWARE AKTUALISIEREN and sits before the transfer options; `retry` moved to the transfer options, where it belongs
+* `--quiet` exists twice with two meanings 90 lines apart; the transfer-local one now says so. One word per thing throughout: Vorgabe (not Default/Standard), Laufwerk (not Drive), "keine Deko" (not "kein Chrome")
+* `--ascii` says that it swaps glyphs and leaves colour alone, and names what does turn colour off
+* `--examples` is built around whole jobs instead of single commands: commissioning a new device, replacing one, "why does this lamp not switch", watching the bus, files, firmware. `knxota --check` is the first firmware line, because it is the first thing a careful installer does
+* Seven more commands and switches that were in the dispatch but in no help line: `knxota resume`, `delta make|show|apply` with `--pack` and `--limit`, `--ui-demo`, `--dry-run`, `--force-install`, `--browse` / `--file-browser`, and the `_conprobe` measurement aid. Audited against the source: 41 options, 0 undocumented
+
+
+## oknx 1.0.4 -- programming an address, unloading a device, framed help: 2026-10-02
+
+* `setpa <x.y.z>` is the ETS "programme the individual address": it addresses nobody, it picks the one device in PROGRAMMING MODE. Broadcast A_IndividualAddress_Read first, refuse unless exactly one device answers, write, then read the new address back as the proof. Verified on the rig: 5.0.3 -> 5.0.99 -> 5.0.3, each step confirmed on the bus
+* `<pa> unload yes` writes LE_UNLOAD (4) to PID_LOAD_STATE_CONTROL (5) on the address table, the association table and the application program, then reads every load state back and reports success only when all three are UNLOADED. A terminal asks again on top of the `yes`, because only an ETS download undoes it. Verified on 5.0.3: all three states 01 -> 00, checked with a separate `busprop read`
+* The tunnel can address a broadcast at all now (destination 0 with the group address type), and delivers broadcast traffic to its own callback instead of mistaking it for a group value
+* `<pa> restart` and `<pa> masterreset` now run over a connection. 06 Profiles 4.2 p.37 makes the connection-oriented restart mandatory for every profile while the connectionless one is optional everywhere, so a device that implements only the mandatory form used to ignore the request while the tool reported success
+* `ga write` encodes the value through the stack's own converter when the datapoint type is known, so the telegram form follows the TYPE's length as 03_03_07 3.1.3 requires, instead of following how large the typed number happened to be. `ga read|write 0/0/0` is refused: 0000h is the broadcast address, not a group address
+* `<pa> led` is renamed in the help to what it does: it sets PROGRAMMING MODE (PID 54, 03_05_01 4.3.5 p.45). While it is on, any tool on the bus can overwrite that device's address. `<pa> progmode` is the same command under the name of its effect
+* `--help` is drawn as one frame per section with four columns -- command, short form, operands, text. The column grid is measured once over the whole help, so the text column starts in the same place in every frame, and the frame follows the terminal between 150 and 168 columns. Below 150 the rows stack as before
+* DPT 9.028 was labelled m/s; it is km/h (03_07_02). 9.009, 9.010 and 9.011 had no unit and now carry theirs
+* `gm` shows the group address and its name in two columns, so the names no longer shift with the address length; the name column follows the terminal width and a longer name is cut
+
+
+## oknx 1.0.3 -- the project's own names and datapoint types: 2026-10-02
+
+* `ga import <export>` reads an ETS group-address export and remembers it, so the export file is only needed while importing. A fresh import replaces the table, because an export is the full picture and an address deleted in ETS has to disappear here too
+* All four output formats of the ETS export dialog are read, verified against real exports of one project: XML, XML (ETS4), CSV (layouts 1/1, 1/3, 3/1, 3/3) and CSV (ETS3), with tab, comma or semicolon. The six that carry a datapoint type produce byte-identical tables; the two that do not -- XML (ETS4) and CSV (ETS3) -- are imported and reported as carrying none, instead of leaving a table that silently decodes nothing
+* A CSV without header lines is refused and says so: without a header there is nothing to key the columns on, and reading it positionally would also swallow the first address
+* The table is kept per interface, which is the separation that already exists: the test rig and the productive line are reached through different interfaces, so `-i` alone picks the right project. `ga table` lists them, `ga table move <from> <to>` re-points one after an interface changed its address, `ga table rm` drops one
+* `gm` and `ga monitor` now show the group address name and the decoded value: `0/7/0 helligkeit [Write] 142.88 lx` instead of `1C 5D`. Decoding uses the stack's own converter (`lib/knx` dptconvert), so a value cannot read differently here than in the device; verified against ETS on 9.004 (`1C 5D` -> 89.36 lx)
+* `gm 0/7/0:9.004` gives the type for one run without importing anything, and `gm 0/7/0,0/7/1,1/4/5` watches several addresses at once
+* An address the table does not know keeps showing its raw octets. The datapoint type is on neither the bus nor the device -- two bytes is `9.004 Lux` exactly as much as `7.001 pulses` -- so it is never guessed from the payload size
+* `oknx --examples` is a new page of worked examples grouped by the job. `--help` keeps the reference and points to it; its own example block is gone
+* `--help` was reorganised by what a command acts on -- the interface itself, group addresses, watching the bus, finding devices, reading one device, driving one device -- instead of spreading device commands over four sections. Six commands were in the dispatch but in no section at all: `ga import`, `ga table`, `prop dump`, `busprop dump`, `browse`, `config`
+* Every command row is now coloured by the roles the USAGE block announces as a legend -- subject violet, verb bold, operands teal, options blue. The split is made from the characters, so a command added later is coloured right without anyone remembering to say so
+* Despite six more commands the help is shorter than before (271 lines instead of 277)
+* Host only. The device firmware compiles none of this and is byte-identical (RP2040 1150800 B before and after)
+
+
+## oknx 1.0.2 -- device restart and group addresses: 2026-10-02
+
+* `<pa> restart` reboots any KNX device (A_Restart, basic). It is unacknowledged by definition, so the tool says so instead of claiming a confirmation. Verified on 5.0.3: the device's RAM-held login window is gone 14 s later, which an idle timeout cannot explain
+* `<pa> masterreset <code> yes` sends a master reset. The erase code is given by NAME, because a mistyped digit is not recoverable over the bus, and `yes` is required. `--help` says what each code erases: `confirmedrestart` nothing, `resetparam`, `resetlinks`, `resetap`, `resetia`, `factoryresetwithoutia`, `factoryreset`
+* The master reset is the only restart the standard has answered, so its answer is awaited for 3 s and the device's error code reported. The response carries its own bit in the APCI octet, so its opcode on the wire is 0x3A0/0x3A1 and not the request's 0x380/0x381 — matching the request opcode made the decoder unreachable and reported every master reset as unanswered. Verified on 5.0.7: error code 0, process time 10 s
+* `ga read <x/y/z>` sends A_GroupValue_Read and lists every answer with its source. Flag-consistent on the test rig: an address whose object carries the read flag answers, one without it stays silent
+* `ga write <x/y/z> <value>` sends A_GroupValue_Write. A plain 0-63 rides in the APCI octet, hex octets go as a payload, and a plain value above 63 is refused rather than silently meaning something else. Both forms confirmed on the wire by a second monitor
+* `gm <x/y/z>` is the group monitor restricted to one address, `ga monitor <x/y/z>` the same thing spelled the other way. It is the existing monitor with a filter, not a second viewer, so the keys, the export and the decoding are unchanged
+* The tunnel can now address a group at all: its cEMI builder had the destination address type nailed to "individual"
+
+## oknx 1.0.1 -- group objects of BIM M112 devices: 2026-10-02
+
+* `info ga` reads the group-object descriptors of mask 0x0700-0x0705 devices, so flags, priority and object size are shown there instead of `?`. The descriptor is the classic one with a 2-octet value pointer: `[count:1][ram-ptr:2]` then 4 octets per object. Derived from an ETS busmonitor of 1.1.30 and confirmed against ETS on every object of 1.1.30, 1.1.161 and 1.1.12
+* Those devices publish no `PID_TABLE_REFERENCE` for that table -- they answer obj 3 PID 7 with nr_of_elem 0 -- so the walk falls back to the fixed base 0x4400 that ETS uses, but only after asking, and it checks the table header before taking a flag from it
+* A table whose declared length is zero, or whose header does not hold up, is reported as incomplete instead of ending silently with a success result
+* The first read of any device table fetches the header alone; a blind full chunk over-reads a short table and some devices then answer nothing at all
+* Group-object flags of a device that answers more octets than were asked for are no longer reported as a truncated read -- the surplus is re-requested, nothing is lost
+
+
 ## ec/v1dev -- `oknx`, legacy servers, hardening: 2026-09-29
 
 **Renaming of the PC tool -- breaking, without an alias**

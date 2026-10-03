@@ -29,7 +29,9 @@ ever disagree, the binary is right.
 |---|---|
 | `-i` / `--ip A.B.C.D` · `--port N` | the interface to tunnel through |
 | `-D` / `--discover` | list the KNXnet/IP interfaces on the LAN and stop |
-| `-T` / `--tunnels N` | parallel scan over N tunnels (no value = as many as the interface grants) |
+| `-W` / `--workers N` | how many identity reads run in parallel (default 5); the sweep itself stays on one tunnel |
+| `--no-details` | sweep only — skip the identity read, which is on by default |
+| `openknx` | read the identity of the System B candidates only |
 | `-V` / `--verbose` | full interface and target profile first, and the control block during a transfer |
 | `-q` / `--quiet` | no chrome, tab-separated — scriptable, and automatic when the output is not a terminal |
 | `--log[=path]` | record the session; always complete, whatever the console shows |

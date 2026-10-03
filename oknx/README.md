@@ -51,7 +51,7 @@ It finds third-party interfaces just as well as OpenKNX ones, and tunnels throug
 **Device info & discovery**
 - `info` — full fingerprint (mask / class / FTM version / features / tunnel PAs), `info ga` (group-comm / GA
   table, ETS-style), `info <file>`
-- `ping` round-trip, `scan <line|range>` (optional CO probe, parallel `--tunnels`)
+- `ping` round-trip, `scan <line|range>` (optional CO probe `ets`, identity read on by default, `--workers N`)
 - `progscan`/`ps` — find devices in programming mode and localise the line, `--discover` — list LAN interfaces
 
 **Live monitors**

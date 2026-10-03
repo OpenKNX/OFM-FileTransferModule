@@ -34,6 +34,27 @@ points into the shared `knx` stack.
 
 ## Settled -- do not re-investigate
 
+**The BIM M112 group-object table is read at a FIXED base, by convention.** Masks 0700h-0705h answer
+`obj 3, PID 7` (table reference) with `nr_of_elem 0` and report no load state for the object table, so
+nothing on the device points at the descriptors. They are there all the same: ETS reads them at
+**`0x4400`**, and the client does likewise (`FTC_SYS7_GROT_BASE`), armed only after PID 7 came back
+empty. Verified against ETS on `1.1.30` (17 of 17 rows identical in flags, priority and size) and on
+`1.1.13`, `1.1.161` and `1.1.12`. Layout, derived from an ETS busmonitor of `1.1.30`:
+`[count:1][RAM pointer:2]`, then 4 octets per object -- `value pointer(2) · config · type`, i.e. the
+classic 3-octet descriptor of 03_05_01 4.18.3 with the pointer widened to two octets.
+
+The base is **not** device-supplied and the standard is **silent**: 03_05_01 4.18.3 defines only
+3-octet descriptors with a 1-octet pointer, and 06 Profiles 4.6.1 assigns masks 0700h-0705h no
+realisation type at all. That is why the code validates the table HEADER before it takes a single flag,
+and nothing else. Three per-entry plausibility rules were tried against real devices and **all three
+are false** -- they are listed so nobody reinstates them:
+
+| Rule that looked safe | Refuted by |
+|---|---|
+| the first value pointer sits exactly behind the flag bytes | gap 0 on `1.1.30`, gap 1 on `1.1.161` |
+| value pointers rise with the object index | `1.1.30` runs up to `0x0784`, then back to `0x0748` (grouped per channel) |
+| a value pointer always lies above the flag area | an unused slot is `00 00 00 00`, i.e. below it (`1.1.13` declares 33 objects and fills 17) |
+
 **`safe` vs `fast` on a flooded bus is a trade-off, not a defect.** `safe` waits after every block and
 grinds through congestion; `fast` bursts a window and only learns from the report what was lost. On a
 bus a third device is saturating, `safe` is the right tool. This is delivery pattern, not filesystem.
