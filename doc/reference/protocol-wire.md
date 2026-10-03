@@ -194,29 +194,36 @@ obj 160, pid 2, no payload:
 
 ## 2. Command-ID table (FunctionProperty `propertyId` on object 159)
 
-From the server enum `FtmCommands` (`FileTransferModule.cpp:50-69`) and README §4.1. Object index **159** is
-mandatory; unknown IDs are silently ignored (`FileTransferModule.cpp:218,328`). Object **160** is the separate
-console table (§5.4) — NOT part of this list.
+From the server enum `FtmCommands` (`FileTransferModule.cpp:95-122`). Object index **159** is mandatory
+(`FileTransferModule.cpp:496`); unknown IDs are silently ignored. Object **160** is the separate console
+table (§5.4) — NOT part of this list.
 
 | ID (dec / hex) | Name | Answered? | Request payload → | Answer payload ← | Server fn |
 |---:|---|---|---|---|---|
-| 0 / 0x00 | Format | yes | (none) | `[00]` ok / `[02]` fail | `cmdFormat` :445 |
-| 1 / 0x01 | Exists | yes | `path\0` | `[00][exists:1]` | `cmdExists` :460 |
-| 2 / 0x02 | Rename | yes | `old\0new\0` | `[00]` / `[45]` | `cmdRename` :488 |
-| 40 / 0x28 | FileUpload | yes* | see §3.1 | see §3.1 | `cmdFileUpload` :752 |
-| 41 / 0x29 | FileDownload | yes | see §3.6 | see §3.6 | `cmdFileDownload` :961 |
-| 42 / 0x2A | FileDelete | yes | `path\0` | `[00]` / `[44]` | `cmdFileDelete` :736 |
-| 43 / 0x2B | FileInfo | yes | `path\0` | `[00][size:4BE][crc32:4BE]` / `[42]` | `cmdFileInfo` :591 |
-| 44 / 0x2C | FileUploadFast | open/close yes, DATA **no** | see §3.2 | see §3.2 | `cmdFileUploadFast` :826 |
-| 45 / 0x2D | FileReport | yes | `[base:2LE][count:2LE][nonce:1]` | see §3.3 | `cmdFileReport` :919 |
-| 46 / 0x2E | FilesystemInfo | yes | (none) | `[00][total:4BE][used:4BE]` | `cmdFilesystemInfo` :651 |
-| 80 / 0x50 | DirList | yes | `dir\0` | `[00][type:1][name...]` | `cmdDirList` :669 |
-| 81 / 0x51 | DirCreate | yes | `dir\0` | `[00]` / `[85]` | `cmdDirCreate` :703 |
-| 82 / 0x52 | DirDelete | yes | `dir\0` | `[00]` / `[84]` | `cmdDirDelete` :720 |
-| 90 / 0x5A | Cancel | **no** | (none) | — (returns `false`, no L7 answer) | `cmdCancel` :473 |
-| 100 / 0x64 | ModuleVersion | yes | (none) | `[majHi][majLo][minHi][minLo][revHi][revLo]` | `cmdModuleVersion` :513 |
-| 101 / 0x65 | FwUpdate | **no** | `path\0` | — (returns `false`) | `cmdFwUpdate` :525/550 |
-| 102 / 0x66 | CheckFeatures | yes | (none) | `[flags:1]` | `cmdCheckFeatures` :1010 |
+| 0 / 0x00 | Format | yes | (none) | `[00]` ok / `[02]` fail | `cmdFormat` :907 |
+| 1 / 0x01 | Exists | yes | `path\0` | `[00][exists:1]` | `cmdExists` :923 |
+| 2 / 0x02 | Rename | yes | `old\0new\0` | `[00]` / `[45]` | `cmdRename` :951 |
+| 40 / 0x28 | FileUpload | yes* | see §3.1 | see §3.1 | `cmdFileUpload` :2475 |
+| 41 / 0x29 | FileDownload | yes | see §3.6 | see §3.6 | `cmdFileDownload` :2710 |
+| 42 / 0x2A | FileDelete | yes | `path\0` | `[00]` / `[44]` | `cmdFileDelete` :2445 |
+| 43 / 0x2B | FileInfo | yes | `path\0` | `[00][size:4BE][crc32:4BE]` / `[42]` | `cmdFileInfo` :2116 |
+| 44 / 0x2C | FileUploadFast | open/close yes, DATA **no** | see §3.2 | see §3.2 | `cmdFileUploadFast` :2552 |
+| 45 / 0x2D | FileReport | yes | `[base:2LE][count:2LE][nonce:1]` | see §3.3 | `cmdFileReport` :2650 |
+| 46 / 0x2E | FilesystemInfo | yes | (none) | `[00][total:4BE][used:4BE]` | `cmdFilesystemInfo` :2270 |
+| 80 / 0x50 | DirList | yes | `dir\0` | `[00][type:1][name...]` | `cmdDirList` :2320 |
+| 81 / 0x51 | DirCreate | yes | `dir\0` | `[00]` / `[85]` | `cmdDirCreate` :2411 |
+| 82 / 0x52 | DirDelete | yes | `dir\0` | `[00]` / `[84]` | `cmdDirDelete` :2428 |
+| 90 / 0x5A | Cancel | **no** | (none) | — (returns `false`, no L7 answer) | `cmdCancel` :936 |
+| 100 / 0x64 | ModuleVersion | yes | (none) | `[majHi][majLo][minHi][minLo][revHi][revLo]` | `cmdModuleVersion` :998 |
+| 101 / 0x65 | FwUpdate | **no** | `path\0` | — (returns `false`) | `cmdFwUpdate` :1023/1183 |
+| 102 / 0x66 | CheckFeatures | yes | (none) | `[flags:1]` | `cmdCheckFeatures` :2759 |
+| 103 / 0x67 | AuthChallenge | yes | (none) | `[00][nonce…]` / `[A2]` writes disabled | `cmdAuthChallenge` :504 |
+| 104 / 0x68 | AuthResponse | yes | `[mac…]` over the nonce | `[00]` ok / `[A1]` auth failed | `cmdAuthResponse` :509 |
+| 105 / 0x69 | AuthLogout | yes | (none) | `[00]` | `cmdAuthLogout` :514 |
+| 106 / 0x6A | FwProbe | yes | `[crc32:4]` of the base image | `[00]` match · `[02]` reading · `[03][produced:4]` running · `[05][err:1]` last apply failed · `[42]` other base · `[4B]` bad length | `:700` |
+
+Commands 103-105 exist only under `OPENKNX_FTC_SECURITY`, 106 only under `OPENKNX_FTC_DELTA_UPDATE`; the
+numbers stay reserved either way. The access-control semantics are in `concept/access-control.md`.
 
 \* FileUpload(40): OPEN and DATA are answered; CLOSE returns an **empty** answer (`resultLength = 0`,
 `FileTransferModule.cpp:810`) — its arrival is the whole signal (§3.1).
@@ -276,19 +283,29 @@ ans : [00][baseHi][baseLo][cntHi][cntLo][nonce][bitmap...] base/count BIG-endian
 - `count` clamped so `resultLength = 6 + ceil(count/8) ≤ 247` ⇒ **`count ≤ 1928`** (`FileTransferModule.cpp:939-941`).
 - Answer decode `FileTransferClient.cpp:3153-3174` (base/count BE, nonce at `[5]`, bitmap from `[6]`).
 
-### 3.4 FileInfo (43) (`FileTransferModule.cpp:591-644`, decode `FileTransferClient.cpp:3320-3328,3453-3456`)
+### 3.4 FileInfo (43) (`FileTransferModule.cpp:2116`)
 ```
-req : [path... 00]
-ans : [00][size:4 BE][crc32:4 BE]   9 bytes    |   [42]  file not found (1 byte)
+req : [path... 00]              |  [path... 00][flags:1]   bit0 = compute the checksum
+ans : [00][size:4 BE][crc32:4 BE]   9 bytes   size and checksum
+    | [01][size:4 BE]               5 bytes   size only -- SD and external flash answer this by default
+    | [02][size:4 BE]               5 bytes   size known, the checksum is still being computed -- ask again
+    | [42]                          1 byte    not found
 ```
-- `crc32` = **CRC-32/POSIX (`cksum`)** over the whole file (`FastCRC32::cksum`, `FileTransferModule.cpp:617-640`); see §4.4.
+- **LittleFS answers `0x02` first for every file**: the checksum is computed cooperatively, one slice per
+  `loop()` pass, because a whole-file checksum inside the dispatch reboots the device on a large file.
+  Every client state that sends FileInfo must poll again on `0x02`, each poll on its own deadline.
+- An existence question treats `0x00`, `0x01` and `0x02` alike as "it is there" and rejects only `0x42`.
+- `crc32` = **CRC-32/POSIX (`cksum`)** over the whole file; see §4.4.
 
-### 3.5 FilesystemInfo (46) (`FileTransferModule.cpp:651-667`, decode `FileTransferClient.cpp:3792-3797`)
+### 3.5 FilesystemInfo (46) (`FileTransferModule.cpp:2270`)
 ```
-req : (none)
-ans : [00][total:4 BE][used:4 BE]   9 bytes    |   1-byte error / no answer (old server)
+req : (none)  |  [drive... 00]     "sd" / "sd/" / "efc" / "efc/"; absent = LittleFS
+ans : [00][total:4 BE][used:4 BE]   9 bytes   bytes
+    | [01][total:4 BE][used:4 BE]   9 bytes   the two numbers are in KB, not bytes
+    | 1-byte error / no answer (old server)
 ```
-- Client derives `free = total − used`. Read-only, safe any time. Missing command → skip check, upload anyway (README §5.4).
+- Client derives `free = total − used`, and must read the status byte first: `0x01` is a unit flag, not an
+  error. Read-only, safe any time. Missing command → skip the check and upload anyway.
 
 ### 3.6 Download — FileDownload (41) (`FileTransferClient.cpp:2889-2906`, `FileTransferModule.cpp:961-1008,119-147`)
 ```
@@ -355,12 +372,16 @@ as it streams, then compares `_ftcSrcCrc ^ 0xFFFFFFFF` against the target's File
 > (crc<<1)^0x04C11DB7 : crc<<1 }`; final value XOR `0xFFFFFFFF`. (Note: `cksum` normally appends the length;
 > here it does NOT — it is a plain MSB-first CRC32 over the file bytes with a final complement.)
 
-### 4.3 Result codes (`doc/ERRORCODES.md`, README §4.5)
-`0x00` OK · `0x01` LittleFS.begin fail · `0x02` format fail · `0x03` FS not init · `0x04` pkg>maxResultLength ·
-`0x41` file already open · `0x42` file can't open · `0x43` file not opened · `0x44` file can't delete ·
-`0x45` file can't rename · `0x46` seek failed · `0x47` short write (**FS full**) · `0x4A` fast: too many chunks →
-go classic · `0x81` dir already open · `0x82` dir can't open · `0x83` dir not opened · `0x84` dir can't delete ·
-`0x85` dir can't create · `0x86` dir no more files. Console adds `0x01` = BUSY (session owned),
+### 4.3 Result codes
+The named list is [error-codes.md](../guide/error-codes.md), which is the one to follow.
+`0x00` OK · `0x01` size-only / KB unit flag, not an error · `0x02` format fail, or "checksum still running"
+on FileInfo · `0x41` file already open · `0x42` file can't open · `0x43` file not opened · `0x44` file can't
+delete · `0x45` file can't rename · `0x46` seek failed · `0x47` short write (**FS full**) · `0x4A` fast: too
+many chunks → go classic · `0x4B` length out of range · `0x4C` busy, a firmware update is being applied ·
+`0x81` dir already open · `0x83` dir not opened · `0x84` dir can't delete · `0x85` dir can't create ·
+`0xA0`/`0xA1`/`0xA2` auth required / auth failed / writes disabled.
+**`0x03`, `0x04`, `0x82` and `0x86` are emitted nowhere** — earlier lists carried them; the current server
+does not. Console adds `0x01` = BUSY (session owned),
 `0x43` = no open session (`FileTransferModule.cpp:343,371,393`).
 
 ---

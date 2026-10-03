@@ -106,13 +106,12 @@ value means something else depending on which command it answers. Codes from `0x
 | `0x4A` | too many blocks for the fast transfer → fall back to the classic one |
 | `0x4B` | range outside what is allowed |
 | `0x4C` | busy — a firmware update is being applied right now |
-| `0x81` … `0x86` | directory error |
+| `0x81` `0x83` `0x84` `0x85` | directory error (0x82 and 0x86 are reserved, nothing emits them) |
 | `0xA0` `0xA1` `0xA2` | login required · login failed · writing locked ([SECURITY.md](../guide/unlocking-a-device.md)) |
 
-The named list of the `0x4x` / `0x8x` / `0xAx` codes is [ERRORCODES.md](../guide/error-codes.md). It also
-carries `0x01`…`0x04` as LittleFS errors — **those four conflict with the per-command status bytes
-above and have not been reconciled against the current server.** For anything below `0x40`, go by the
-command, and by this table.
+The named list of the `0x4x` / `0x8x` / `0xAx` codes is [ERRORCODES.md](../guide/error-codes.md), which is
+the one to follow: it also records which codes the current server emits nowhere (`0x03`, `0x04`, `0x82`,
+`0x86`). For anything below `0x40`, go by the command, and by this table.
 
 ## The one rule that costs the most when it is missed
 
