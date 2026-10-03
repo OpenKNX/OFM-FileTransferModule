@@ -324,7 +324,7 @@ function otaApply(s) {
   otaRunning = (s.phase === "upload" || s.phase === "verify");
   if (s.dev && s.dev.pa === pa) { otaDev = s.dev; otaDevPa = s.dev.pa; otaDevMiss = false; if (!otaDevAt) otaDevAt = Date.now(); }
   if (s.drives && s.drivesPa === pa) otaDrv = s.drives;
-  if (s.ga) { otaGa = s.ga.lost ? null : (s.ga.pa === pa ? s.ga.rows : otaGa); otaGaLost = s.ga.lost; }
+  if (s.ga) { otaGa = s.ga.lost ? null : (s.ga.pa === pa ? s.ga.rows : otaGa); otaGaLost = s.ga.lost; otaGaCut = !!s.ga.cut; }
   if (s.scan) {
     otaScanDone = s.scan.done; otaScanTotal = s.scan.total;
     if (s.scan.hits) otaHits = s.scan.hits; // an empty list is a result too: the device rescanned
@@ -350,6 +350,7 @@ function otaApply(s) {
   otaRender();
 }
 let otaLive = null, otaGaLost = false;
+let otaGaCut = false; // the read was cut short -> the rows are a prefix
 // What came of the apply. The client puts it in status.message: silence means applied, 0xA0/0xA2 means
 // refused -- and each needs a different remedy. `unconfirmed` is a field of its own: the apply went out
 // to an old FTM that cannot confirm it (only its RP2040 builds have it at all).
@@ -950,15 +951,22 @@ _o("otaDevHead").textContent = pa
   _o("otaGaState").textContent = !fresh ? "erst das Gerät lesen"
     : otaGaLost ? "verworfen durch eine fast-Übertragung — erneut lesen"
     : otaGa === null ? "nicht gelesen — eigener Buslauf, 1–3 min"
-    : otaGa.length === 0 ? ("gelesen " + otaGaAt + " — 0 Einträge (das Gerät führt keine Gruppenadressen)")
+    : otaGa.length === 0 ? (otaGaCut
+        ? ("abgebrochen " + otaGaAt + " — nichts gelesen, eine Tabelle brach ab")
+        : ("gelesen " + otaGaAt + " — 0 Einträge (das Gerät führt keine Gruppenadressen)"))
+    // A cut-short walk must not read like a complete one: these rows are a PREFIX of the device's tables.
+    : otaGaCut ? ("unvollständig " + otaGaAt + " — " + otaGa.length + " Einträge, eine Tabelle brach ab")
     : ("gelesen " + otaGaAt + " — " + otaGa.length + " Einträge");
   _o("otaGaBox").classList.toggle("fm-hidden", !(otaGa && otaGa.length));
   if (otaGa && otaGa.length) {
     _o("otaGaSum").textContent = otaGa.length + " Einträge";
     const fl = v => ["K", "L", "S", "Ü", "A"].filter((_, i) => v & (1 << i)).join(" ");
     const pr = p => p === 0 ? "System" : p === 1 ? "normal" : p === 2 ? "dringend" : p === 3 ? "niedrig" : "—";
-    _o("otaGaRows").innerHTML = otaGa.map(r => '<tr><td class="mono">'
-      + ((r.ga >> 11) & 0x1F) + "/" + ((r.ga >> 8) & 0x07) + "/" + (r.ga & 0xFF)
+    // ga 0 is not an address: "—" = dieses Objekt hat keine, "?" = die Adresstabelle blieb stumm.
+    // Ohne die Fallunterscheidung stand dort "0/0/0" — eine Adresse, die es nicht gibt.
+    const ga = r => r.ga ? (((r.ga >> 11) & 0x1F) + "/" + ((r.ga >> 8) & 0x07) + "/" + (r.ga & 0xFF))
+      : (r.unk ? "?" : "—");
+    _o("otaGaRows").innerHTML = otaGa.map(r => '<tr><td class="mono">' + ga(r)
       + '</td><td>' + r.co + '</td><td class="mono">' + (r.cfg ? fl(r.flags) : "—")
       + '</td><td>' + (r.cfg ? pr(r.prio) : "—") + '</td><td>' + (r.cfg ? otaSize(r.size) : "—")
       + '</td></tr>').join("");

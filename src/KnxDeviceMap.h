@@ -38,14 +38,21 @@ namespace KnxDeviceMap
 
     /// @brief Classic BCU table layout (1-octet counts, 2-octet address/assoc entries, 8-bit ASAPs, 3-octet
     /// group-object descriptors). BCU1 + BCU2 use it; everything else uses the System B layout.
-    inline bool classicTables(Family f) { return f == Family::Bcu1 || f == Family::Bcu2; }
+    /// System 7 (BIM M112) too: measured 2026-10-01 on 1.1.13, whose address table reads
+    /// `04 11 0D 00 01 08 23 08 24` - a classic 1-octet count of 4; read as System B it would declare 1041.
+    /// Only the LAYOUT is classic: System 7 tables are relocatable via PID_TABLE_REFERENCE, which the walk
+    /// already handles because the fixed-address path is gated on _devIdxAddr < 0.
+    inline bool classicTables(Family f) { return f == Family::Bcu1 || f == Family::Bcu2 || f == Family::System7; }
 
     /// @brief No interface-object property layer: identity from a fixed memory map, tables at fixed/pointer addresses.
     /// The family *capability* -- BCU2 variants with property objects are gated further at runtime (idxAddr >= 0).
     inline bool memoryMapped(Family f) { return f == Family::Bcu1 || f == Family::Bcu2; }
 
     /// @brief Answers only connection-oriented: a T_Connect must be open before any read.
-    inline bool needsConnectionOriented(Family f) { return f == Family::Bcu1 || f == Family::Bcu2; }
+    /// 06 Profiles 4.3 p.42 lists the connectionless Device Descriptor as unsupported for System 1,
+    /// System 2, BCU 1, BCU 2 AND BIM M112 - System 7 belongs in here too.
+    inline bool needsConnectionOriented(Family f)
+    { return f == Family::Bcu1 || f == Family::Bcu2 || f == Family::System7; }
 
     // ---- BCU1/BCU2 fixed identity memory map (ETS reads these from fixed addresses) -------------------------------
 
@@ -62,6 +69,11 @@ namespace KnxDeviceMap
         uint8_t appBcd[3] = {0};  ///< @0x0105-0x0107 application id, packed BCD -> the 6-digit ETS number (last pair = version)
         bool haveApp = false;     ///< the application id bytes were present
         bool valid = false;       ///< the block was decoded
+        // 0xFF is BOTH "the byte was outside the block we read" and a real value - for runError it is even the
+        // device's own "no error". Only the block length can tell them apart, so presence is recorded per field.
+        bool haveRunState = false; ///< 0x0103 was inside the block
+        bool havePei = false;      ///< 0x0109 was inside the block
+        bool haveRunError = false; ///< 0x010D was inside the block
     };
 
     /// @brief Byte at absolute address @p addr within a block read from ::IDENT_BASE, or 0xFF if out of range.
@@ -69,6 +81,12 @@ namespace KnxDeviceMap
     {
         const uint16_t off = (uint16_t)(addr - IDENT_BASE);
         return (addr >= IDENT_BASE && off < len) ? block[off] : 0xFF;
+    }
+
+    /// @brief True when @p addr was covered by a block of @p len bytes read from ::IDENT_BASE.
+    inline bool have(size_t len, uint16_t addr)
+    {
+        return addr >= IDENT_BASE && (size_t)(uint16_t)(addr - IDENT_BASE) < len;
     }
 
     /// @brief Decode the fixed identity block (read from ::IDENT_BASE, @p len bytes).
@@ -86,6 +104,9 @@ namespace KnxDeviceMap
         d.peiType = at(block, len, 0x0109);
         d.runError = at(block, len, 0x010D);
         d.haveApp = (d.appBcd[0] != 0xFF || d.appBcd[1] != 0xFF || d.appBcd[2] != 0xFF);
+        d.haveRunState = have(len, 0x0103);
+        d.havePei = have(len, 0x0109);
+        d.haveRunError = have(len, 0x010D);
         d.valid = true;
         return d;
     }

@@ -307,15 +307,21 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
     // shared with the fast-upload bitmap, so a transfer invalidates them and the page says so.
     uint16_t gaN = 0;
     const FtcGaEntry *ga = c->groupObjects(gaN);
-    snprintf(buf, sizeof(buf), ",\"ga\":{\"pa\":\"%s\",\"lost\":%s,\"rows\":[",
-             paText(_gaPa).c_str(), (_gaLost && _gaPa) ? "true" : "false");
+    // "cut" is what the console prints as INCOMPLETE: the rows are a PREFIX of the device's tables.
+    // Without it the page showed a partial read as a complete one - the failure this flag exists for.
+    snprintf(buf, sizeof(buf), ",\"ga\":{\"pa\":\"%s\",\"lost\":%s,\"cut\":%s,\"rows\":[",
+             paText(_gaPa).c_str(), (_gaLost && _gaPa) ? "true" : "false",
+             c->groupObjectsTruncated() ? "true" : "false");
     out += buf;
     if (!(_gaLost && _gaPa))
         for (uint16_t i = 0; i < gaN; i++)
         {
-            snprintf(buf, sizeof(buf), "%s{\"ga\":%u,\"co\":%u,\"flags\":%u,\"prio\":%u,\"size\":%u,\"cfg\":%s}",
+            // "unk" per ROW: ga 0 means "no group address" unless this row's TSAP pointed past an address
+            // table that stayed silent. A run-wide flag marked empty rows as unreadable.
+            snprintf(buf, sizeof(buf), "%s{\"ga\":%u,\"co\":%u,\"flags\":%u,\"prio\":%u,\"size\":%u,\"cfg\":%s,\"unk\":%s}",
                      i ? "," : "", (unsigned)ga[i].ga, (unsigned)ga[i].co, (unsigned)ga[i].flags,
-                     (unsigned)ga[i].prio, (unsigned)ga[i].sizeCode, ga[i].cfgValid ? "true" : "false");
+                     (unsigned)ga[i].prio, (unsigned)ga[i].sizeCode, ga[i].cfgValid ? "true" : "false",
+                     ga[i].gaUnknown ? "true" : "false");
             out += buf;
         }
     out += "]}";

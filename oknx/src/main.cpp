@@ -4651,12 +4651,14 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                 uint8_t prio = 0xFF;
                 uint8_t sizeCode = 0xFF;
                 bool cfg = false;
+                bool unk = false; // at least one of this KO's associations named a TSAP we could not resolve
             };
             std::map<uint16_t, KoRow> byKo;
             for (uint16_t i = 0; i < n; ++i)
             {
                 KoRow& r = byKo[gos[i].co];
                 if (gos[i].ga != 0) r.gas.push_back(gos[i].ga);
+                if (gos[i].gaUnknown) r.unk = true;
                 if (gos[i].cfgValid && !r.cfg)
                 {
                     r.flags = gos[i].flags;
@@ -4675,13 +4677,30 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                         if (!gl.empty()) gl += ",";
                         gl += gaStr(g);
                     }
+                    // "-" = this object has no group address. "?" = the address table could not be read,
+                    // so we do not know. Conflating them reported a configured device as unlinked. Per KO,
+                    // from its own rows: a run-wide flag put "?" on objects that are simply unassigned.
+                    if (kv.second.unk) gl += gl.empty() ? "?" : ",?";
                     std::printf("ko\t%u\t%s\t%s\t%s\t%s\n", kv.first, gl.empty() ? "-" : gl.c_str(),
                                 kv.second.cfg ? flagsActive(kv.second.flags).c_str() : "?",
                                 prioName(kv.second.cfg, kv.second.prio).c_str(), sizeName(kv.second.cfg, kv.second.sizeCode).c_str());
                 }
+                if (cut) std::printf("truncated\t1\n");
+                if (g_pumpCapped) std::printf("capped\t1\n");
                 break;
             }
             t.section(L.tr("Group communication · ", "Gruppenkommunikation · ") + target);
+            // The incompleteness goes FIRST: a device whose address table timed out and whose association
+            // table is absent printed a clean "no group objects" for a walk that never read anything.
+            if (cut)
+                t.status(ftc::Tpl::Stat::Warn,
+                         L.tr("incomplete - this is a prefix of the device's tables",
+                              "unvollständig - das ist ein Anfang der Gerätetabellen"),
+                         {g_pumpCapped
+                              ? L.tr("the read was still running when the 5-minute safety limit ended it",
+                                     "der Lauf war noch unterwegs, als das 5-Minuten-Sicherheitslimit ihn beendet hat")
+                              : L.tr("a table was cut short: the row limit, a read timeout, the 16-bit address end, or no connection-oriented link",
+                                     "eine Tabelle brach ab: Zeilengrenze, Zeitüberschreitung, Ende des 16-Bit-Adressraums, oder keine verbindungsorientierte Verbindung")});
             if (n == 0)
             {
                 t.status(ftc::Tpl::Stat::Idle, L.tr("no group objects / association table", "keine Gruppenobjekte / Assoziationstabelle"));
@@ -4699,6 +4718,10 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     if (!gl.empty()) gl += "  ";
                     gl += gaStr(g);
                 }
+                // "-" = this object has no group address. "?" = the address table could not be read, so
+                // we do not know. A "?" behind resolved addresses says "and at least one more we could not
+                // read" - the KO keeps what was proven and does not claim the rest is absent.
+                if (kv.second.unk) gl += gl.empty() ? "?" : "  ?";
                 if (gl.empty()) gl = "-";
                 if ((int)gl.size() > gaW) gaW = (int)gl.size();
                 gaLine[kv.first] = gl;
@@ -4709,7 +4732,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             for (auto& kv : byKo)
             {
                 t.tableRow({c.txt(std::to_string(kv.first)), c.cyan(gaLine[kv.first]),
-                            t.koFlags(kv.second.cfg ? flagsActive(kv.second.flags) : ""),
+                            t.koFlags(kv.second.cfg ? flagsActive(kv.second.flags) : "?"),
                             c.txt(prioName(kv.second.cfg, kv.second.prio)), c.txt(sizeName(kv.second.cfg, kv.second.sizeCode))},
                            {5, gaW, 12, 9, 0});
             }

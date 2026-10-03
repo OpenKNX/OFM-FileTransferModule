@@ -168,9 +168,12 @@ struct FtcDeviceInfo
     uint16_t routerApdu = 0;   bool haveRouterApdu = false;
     uint32_t features = 0;     // feature bits: 1 Resume, 2 Update, 4 Fast, 8 Console
     bool progMode = false;
-    uint8_t appState = 0, addrTableState = 0, assocTableState = 0, goTableState = 0;
+    uint8_t appState = 0xFF, addrTableState = 0xFF, assocTableState = 0xFF, goTableState = 0xFF; // 0xFF = not read
     // BCU1 (mask 0012) memory-map extras (ETS: Ausführungszustand / PEI-Typ / Ausführungsfehler); 0xFF = not read
     uint8_t bcuRunState = 0xFF, bcuPeiType = 0xFF, bcuRunError = 0xFF;
+    // Which of the three the block actually covered. 0xFF alone cannot say: for runError it is the device's
+    // own "no error", so an unread byte used to be reported as a healthy device.
+    bool haveBcuRunState = false, haveBcuPei = false, haveBcuRunError = false;
     uint16_t busVoltmV = 0;    // bus voltage in mV (A_ADC_Read), 0 = not read
     bool haveBusVolt = false;
     uint8_t bcuMfr = 0;        // BCU manufacturer code (0x01 = Siemens)
@@ -188,7 +191,9 @@ struct FtcGaEntry
     uint8_t flags;    // bit0 C(K) bit1 R(L) bit2 W(S) bit3 T(Ü) bit4 U(A); valid only if cfgValid
     uint8_t prio;     // KNX config-octet coding: 0 system, 1 normal, 2 urgent, 3 low; 0xFF = unread
     uint8_t sizeCode; // group-object value-type 0..12 (03_05_01 §4.18.3) -> object SIZE (not semantic DPT); 0xFF = unread
-    bool cfgValid;    // the group-object descriptor (flags/prio/size) was read for this KO
+    // Two bits in one octet so the row stays 8 bytes (FTC_GA_MAX rows live in the shared union).
+    uint8_t cfgValid : 1;  // the group-object descriptor (flags/prio/size) was read for this KO
+    uint8_t gaUnknown : 1; // THIS row's TSAP points past an address table that could not be read -> "?" not "-"
 };
 
 // --- Transfer results: upload / perf / download, same lifetime as the structs above. Codes, not
@@ -422,6 +427,8 @@ class FileTransferClient : public OpenKNX::Module
     const FtcStatus &status() const { return _status; }
     uint16_t scanCurrentPa() const { return (uint16_t)_scanNext; } // live: the PA currently being probed (for a progress line)
     uint16_t scanFound() const { return _scanFound; }
+    /// @brief Size of the shared chunk/identity buffer, so a static_assert can check it against IDENT_LEN.
+    static constexpr uint16_t ftcMemBufSize() { return FTC_MEM_BUF; }
     const std::vector<FtcEntry> &listing() const { return _ftcListing; }
     const FtcFsInfo &fsInfo() const { return _fsInfo; }
     const FtcDeviceInfo &deviceInfo() const { return _deviceInfo; }
@@ -430,6 +437,8 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t transferRetries() const { return _ftcTransferRetries; }        // live transfer-level auto-retry count (survives a retry-restart)
     uint8_t transferRetryMax() const { return _cfgTransferRetries; }       // configured auto-retry budget
     const FtcGaEntry *groupObjects(uint16_t &count) const { count = _gaObjectsN; return _gaObjects; }
+    /// @brief True when a table did not fit the bounded read, so the list above is a prefix, not the whole set.
+    bool groupObjectsTruncated() const { return _gaTruncated; }
 
     // Cooperative console-output primitive (drained one budget/loop in ftcDrainOut): also used by the
     // console for the framed `ftc ?` help so a ~40-line block never blocks the loop. Formats + enqueues one line.
@@ -510,6 +519,8 @@ class FileTransferClient : public OpenKNX::Module
         FtcGaRef,            // group comm: PropertyValue_Read PID_TABLE_REFERENCE of the current table
         FtcGaPtr,            // group comm (BCU1): read the table pointer -> table sits at 0x100 + pointer
         FtcGaMem,            // group comm: A_Memory_Read walking the current table's blob
+        FtcGaDesc,           // group comm: System B group-object descriptors, read word-wise for the KOs the association table named
+        FtcGaRep,            // group comm: printing the report, a few rows per loop() pass
         FtcDownloadOpen,
         FtcDownloadCrcPrefix, // download resume: cooperatively CRC the on-disk prefix [0,keepBytes) before appending
         FtcDownloadChunk,    // download: FileDownload chunk sent, waiting for the data + CRC16
@@ -906,8 +917,17 @@ class FileTransferClient : public OpenKNX::Module
     // --- group communication (ftc <pa> info ga): reuse the device-info discovery, then A_Memory_Read walk ---
     void ftcGaBeginWalk();     // open a T_Connect for the walk (ETS reads memory CO); connectionless fallback if it can't
     void ftcGaAdvance();       // send the next present table's PID_TABLE_REFERENCE read, or emit the report + finish
-    void ftcGaParse();         // extract the just-walked table from _memBuf (address -> _gaList; assoc stays in _memBuf)
-    void ftcGaReport();        // header + resolved GA list + com-object links, via ftcOut (cooperative)
+    void ftcGaArmStream(uint16_t base); // (re)start the streaming walk of one table at its base address
+    void ftcGaLayout(uint8_t &hdr, uint8_t &stride) const; // header size + entry stride of the table being walked
+    bool ftcGaDescWide() const; // group-object descriptor with a 2-octet value pointer (BIM M112) instead of 1
+    void ftcGaArmSys7Grot();    // start the BIM M112 group-object table at its fixed base (no table reference exists)
+    void ftcGaStreamChunk();   // consume the chunk in _memBuf: header, then whole entries, remainder to the carry
+    void ftcGaStreamNext();    // request the next chunk of the current table, or finish it
+    void ftcGaEntry(const uint8_t *e, uint16_t idx); // one parsed entry -> _gaList / _gaObjects
+    void ftcGaFinishTable();   // close the current table and move on
+    void ftcGaReportStart();   // report header; the rows follow over the next loop() passes
+    bool ftcGaReportStep();    // one slice of rows; true while more are left
+    void ftcGaDescNext();      // issue the read for the next KO still missing its descriptor, or finish the table
     bool _gaConnected = false; // we opened a T_Connect for the memory walk -> ftcFinish() closes it (ours only, never an ETS session)
 
     uint8_t _devPropStep = 0;
@@ -923,6 +943,7 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t _devCtrl = 0;
     bool _devHasCtrl = false;
     uint8_t _devBcuRunState = 0xFF, _devBcuPei = 0xFF, _devBcuRunError = 0xFF; // BCU1/BCU2 memory-map identity
+    bool _devHasBcuRunState = false, _devHasBcuPei = false, _devHasBcuRunError = false; // ... and whether each was read
     uint8_t _devBcuMfr = 0, _devBcuApp[3] = {0};                               // BCU manufacturer + application id (BCD)
     bool _devHasBcuApp = false;
     bool _devHasBcu1 = false;                                                  // the BCU identity block was decoded
@@ -951,22 +972,36 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t _propData[16] = {0};
 
     // --- group communication (ftc <pa> info ga): walk the GA + association tables via A_Memory_Read (ETS path) ---
-    static constexpr uint16_t FTC_GA_MAX_BYTES = 640; // per table; covers a big System-2 assoc/GrOT
-    static constexpr uint16_t FTC_GA_MAX = 300; // bounds every buffer write; fits a fully loaded System-2 device
+    // One chunk plus the BCU identity block - NOT a whole table; the tables are parsed as chunks arrive,
+    // so the only bound left is the row array below. Sized one spare chunk above IDENT_LEN (32), or a
+    // device answering more octets than asked fails `off + len <= FTC_MEM_BUF` on the last chunk.
+    static constexpr uint16_t FTC_MEM_BUF = 48;
+    static constexpr uint16_t FTC_GA_MAX = 300; // rows kept; a device above it sets _gaTruncated
     bool _gaMode = false;
     // true = BCU realisation type 1/2 (1-B count, 2-B entries, 8-bit ASAP), false = System B (2/4/16).
     bool _gaClassic = false;
     uint8_t _gaWhich = 0;                             // table being walked: 0 = address, 1 = association, 2 = group-object descriptors (flags/prio/size)
     uint16_t _gaRef = 0;                              // current table's memory base (PID_TABLE_REFERENCE, low word)
-    uint16_t _gaGot = 0;                              // bytes accumulated for the current table
-    uint16_t _gaExpect = 0;                           // total bytes to read (from the leading count), clamped to FTC_GA_MAX_BYTES
-    bool _gaAssocValid = false;                       // the association walk left valid bytes in _memBuf -> gate the report's KO section
+    uint16_t _gaGot = 0;                              // bytes accumulated for the BCU identity block (the tables stream)
+    uint32_t _gaExpect = 0;                           // total bytes of the current table (from its leading count); no clamp
+    // System B group-object descriptors are NOT walked as a blob: one 16-bit word per KO, and a NeoPixel
+    // has 1851 of them, while the association table already named the few KOs that carry a group address.
+    // Reading only those words is also the only way rows above ASAP 319 get their flags at all.
+    uint16_t _gaTbl2 = 0;                             // group-object table base address
+    uint16_t _gaGoCount = 0;                          // entry count from the table header; 0 = header not read yet
+    uint16_t _gaDescI = 0;                            // next _gaObjects row still without a descriptor
+    uint16_t _gaRepIx = 0;                            // next report row to print (cooperative output)
+    uint16_t _gaDescAsap = 0;                         // ASAP the chunk currently in flight starts at
     volatile bool _memPending = false;                // a MemoryResponse is parked (stack ctx) -> consumed in loop()
     volatile bool _adcPending = false;                // an ADCResponse is parked (stack ctx) -> consumed in loop()
     int16_t _adcVal = 0; uint8_t _adcCnt = 0;         // parked A_ADC_Response: raw sum + sample count
     uint16_t _devBusVoltmV = 0; bool _devHasBusVolt = false;
-    uint8_t _memBuf[FTC_GA_MAX_BYTES];                // current table's raw blob; ftcOnMemory writes each chunk at its true offset
+    uint8_t _memBuf[FTC_MEM_BUF];                     // ONE chunk (anchored at offset 0), or the BCU identity block
     uint8_t _memLen = 0;                              // length of the chunk ftcOnMemory just parked
+    // ... and the address it answered for. The streaming walks anchor _gaRef per chunk and read from
+    // index 0, so a late answer for a LATER address lands at a non-zero offset and would be misread as
+    // if it started the chunk. ftcOnMemory only rejects addresses BELOW the anchor.
+    uint16_t _memAddr = 0;
     // _ftcRecvBmp (fast upload) and {_gaList,_gaObjects} (info-ga) are never live at once -- one FtcState
     // machine + isBusy() serialises the ops -- so they share storage (~1 KB saved). Each arm is fully
     // (re)initialised before any read: the bitmap is memset at fast-open; every GA row has ALL fields set
@@ -979,6 +1014,25 @@ class FileTransferClient : public OpenKNX::Module
     };
     uint16_t _gaN = 0;                                // resolved GAs in _gaList (_gaList[t-1] = TSAP t, 1-based)
     uint16_t _gaObjectsN = 0;                         // association rows in _gaObjects
+    // Set when the list is a prefix rather than the whole set: the row array filled up (FTC_GA_MAX), a read
+    // timed out mid-table, a device answered more than it was asked for, or a descriptor sat past the 16-bit
+    // address space. The old 640-byte blob bound - 319 group addresses, 159 associations - is gone.
+    bool _gaTruncated = false;
+    uint8_t _gaConnTry = 0;                           // T_Connect attempts spent on the memory walk
+    bool _gaAddrRead = false;                         // the address table was read to its declared end
+    // Streaming walk of the address / association / classic group-object tables: every table is
+    // [header][entry]*N, so one machine serves all three. Only the bytes of one chunk are ever held.
+    uint16_t _gaTblBase = 0;                          // memory address the current table starts at
+    uint32_t _gaStreamOff = 0;                        // bytes already requested from it
+    uint16_t _gaEntryIdx = 0;                         // entries consumed so far
+    uint16_t _gaCount = 0;                            // entries the header declared
+    uint16_t _gaRamPtr = 0;                           // BIM M112 descriptor header: pointer to the per-object flag bytes
+    bool _gaDescOk = false;                           // that table is still proving itself entry by entry (ftcGaEntry)
+    uint8_t _gaCarry[4] = {0};                        // bytes of a split entry/header, < stride (max 4)
+    uint8_t _gaCarryN = 0;
+    bool _gaHdrDone = false;
+    uint8_t _gaStep = 0;                              // octets the chunk in flight asked for, so it can be repeated
+    uint8_t _gaRetry = 0;                             // repeats spent on it; bounded by FTC_GA_RETRY
 
     FtcFsInfo _fsInfo;
     FtcDeviceInfo _deviceInfo;

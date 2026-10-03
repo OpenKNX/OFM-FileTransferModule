@@ -285,6 +285,15 @@ static constexpr uint8_t FTC_PID_ROUTER_APDU = 58; // largest APDU the router fo
 static constexpr uint8_t FTC_ENUM_MAX = 8; // probe object indices 1..8 for their type
 // Group communication (ftc <pa> info ga): ETS reads the GA + association tables via A_Memory_Read.
 static constexpr uint8_t FTC_PID_TABLE_REFERENCE = 7; // 4-byte value; its low word is the table's memory address
+// _memBuf holds one chunk of the streaming table walk AND, whole, the BCU identity block. The assert
+// lives here rather than in the header so KnxDeviceMap does not have to be pulled into every unit.
+static_assert(FileTransferClient::ftcMemBufSize() >= KnxDeviceMap::IDENT_LEN,
+              "the BCU identity block is read whole into _memBuf");
+
+static constexpr uint8_t FTC_GA_CONN_TRY = 3;         // T_Connect attempts before the walk gives up on the link
+static constexpr uint8_t FTC_GA_RETRY = 2;            // repeats for an unanswered table chunk before giving up
+static constexpr uint16_t FTC_SYS7_GROT_BASE = 0x4400; // BIM M112 group-object table: no PID_TABLE_REFERENCE, fixed base
+static constexpr uint8_t FTC_GA_REP_SLICE = 8; // report rows queued per loop() pass (see ftcGaReportStart)
 static constexpr uint8_t FTC_GA_STEP = 12;            // bytes per A_Memory_Read while walking a table (classic devices accept 12)
 static constexpr uint8_t FTC_CMD_RENAME = 2;
 static constexpr uint8_t FTC_CMD_FILE_DELETE = 42;
@@ -552,13 +561,14 @@ void FileTransferClient::ftcOnMemory(uint16_t pa, uint16_t addr, const uint8_t *
     if (addr >= self->_gaRef)
     {
         const uint16_t off = (uint16_t)(addr - self->_gaRef);
-        if ((uint32_t)off + len <= FTC_GA_MAX_BYTES && len > 0 && data != nullptr)
+        if ((uint32_t)off + len <= FTC_MEM_BUF && len > 0 && data != nullptr)
         {
             memcpy(self->_memBuf + off, data, len);
             wrote = len;
         }
     }
     self->_memLen = wrote;
+    self->_memAddr = addr;    // the consumers that read from index 0 check this against their anchor
     self->_memPending = true; // publish last
 }
 
@@ -3030,12 +3040,12 @@ void FileTransferClient::requestLed(uint16_t pa, uint8_t mode)
         _ledBlinkPa = pa; // loop() toggles it while idle
         _ledBlinkOn = 0;
         _ledBlinkNext = 0;
-        openknx.logger.logWithPrefixAndValues("FTC", "prog-LED blink -> %u.%u.%u", FTC_PA_ARGS(pa));
+        openknx.logger.logWithPrefixAndValues("FTC", "progmode blink -> %u.%u.%u", FTC_PA_ARGS(pa));
         return;
     }
     uint8_t v = mode; // 1 = LED on (lit), 0 = off
     knx.bau().ftcSendPropertyValueWrite(pa, sec, 0, FTC_PID_PROGMODE, 1, 1, &v, 1);
-    openknx.logger.logWithPrefixAndValues("FTC", "prog-LED %s -> %u.%u.%u", mode ? "on" : "off",
+    openknx.logger.logWithPrefixAndValues("FTC", "progmode %s -> %u.%u.%u", mode ? "on" : "off",
                                           FTC_PA_ARGS(pa));
 }
 
@@ -3551,6 +3561,7 @@ void FileTransferClient::ftcDevInfoBegin(uint16_t pa, bool fromScan)
     _adcCnt = 0;
     _devBcuMfr = 0;
     _devBcuRunState = _devBcuPei = _devBcuRunError = 0xFF;
+    _devHasBcuRunState = _devHasBcuPei = _devHasBcuRunError = false;
     // note: _devCoConn is NOT reset here -- ftcFinish() owns closing any CO link we opened; a fresh probe starts with it closed
     _devIdxAddr = _devIdxAssoc = _devIdxApp = _devIdxGrp = _devIdxRouter = -1;
     _devRouterStep = 0;
@@ -3712,9 +3723,14 @@ void FileTransferClient::ftcDevReport()
         // BCU1/BCU2 memory-map extras (ETS "Gerätehersteller / Ausführungszustand / Ausführungsfehler / PEI Typ / Applikationsprogramm").
         if (_devBcuMfr)
             ftcOut(0, "  Manufacturer:   0x%02X%s", _devBcuMfr, _devBcuMfr == 0x01 ? " (Siemens)" : "");
-        ftcOut(0, "  Run state:      %u", _devBcuRunState);
-        ftcOut(0, "  Run error:      0x%02X%s", _devBcuRunError, _devBcuRunError >= 0xFE ? " (OK)" : "");
-        ftcOut(0, "  PEI type:       0x%02X", _devBcuPei);
+        // Only a byte the block covered is reported. The partial-block case used to print "Run error: 0xFF (OK)",
+        // i.e. a healthy device, for a device that had stopped answering half way through the read.
+        if (_devHasBcuRunState) ftcOut(0, "  Run state:      %u", _devBcuRunState);
+        else                    ftcOut(0, "  Run state:      not read");
+        if (_devHasBcuRunError) ftcOut(0, "  Run error:      0x%02X%s", _devBcuRunError, _devBcuRunError >= 0xFE ? " (OK)" : "");
+        else                    ftcOut(0, "  Run error:      not read");
+        if (_devHasBcuPei) ftcOut(0, "  PEI type:       0x%02X", _devBcuPei);
+        else               ftcOut(0, "  PEI type:       not read");
         if (_devHasBcuApp)
             ftcOut(0, "  App program:    %02X%02X%02X  V0.%X", _devBcuApp[0], _devBcuApp[1], _devBcuApp[2], _devBcuApp[2]);
         if (_devHasBusVolt)
@@ -3839,6 +3855,9 @@ void FileTransferClient::ftcDevReport()
     _deviceInfo.bcuRunState = _devBcuRunState;
     _deviceInfo.bcuPeiType = _devBcuPei;
     _deviceInfo.bcuRunError = _devBcuRunError;
+    _deviceInfo.haveBcuRunState = _devHasBcuRunState;
+    _deviceInfo.haveBcuPei = _devHasBcuPei;
+    _deviceInfo.haveBcuRunError = _devHasBcuRunError;
     _deviceInfo.bcuMfr = _devBcuMfr;
     memcpy(_deviceInfo.bcuApp, _devBcuApp, 3);
     _deviceInfo.haveBcuApp = _devHasBcuApp;
@@ -3855,10 +3874,11 @@ void FileTransferClient::requestGroupComm(uint16_t pa)
     knx.bau().ftcSetMemoryCallback(ftcOnMemory); // + arm the A_Memory_Read answer path for the table walk
     _gaMode = true;                              // FtcDevEnum branches to the table walk instead of the load-state reads
     _gaWhich = 0;
+    _gaTruncated = false;
+    _gaAddrRead = false;
     _gaN = 0;
     _gaObjectsN = 0;
     _gaRef = _gaGot = _gaExpect = 0;
-    _gaAssocValid = false;
     _gaConnected = false; // no CO link yet -- ftcGaBeginWalk opens one once the enumeration finishes
     _memPending = false;
     _memLen = 0;
@@ -3909,13 +3929,25 @@ void FileTransferClient::ftcGaBeginWalk()
         _devIdxGrp = -1;
     }
     _gaConnected = false;
+    _gaConnTry = 1;
     if (knx.bau().ftcScanConnect(_ftcTarget))
     {
         _ftcSince = millis();
         _ftcState = FtcGaConnect; // wait for the link, then walk connection-oriented
         return;
     }
-    ftcGaAdvance(); // a connection is already open (not ours to reuse) -> connectionless fallback walk
+    // The link was refused outright (the stack already holds a connection, possibly to another PA).
+    // The timeout path below announces that case; this one used to walk connectionless in silence, and
+    // for a family that answers memory only over a connection the result is an EMPTY device - measured
+    // on a BCU2 with 107 group objects that reported none, indistinguishable from one that has none.
+    if (KnxDeviceMap::needsConnectionOriented(KnxDeviceMap::family(_devMask)))
+    {
+        _gaTruncated = true;
+        ftcOut(CONSOLE_HEADLINE_COLOR,
+               "  (no connection-oriented link to %u.%u.%u - this device family answers memory only over one)",
+               FTC_PA_ARGS(_ftcTarget));
+    }
+    ftcGaAdvance(); // connectionless fallback walk
 }
 
 void FileTransferClient::ftcGaAdvance()
@@ -3928,7 +3960,10 @@ void FileTransferClient::ftcGaAdvance()
         // mapped: their tables live at fixed/pointer locations (03_05_01 §4.16.3.2/§4.17/§4.18), not behind
         // PID_TABLE_REFERENCE. Address table is fixed at 0x0116; association + group-object tables are at 0x100 +
         // the pointer byte held at 0x0111 / 0x0112. (0021 & co. DO have the property objects -> the PID path below.)
-        if (_gaClassic && _devIdxAddr < 0)
+        // classicTables() is about the LAYOUT; memoryMapped() is about WHERE the tables live. System 7
+        // has the classic layout but keeps its tables behind PID_TABLE_REFERENCE at 0x4000+, so the BCU
+        // map at 0x0116/0x0111/0x0112 would read foreign bytes and invent group addresses from them.
+        if (_gaClassic && _devIdxAddr < 0 && KnxDeviceMap::memoryMapped(KnxDeviceMap::family(_devMask)))
         {
             _gaGot = 0;
             _gaExpect = 0;
@@ -3938,12 +3973,16 @@ void FileTransferClient::ftcGaAdvance()
             if (_gaWhich == 0)
             {
                 _gaRef = 0x0116;
-                knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef);
+                ftcGaArmStream(_gaRef);
+                _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+                knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef);
                 _ftcState = FtcGaMem;
             }
             else
             {
                 _gaRef = (_gaWhich == 1) ? 0x0111 : 0x0112; // read the 1-byte table pointer, then walk 0x100 + pointer
+                _gaRetry = 0;
+                _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
                 knx.bau().ftcSendMemoryRead(_ftcTarget, sec, 1, _gaRef);
                 _ftcState = FtcGaPtr;
             }
@@ -3953,6 +3992,13 @@ void FileTransferClient::ftcGaAdvance()
         // descriptors under the application-program object (idxApp, idxGrp absent).
         const int8_t idx = (_gaWhich == 0) ? _devIdxAddr : (_gaWhich == 1) ? _devIdxAssoc
                                                                            : (_devIdxGrp >= 0 ? _devIdxGrp : _devIdxApp);
+        // BIM M112 publishes no table reference for its group-object table, so the walk falls back to the
+        // fixed base - but only after asking, so a device that does publish one is not overridden.
+        if (idx < 0 && _gaWhich == 2 && ftcGaDescWide())
+        {
+            ftcGaArmSys7Grot();
+            return;
+        }
         if (idx < 0) continue; // this table object was not discovered on the device
         _propPending = false;
         _ftcSince = millis();
@@ -3962,96 +4008,261 @@ void FileTransferClient::ftcGaAdvance()
         _ftcState = FtcGaRef;
         return;
     }
-    ftcGaReport();
-    ftcFinish();
+    ftcGaReportStart(); // the rows follow over the next loop() passes, see FtcGaRep
 }
 
-void FileTransferClient::ftcGaParse()
+void FileTransferClient::ftcGaDescNext()
 {
-    // Extract the table just accumulated in _memBuf, mask-aware. Both families resolve a TSAP (1-based) via
-    // _gaList[TSAP-1], so the address parse normalises to that layout regardless of family.
+    // Walk the association rows and read the descriptor word of the next KO that has none yet. The read is
+    // anchored at that word, so ftcOnMemory lands it at offset 0. A loop, not self-recursion: a high table
+    // base with a large count can skip every one of up to FTC_GA_MAX rows, and 300 stack frames do not fit
+    // an RP2040 in a build that does not turn the tail call into a jump.
+    while (true)
+    {
+        while (_gaDescI < _gaObjectsN &&
+               (_gaObjects[_gaDescI].cfgValid || _gaObjects[_gaDescI].co == 0 || _gaObjects[_gaDescI].co > _gaGoCount))
+            _gaDescI++;
+
+        if (_gaDescI >= _gaObjectsN)
+        {
+            _gaWhich++;
+            ftcGaAdvance();
+            return;
+        }
+
+        const uint16_t asap = _gaObjects[_gaDescI].co;
+        const uint32_t at = (uint32_t)_gaTbl2 + (uint32_t)asap * 2u;
+        uint32_t left = ((uint32_t)_gaGoCount - asap + 1u) * 2u; // never read past the last descriptor
+        if (at + 2u > 0x10000u)                                  // A_Memory_Read addresses 16 bit
+        {
+            _gaTruncated = true; // the row keeps cfgValid false and is reported as unknown
+            _gaDescI++;
+            continue;
+        }
+        if (at + left > 0x10000u) left = 0x10000u - at;
+        uint8_t step = FTC_GA_STEP;
+        if (left < step) step = (uint8_t)left;
+
+        _gaDescAsap = asap;
+        _gaRef = (uint16_t)at;
+        _gaStep = step;
+        _gaRetry = 0;
+        _ftcSince = millis();
+        _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+        SecurityControl sec{false, None};
+        knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, _gaRef);
+        return;
+    }
+}
+
+void FileTransferClient::ftcGaArmStream(uint16_t base)
+{
+    // The FIRST read of a table fetches its header only: a blind full chunk over-reads a short table and
+    // a device may refuse the whole answer. Measured 2026-10-02 on 1.1.52 (address table 10 octets): a
+    // 12-octet read at B900 got nothing, ETS reads 2 then 8. Later chunks are clamped in ftcGaStreamNext().
+    uint8_t hdr, stride;
+    ftcGaLayout(hdr, stride);
+    _gaStep = hdr;
+    _gaRetry = 0;
+    _gaTblBase = base;
+    _gaStreamOff = 0;
+    _gaEntryIdx = 0;
+    _gaCount = 0;
+    _gaCarryN = 0;
+    _gaHdrDone = false;
+    _gaRamPtr = 0;
+    _gaDescOk = false;
+    _gaExpect = 0;
+}
+
+void FileTransferClient::ftcGaArmSys7Grot()
+{
+    // BIM M112 keeps no PID_TABLE_REFERENCE for its group-object table: 1.1.30 and 1.1.161 both answer
+    // obj 3 PID 7 with nr_of_elem 0, and ETS does not ask - it reads the table at a fixed 0x4400 in the
+    // user EEPROM (06 Profiles p.41: 4000h-CFFFh), beside the address table at 0x4000 and the association
+    // table at 0x4200. A convention, not a device answer, so ftcGaEntry() makes the table prove itself.
+    _gaGot = 0;
+    _gaExpect = 0;
+    _propPending = false;
+    _ftcSince = millis();
+    SecurityControl sec{false, None};
+    _gaRef = FTC_SYS7_GROT_BASE;
+    ftcGaArmStream(_gaRef);
+    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef);
+    _ftcState = FtcGaMem;
+}
+
+bool FileTransferClient::ftcGaDescWide() const
+{
+    return KnxDeviceMap::family(_devMask) == KnxDeviceMap::Family::System7;
+}
+
+void FileTransferClient::ftcGaLayout(uint8_t &hdr, uint8_t &stride) const
+{
+    // Every table is [header][entry]*N. Address: System B [count:2] + 2 B/entry; BCU RT1/2
+    // [count:1][own IA:2] + 2 B/entry. Association: [count] + 4 B (System B) or 2 B (classic).
+    // Group objects: classic [size:1][ram-ptr:1] + 3 B (03_05_01 4.18.3), BIM M112 [count:1][ram-ptr:2]
+    // + 4 B - read off an ETS busmon of 1.1.30 (count 71, 287 octets = 3 + 71*4), flags matching ETS.
+    if (_gaWhich == 0)      { hdr = _gaClassic ? 3u : 2u; stride = 2u; }
+    else if (_gaWhich == 1) { hdr = _gaClassic ? 1u : 2u; stride = _gaClassic ? 2u : 4u; }
+    else if (ftcGaDescWide()){ hdr = 3u; stride = 4u; }
+    else                    { hdr = 2u; stride = 3u; }
+}
+
+void FileTransferClient::ftcGaEntry(const uint8_t *e, uint16_t idx)
+{
     if (_gaWhich == 0)
     {
-        // Address table -> _gaList[i] = GA for TSAP (i+1), big-endian.
-        //   System B: [count:2] then GAs at 2 + i*2.
-        //   BCU RT1/2: [len:1][IA:2] then GAs at 3 + i*2 (entry 0 is the device's own IA, not a GA).
-        _gaN = 0;
-        const uint16_t base = _gaClassic ? 3u : 2u;
-        for (uint16_t i = 0; _gaN < FTC_GA_MAX; i++)
-        {
-            const uint16_t off = (uint16_t)(base + i * 2);
-            if ((uint32_t)off + 2 > _gaGot) break; // only parse bytes we actually read
-            _gaList[_gaN++] = (uint16_t)((_memBuf[off] << 8) | _memBuf[off + 1]);
-        }
+        if (_gaN >= FTC_GA_MAX) { _gaTruncated = true; return; }
+        _gaList[_gaN++] = (uint16_t)((e[0] << 8) | e[1]); // _gaList[t-1] = GA of TSAP t
+        return;
     }
-    else if (_gaWhich == 1)
+    if (_gaWhich == 1)
     {
-        // Association table -> one structured _gaObjects row per (TSAP, ASAP) pair. ASAP = KO number, TSAP indexes
-        // the address table (1-based; TSAP 0 is the device's own IA -> no GA). Flags/prio/size fill in at which=2.
-        const uint16_t count = _gaClassic ? _memBuf[0] : (uint16_t)((_memBuf[0] << 8) | _memBuf[1]);
-        const uint16_t base = _gaClassic ? 1u : 2u;
-        const uint16_t stride = _gaClassic ? 2u : 4u;
-        _gaObjectsN = 0;
-        for (uint16_t i = 0; i < count && _gaObjectsN < FTC_GA_MAX; i++)
-        {
-            const uint16_t oi = (uint16_t)(base + i * stride);
-            if ((uint32_t)oi + stride > _gaGot) break;
-            const uint16_t tsap = _gaClassic ? _memBuf[oi] : (uint16_t)((_memBuf[oi] << 8) | _memBuf[oi + 1]);
-            const uint16_t asap = _gaClassic ? _memBuf[oi + 1] : (uint16_t)((_memBuf[oi + 2] << 8) | _memBuf[oi + 3]);
-            FtcGaEntry &e = _gaObjects[_gaObjectsN++];
-            e.co = asap;
-            e.ga = (tsap >= 1 && (uint16_t)(tsap - 1) < _gaN) ? _gaList[tsap - 1] : 0;
-            e.flags = 0;
-            e.prio = 0xFF;
-            e.sizeCode = 0xFF;
-            e.cfgValid = false; // full init: the descriptor pass sets these only for matched rows
-        }
-        _gaAssocValid = (_gaObjectsN > 0);
+        if (_gaObjectsN >= FTC_GA_MAX) { _gaTruncated = true; return; }
+        const uint16_t tsap = _gaClassic ? e[0] : (uint16_t)((e[0] << 8) | e[1]);
+        const uint16_t asap = _gaClassic ? e[1] : (uint16_t)((e[2] << 8) | e[3]);
+        // An association names a TSAP; only the address table turns it into a group address. Flagged per
+        // ROW (TSAP 0 legitimately has none) and only when the address TABLE is missing: a dangling TSAP
+        // in a table read completely is the device's own doing - a BCU2 declares 107 and holds 59, and
+        // ETS lists the 59. Measured on 1.1.52.
+        FtcGaEntry &r = _gaObjects[_gaObjectsN++];
+        r.co = asap;
+        r.ga = (tsap >= 1 && (uint16_t)(tsap - 1) < _gaN) ? _gaList[tsap - 1] : 0;
+        r.gaUnknown = (tsap >= 1 && (uint16_t)(tsap - 1) >= _gaN && !_gaAddrRead) ? 1 : 0;
+        r.flags = 0;
+        r.prio = 0xFF;
+        r.sizeCode = 0xFF;
+        r.cfgValid = false; // the descriptor pass sets these only for matched rows
+        return;
     }
-    else if (_gaWhich == 2 && !_gaClassic)
+    // Classic group-object table: descriptor idx belongs to ASAP idx. The config/type pair sits behind the
+    // value pointer, which is 1 octet on BCU and 2 on BIM M112 - the flag bits themselves are identical.
+    if (ftcGaDescWide())
     {
-        // System B Group Object Table (knx group_object.cpp): uint16_t[] big-endian, word[0] = goCount, then one
-        // 16-bit descriptor word per KO at word[asap] (ASAP 1-based). Bits: 15 update(A), 14 transmit(Ü), 13 read-
-        // on-init, 12 write(S), 11 read(L), 10 comm(K), 9-8 priority, low byte = value-type code (object size).
-        const uint16_t goCount = (uint16_t)((_memBuf[0] << 8) | _memBuf[1]);
-        for (uint16_t asap = 1; asap <= goCount; asap++)
+        // The BIM M112 base is a convention, not a device pointer, so the header is checked before a flag
+        // is taken from it: the flags live in RAM, below the user EEPROM (06 Profiles p.41: 4000h-CFFFh).
+        // Three per-ENTRY rules were measured FALSE on 1.1.30/1.1.161/1.1.13 - do not reinstate them: the
+        // first value behind the flags, rising value pointers, a value pointer always above the flags.
+        if (idx == 0)
+            _gaDescOk = (_gaCount > 0 && _gaRamPtr != 0 && _gaRamPtr < FTC_SYS7_GROT_BASE);
+        if (!_gaDescOk)
         {
-            const uint16_t oi = (uint16_t)(asap * 2);
-            if ((uint32_t)oi + 2 > _gaGot) break;
-            const KnxDeviceMap::ComObject co = KnxDeviceMap::decodeComObjectSystemB((uint16_t)((_memBuf[oi] << 8) | _memBuf[oi + 1]));
+            // Nothing was taken yet (this fires on entry 0), but clear anyway rather than leave a table
+            // half-applied, and stop reading instead of walking out the declared length.
             for (uint16_t i = 0; i < _gaObjectsN; i++)
-                if (_gaObjects[i].co == asap)
-                {
-                    _gaObjects[i].flags = co.flags;
-                    _gaObjects[i].prio = co.prio;
-                    _gaObjects[i].sizeCode = co.sizeCode;
-                    _gaObjects[i].cfgValid = true;
-                }
+            {
+                _gaObjects[i].flags = 0;
+                _gaObjects[i].prio = 0xFF;
+                _gaObjects[i].sizeCode = 0xFF;
+                _gaObjects[i].cfgValid = false;
+            }
+            _gaEntryIdx = _gaCount; // ends the chunk loop and the table (ftcGaStreamNext)
+            _gaTruncated = true;
+            return;
         }
+        if (e[0] == 0 && e[1] == 0 && e[2] == 0 && e[3] == 0) return; // unused slot, no descriptor to read
     }
-    else if (_gaWhich == 2 && _gaClassic)
-    {
-        // Group Object Table (03_05_01 §4.18.3): [CurrentSize:1][RAM-Flags-Ptr:1] then a 3-octet descriptor
-        // per KO -> [DataPtr:1][Config:1][Type:1]. Descriptor n belongs to KO (ASAP) n. Config octet carries the
-        // flags + priority; Type octet the object size. Fill every _gaObjects row whose co matches a descriptor.
-        const uint8_t size = _memBuf[0];
-        for (uint16_t n = 0; n < size; n++)
+    const KnxDeviceMap::ComObject co = ftcGaDescWide() ? KnxDeviceMap::decodeComObjectClassic(e[2], e[3])
+                                                       : KnxDeviceMap::decodeComObjectClassic(e[1], e[2]);
+    for (uint16_t i = 0; i < _gaObjectsN; i++)
+        if (_gaObjects[i].co == idx)
         {
-            const uint16_t oi = (uint16_t)(2 + n * 3);
-            if ((uint32_t)oi + 3 > _gaGot) break;
-            const KnxDeviceMap::ComObject co = KnxDeviceMap::decodeComObjectClassic(_memBuf[oi + 1], _memBuf[oi + 2]);
-            for (uint16_t i = 0; i < _gaObjectsN; i++)
-                if (_gaObjects[i].co == n)
-                {
-                    _gaObjects[i].flags = co.flags;
-                    _gaObjects[i].prio = co.prio;
-                    _gaObjects[i].sizeCode = co.sizeCode;
-                    _gaObjects[i].cfgValid = true;
-                }
+            _gaObjects[i].flags = co.flags;
+            _gaObjects[i].prio = co.prio;
+            _gaObjects[i].sizeCode = co.sizeCode;
+            _gaObjects[i].cfgValid = true;
         }
-    }
 }
 
+void FileTransferClient::ftcGaStreamChunk()
+{
+    uint8_t hdr, stride;
+    ftcGaLayout(hdr, stride);
+    // The scratch below holds one chunk plus the carry, so a device answering MORE than was asked for has
+    // its surplus cut here. The cursor advances by the CUT length, so the next read starts where the cut
+    // was made and fetches those octets again - nothing is lost, and this is not a truncated read.
+    if (_memLen > FTC_GA_STEP) _memLen = FTC_GA_STEP;
+    _gaStreamOff += _memLen;
+
+    // carry (a split header or entry from the previous chunk) + this chunk, consumed in place
+    uint8_t buf[FTC_GA_STEP + sizeof(_gaCarry)];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < _gaCarryN && n < sizeof(buf); i++) buf[n++] = _gaCarry[i];
+    for (uint8_t i = 0; i < _memLen && n < sizeof(buf); i++) buf[n++] = _memBuf[i];
+    _gaCarryN = 0;
+
+    uint8_t pos = 0;
+    if (!_gaHdrDone)
+    {
+        if (n < hdr) { while (pos < n && _gaCarryN < sizeof(_gaCarry)) _gaCarry[_gaCarryN++] = buf[pos++]; return; }
+        _gaCount = _gaClassic ? buf[0] : (uint16_t)((buf[0] << 8) | buf[1]);
+        if (_gaWhich == 2 && ftcGaDescWide()) _gaRamPtr = (uint16_t)((buf[1] << 8) | buf[2]); // BIM M112 flags pointer
+        // The classic address table's first entry is the device's own individual address, not a group
+        // address; it is swallowed by the 3-byte header, so one entry fewer remains.
+        if (_gaWhich == 0 && _gaClassic && _gaCount) _gaCount--;
+        _gaHdrDone = true;
+        _gaExpect = (uint32_t)hdr + (uint32_t)_gaCount * stride;
+        pos = hdr;
+    }
+    while ((uint16_t)pos + stride <= n && _gaEntryIdx < _gaCount)
+    {
+        ftcGaEntry(buf + pos, _gaEntryIdx++);
+        pos = (uint8_t)(pos + stride);
+    }
+    while (pos < n && _gaCarryN < sizeof(_gaCarry)) _gaCarry[_gaCarryN++] = buf[pos++];
+}
+
+void FileTransferClient::ftcGaStreamNext()
+{
+    // which == 2 only FILLS existing rows, it appends none - a full row array is not a reason to stop it.
+    const bool capped = (_gaWhich == 0) ? (_gaN >= FTC_GA_MAX)
+                      : (_gaWhich == 1) ? (_gaObjectsN >= FTC_GA_MAX)
+                                        : false;
+    const bool more = !_gaHdrDone || (_gaEntryIdx < _gaCount && _gaStreamOff < _gaExpect);
+    if (!more || capped)
+    {
+        if (capped && _gaEntryIdx < _gaCount) _gaTruncated = true;
+        ftcGaFinishTable();
+        return;
+    }
+    uint32_t left = _gaHdrDone ? (_gaExpect - _gaStreamOff) : (uint32_t)FTC_GA_STEP;
+    uint8_t step = (left < FTC_GA_STEP) ? (uint8_t)left : FTC_GA_STEP;
+    const uint32_t at = (uint32_t)_gaTblBase + _gaStreamOff;
+    // A_Memory_Read carries a 16-bit address; a table that would run past it is reported, not wrapped.
+    if (step == 0 || at + step > 0x10000u)
+    {
+        if (_gaEntryIdx < _gaCount) _gaTruncated = true;
+        ftcGaFinishTable();
+        return;
+    }
+    _gaRef = (uint16_t)at; // anchor: ftcOnMemory writes this chunk at offset 0, so one chunk of RAM suffices
+    _gaStep = step;
+    _gaRetry = 0;
+    _ftcSince = millis();
+    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+    SecurityControl sec{false, None};
+    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, _gaRef);
+}
+
+void FileTransferClient::ftcGaFinishTable()
+{
+    // Did the address table arrive in full? That decides whether an association pointing past it means
+    // "we could not read the address" (unknown) or "the device's own table has no entry there" (none).
+    // _gaN, not only _gaEntryIdx: the index advances even for an entry that FTC_GA_MAX threw away
+    // (ftcGaEntry), so a table whose last chunk crossed the row cap would otherwise count as complete
+    // and every TSAP above the cap would render as "has no group address" instead of "unknown".
+    if (_gaWhich == 0) _gaAddrRead = (_gaHdrDone && _gaEntryIdx >= _gaCount && _gaN >= _gaCount);
+    // A BIM M112 descriptor table that never proved itself leaves every flag unknown. Without this the
+    // declared-count-of-zero case ends the table with nothing read and nothing said: no entry is parsed,
+    // so the gate never runs, and ftcGaStreamNext() sees "no more" rather than "cut short".
+    if (_gaWhich == 2 && ftcGaDescWide() && !_gaDescOk) _gaTruncated = true;
+    _gaWhich++;
+    ftcGaAdvance();
+}
+
+/** @brief The five flag letters, or "?" when the descriptor for this row was never read. */
 static void ftcGaFlagsStr(const FtcGaEntry &e, char *out, size_t n)
 {
     if (!e.cfgValid)
@@ -4064,33 +4275,72 @@ static void ftcGaFlagsStr(const FtcGaEntry &e, char *out, size_t n)
              (e.flags & 0x08) ? 'T' : '-', (e.flags & 0x10) ? 'U' : '-');
 }
 
-void FileTransferClient::ftcGaReport()
+/**
+ * @brief Open the group-communication report: the headline and the column header.
+ * @details The rows follow in ftcGaReportStep(), a slice per loop() pass; printing all of them here
+ *          queued ~40 KB on a device with 264 KB. The row LIMIT stays as it is - the knxOTA web page
+ *          reads the same _gaObjects array and would lose rows with it.
+ */
+void FileTransferClient::ftcGaReportStart()
 {
+    // Release the bus BEFORE printing. The walk is over; nothing below needs the link, and printing can
+    // take seconds on a slow console. Leaving the T_Connect open across it would hold a foreign device in
+    // a point-to-point connection - blocking ETS and any other master - and that connection dies after
+    // ~6 s without traffic anyway (03_03_04), while this state sends nothing. The old code disconnected
+    // immediately because it enqueued the whole report in one pass; splitting it must not cost that.
+    if (_gaConnected)
+    {
+        knx.bau().ftcScanDisconnect();
+        _gaConnected = false;
+    }
+    if (_devCoConn)
+    {
+        knx.bau().ftcScanDisconnect();
+        _devCoConn = false;
+    }
     ftcOut(CONSOLE_HEADLINE_COLOR, "Group communication %u.%u.%u", FTC_PA_ARGS(_ftcTarget));
-
+    _gaRepIx = 0;
+    // The incompleteness goes FIRST, same as the host renderer: a device whose address table timed out
+    // and whose association table is absent otherwise reads "no group objects" and the contradiction
+    // only a line later.
+    if (_gaTruncated)
+        ftcOut(0, "  INCOMPLETE: a table was cut short (row limit %u, a read timeout, or the 16-bit address end) - this is a prefix.", (unsigned)FTC_GA_MAX);
     if (_gaObjectsN == 0)
         ftcOut(0, "  (no group objects / association table)");
     else
-    {
         ftcOut(0, "  KO     Group address    Flags        Prio     Size");
-        for (uint16_t i = 0; i < _gaObjectsN; i++)
-        {
-            const FtcGaEntry &e = _gaObjects[i];
-            char ga[16];
-            if (e.ga)
-                snprintf(ga, sizeof(ga), "%u/%u/%u", (e.ga >> 11) & 0x1F, (e.ga >> 8) & 0x07, e.ga & 0xFF);
-            else
-                snprintf(ga, sizeof(ga), "-");
-            char fl[16];
-            ftcGaFlagsStr(e, fl, sizeof(fl));
-            ftcOut(0, "  %-5u  %-15s  %-11s  %-7s  %s", e.co, ga, fl,
-                   e.cfgValid ? KnxDeviceMap::prioName(e.prio) : "-", e.cfgValid ? KnxDeviceMap::sizeName(e.sizeCode) : "-");
-        }
-        ftcOut(0, "  C Comm · R Read · W Write · T Transmit · U Update   (Size = object size, not the semantic DPT)");
+    _ftcState = FtcGaRep;
+}
+
+/**
+ * @brief Print the next slice of report rows. Returns false once the report is finished.
+ */
+bool FileTransferClient::ftcGaReportStep()
+{
+    // Small on purpose: the queue holds at most this many lines at a time, and loop() gets back control
+    // between slices. FTC_GA_REP_SLICE * sizeof(FtcOutLine) is about 1 KB instead of 40.
+    for (uint8_t n = 0; n < FTC_GA_REP_SLICE && _gaRepIx < _gaObjectsN; n++, _gaRepIx++)
+    {
+        const FtcGaEntry &e = _gaObjects[_gaRepIx];
+        char ga[16];
+        if (e.ga)
+            snprintf(ga, sizeof(ga), "%u/%u/%u", (e.ga >> 11) & 0x1F, (e.ga >> 8) & 0x07, e.ga & 0xFF);
+        else
+            snprintf(ga, sizeof(ga), "%s", e.gaUnknown ? "?" : "-");
+        char fl[16];
+        ftcGaFlagsStr(e, fl, sizeof(fl));
+        ftcOut(0, "  %-5u  %-15s  %-11s  %-7s  %s", e.co, ga, fl,
+               e.cfgValid ? KnxDeviceMap::prioName(e.prio) : "-",
+               e.cfgValid ? KnxDeviceMap::sizeName(e.sizeCode) : "-");
     }
+    if (_gaRepIx < _gaObjectsN) return true;
+
+    if (_gaObjectsN != 0)
+        ftcOut(0, "  C Comm · R Read · W Write · T Transmit · U Update   (Size = object size, not the semantic DPT)");
     ftcOut(0, "%s", RULE_REPORT);
     _status.ok = (_gaObjectsN > 0);
     ftcStatusMsg("group communication read");
+    return false;
 }
 
 /** @brief perf/upload `w<N>`: pin the fast window, clamped to [MIN,MAX] (0 = adaptive AIMD). No probe-up when pinned; loss still ratchets it down one step. */
@@ -5090,8 +5340,8 @@ void FileTransferClient::loopDeviceInfo()
                 if (ftcDropDup()) return;
                 if (_memLen == 0) return;
                 _gaGot = (uint16_t)(_gaGot + _memLen);
-                if (_gaGot > FTC_GA_MAX_BYTES) _gaGot = FTC_GA_MAX_BYTES;
-                if (_gaGot < _gaExpect && _gaGot < FTC_GA_MAX_BYTES)
+                if (_gaGot > FTC_MEM_BUF) _gaGot = FTC_MEM_BUF;
+                if (_gaGot < _gaExpect && _gaGot < FTC_MEM_BUF)
                 {
                     uint8_t step = FTC_GA_STEP;
                     if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
@@ -5109,6 +5359,9 @@ void FileTransferClient::loopDeviceInfo()
                 _devBcuRunState = id.runState;
                 _devBcuPei = id.peiType;
                 _devBcuRunError = id.runError;
+                _devHasBcuRunState = id.haveRunState;
+                _devHasBcuPei = id.havePei;
+                _devHasBcuRunError = id.haveRunError;
                 _devBcuMfr = id.manufacturer;
                 memcpy(_devBcuApp, id.appBcd, 3);
                 _devHasBcuApp = id.haveApp;
@@ -5532,6 +5785,29 @@ void FileTransferClient::loopDeviceInfo()
             else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
             {
                 knx.bau().ftcScanDisconnect();
+                // A device that just served a walk still holds the old connection for its own timeout
+                // (03_03_04), so the next T_Connect can miss a single 600 ms window. One shot used to be
+                // the end of it: measured on a BCU2, the first run read 107 objects and the two right
+                // after it read none. Bounded by FTC_GA_CONN_TRY.
+                if (_gaConnTry < FTC_GA_CONN_TRY)
+                {
+                    _gaConnTry++;
+                    if (knx.bau().ftcScanConnect(_ftcTarget))
+                    {
+                        _ftcSince = millis();
+                        return;
+                    }
+                }
+                // Walking connectionless now. BCU1, BCU2 and BIM M112 are not required to answer memory
+                // access that way (06 Profiles 4.3 p.42), so the result would be an EMPTY device rather
+                // than a read failure. Say it instead.
+                if (KnxDeviceMap::needsConnectionOriented(KnxDeviceMap::family(_devMask)))
+                {
+                    _gaTruncated = true;
+                    ftcOut(CONSOLE_HEADLINE_COLOR,
+                           "  (no connection-oriented link to %u.%u.%u - this device family answers memory only over one)",
+                           FTC_PA_ARGS(_ftcTarget));
+                }
                 ftcGaAdvance();
             }
             return;
@@ -5555,18 +5831,44 @@ void FileTransferClient::loopDeviceInfo()
                     _gaExpect = 0;
                     _ftcSince = millis();
                     SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef); // CO over the open T_Connect
+                    ftcGaArmStream(_gaRef);
+                    if (_gaWhich == 2 && !_gaClassic)
+                    {
+                        // Descriptors are addressed per KO. This first read takes the count word ALONE - a blind
+                        // chunk over-reads a short table and some devices then answer nothing at all; afterwards
+                        // only the words the association table asked for are fetched - see ftcGaDescNext().
+                        _gaTbl2 = _gaRef;
+                        _gaGoCount = 0;
+                        _gaDescI = 0;
+                        _gaDescAsap = 0; // this chunk starts at the count word
+                        _gaStep = 2;     // the count word only - a blind chunk over-reads a short table
+                        _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+                        knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef);
+                        _ftcState = FtcGaDesc;
+                        return;
+                    }
+                    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef); // CO over the open T_Connect
                     _ftcState = FtcGaMem;
+                }
+                else if (_gaWhich == 2 && ftcGaDescWide())
+                {
+                    ftcGaArmSys7Grot(); // the device says "no such property" -> the BIM M112 fixed base
                 }
                 else
                 {
+                    // A table whose pointer cannot be read is MISSING from the result, not absent from the
+                    // device. Unmarked, a BCU2 with 107 group objects reported none - and that read exactly
+                    // like a device that genuinely has none.
+                    _gaTruncated = true;
                     _gaWhich++; // no usable reference -> skip this table
                     ftcGaAdvance();
                 }
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
-                _gaWhich++; // no answer -> skip this table
+                _gaTruncated = true; // same: skipped, not absent
+                _gaWhich++;          // no answer -> skip this table
                 ftcGaAdvance();
             }
             return;
@@ -5578,6 +5880,12 @@ void FileTransferClient::loopDeviceInfo()
             if (_memPending)
             {
                 _memPending = false;
+                // Anchor BEFORE the duplicate window: a frame that is not the answer to the outstanding
+                // read must not stamp _ftcRespT, or it pushes the real answer arriving right behind it
+                // into the 12 ms window and the read is lost to a timeout instead.
+                // Same anchor check as FtcGaMem/FtcGaDesc: a late answer for a HIGHER address lands at a
+                // non-zero offset and _memBuf[0] would then be a stale byte taken as the table pointer.
+                if (_memAddr != _gaRef) return;
                 if (ftcDropDup()) return;
                 // 0x00 / 0xFF are "absent" pointer values (System 2 stores its assoc/GrOT elsewhere) -> skip the
                 // table cleanly instead of reading 0x0100 / 0x01FF junk.
@@ -5588,7 +5896,9 @@ void FileTransferClient::loopDeviceInfo()
                     _gaExpect = 0;
                     _ftcSince = millis();
                     SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, FTC_GA_STEP, _gaRef);
+                    ftcGaArmStream(_gaRef);
+                    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef);
                     _ftcState = FtcGaMem;
                 }
                 else
@@ -5599,6 +5909,19 @@ void FileTransferClient::loopDeviceInfo()
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
+                // Retry first, like FtcGaMem and FtcGaDesc: this was the only chained read that gave up on
+                // the first lost answer, and marking it truncated turned one lost telegram into a failed run.
+                if (_gaRetry < FTC_GA_RETRY)
+                {
+                    _gaRetry++;
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    _ftcRespT = 0;
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, 1, _gaRef);
+                    return;
+                }
+                // No answer is "skipped", not "absent" -- same rule as FtcGaRef.
+                _gaTruncated = true;
                 _gaWhich++;
                 ftcGaAdvance();
             }
@@ -5610,47 +5933,116 @@ void FileTransferClient::loopDeviceInfo()
             if (_memPending)
             {
                 _memPending = false;
+                // The chunk is parsed from index 0, so it must BE the chunk that was asked for. A mirrored
+                // answer for a later address is placed at a non-zero offset and would be read as if it
+                // started here. No re-send: the timeout below ends the table if nothing valid arrives.
+                // Checked BEFORE the duplicate window so a foreign answer cannot stamp _ftcRespT and make
+                // the real one look like a mirror of itself.
+                if (_memAddr != _gaRef) return;
                 if (ftcDropDup()) return; // late IP-mirror of a memory answer -> ignore
                 if (_memLen == 0) return; // rejected/empty chunk -> let the timeout end the table
-                _gaGot = (uint16_t)(_gaGot + _memLen);
-                if (_gaGot > FTC_GA_MAX_BYTES) _gaGot = FTC_GA_MAX_BYTES;
-                if (_gaExpect == 0 && _gaGot >= (_gaClassic ? 1u : 2u))
-                {
-                    // first chunk carries the entry count -> total length, mask-aware.
-                    uint32_t need;
-                    if (_gaClassic)
-                    {
-                        // BCU RT1/2: address/assoc = [count:1] + 2-octet entries; GrOT = [size:1][ram-ptr:1] + 3-octet descriptors.
-                        const uint16_t count = _memBuf[0];
-                        need = (_gaWhich == 2) ? (2u + (uint32_t)count * 3u) : (1u + (uint32_t)count * 2u);
-                    }
-                    else
-                    {
-                        // System B: [count:2] then address 2B/entry, association 4B/entry, GrOT 2B/entry (one 16-bit descriptor word per KO).
-                        const uint16_t count = (uint16_t)((_memBuf[0] << 8) | _memBuf[1]);
-                        need = 2u + (uint32_t)count * (_gaWhich == 1 ? 4u : 2u);
-                    }
-                    _gaExpect = (uint16_t)(need > FTC_GA_MAX_BYTES ? FTC_GA_MAX_BYTES : need);
-                }
-                if (_gaGot < _gaExpect && _gaGot < FTC_GA_MAX_BYTES)
-                {
-                    uint8_t step = FTC_GA_STEP;
-                    if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
-                    _ftcSince = millis();
-                    SecurityControl sec{false, None};
-                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot)); // CO over the open T_Connect
-                    return;
-                }
-                // table complete -> parse it, then advance to the next table (or emit the report).
-                ftcGaParse();
-                _gaWhich++;
-                ftcGaAdvance();
+                _gaRetry = 0;
+                ftcGaStreamChunk();       // parse what arrived; only a carry of < 4 bytes is kept
+                ftcGaStreamNext();        // next chunk, or close the table
             }
             else if (millis() - _ftcSince > FTC_TIMEOUT)
             {
-                // partial table: parse what arrived and note it (same skip-on-timeout pattern as FtcDevProp/FtcDevLoad).
-                ftcOut(CONSOLE_HEADLINE_COLOR, "  (%s table read timed out -- partial)", _gaWhich == 0 ? "address" : "association");
-                ftcGaParse();
+                // One lost chunk used to cost the WHOLE table: the address table of a device that missed a
+                // single answer came back empty, and every group address then rendered as "none". Measured
+                // on a live line. Bounded by _gaRetry so a device that never answers still ends the table.
+                if (_gaRetry < FTC_GA_RETRY)
+                {
+                    _gaRetry++;
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef);
+                    return;
+                }
+                ftcOut(CONSOLE_HEADLINE_COLOR, "  (%s table read timed out -- partial)",
+                       _gaWhich == 0 ? "address" : _gaWhich == 1 ? "association" : "group object");
+                _gaTruncated = true;
+                ftcGaFinishTable();
+            }
+            return;
+        }
+
+        case FtcGaRep:
+        {
+            // One slice of report rows per pass. loop() drains the queue before it comes back here, so
+            // the queue never holds more than a slice.
+            if (!ftcGaReportStep()) ftcFinish();
+            return;
+        }
+
+        case FtcGaDesc:
+        {
+            if (_memPending)
+            {
+                _memPending = false;
+                // Anchor first, duplicate window second: see FtcGaMem. Descriptor addresses are NOT
+                // monotonic - they follow association order - so a stale answer can be ABOVE the current
+                // anchor and get placed at a non-zero offset.
+                if (_memAddr != _gaRef) return;
+                if (ftcDropDup()) return; // late IP-mirror of a memory answer -> ignore
+                // Without this the next pass would re-send the SAME read and re-arm _ftcSince, so the
+                // timeout never fires: an endless read/answer ping-pong with the client wedged busy.
+                // < 2, not == 0: a 1-octet answer yields words = _memLen/2 = 0, no row flips cfgValid,
+                // and ftcGaDescNext() would re-send the SAME read while zeroing both the retry budget and
+                // _ftcSince - an endless ping-pong. Progress here is defined only by cfgValid flipping.
+                if (_memLen < 2) return; // nothing usable -> let the timeout end the table
+                if (_gaGoCount == 0)
+                {
+                    // The first read starts at the table base, so word 0 is the entry count, and it asks for
+                    // those two octets only (see FtcGaRef). The length check above already covers this read;
+                    // it is repeated here because this block is the one that indexes _memBuf[0..1].
+                    if (_memLen < 2) return;
+                    _gaGoCount = (uint16_t)((_memBuf[0] << 8) | _memBuf[1]);
+                    if (_gaGoCount == 0)
+                    {
+                        _gaWhich++;
+                        ftcGaAdvance();
+                        return;
+                    }
+                }
+                // One chunk spans several consecutive descriptors, so every KO it covers is filled, not just the
+                // one it was requested for. Word 0 of the first chunk is the count, not a descriptor - _gaDescAsap
+                // is 0 there and the asap == 0 guard keeps it out.
+                {
+                    const uint16_t words = (uint16_t)(_memLen / 2);
+                    for (uint16_t w = 0; w < words; w++)
+                    {
+                        const uint16_t asap = (uint16_t)(_gaDescAsap + w);
+                        if (asap == 0 || asap > _gaGoCount) continue;
+                        const KnxDeviceMap::ComObject co =
+                            KnxDeviceMap::decodeComObjectSystemB((uint16_t)((_memBuf[2 * w] << 8) | _memBuf[2 * w + 1]));
+                        for (uint16_t i = 0; i < _gaObjectsN; i++)
+                            if (_gaObjects[i].co == asap)
+                            {
+                                _gaObjects[i].flags = co.flags;
+                                _gaObjects[i].prio = co.prio;
+                                _gaObjects[i].sizeCode = co.sizeCode;
+                                _gaObjects[i].cfgValid = true;
+                            }
+                    }
+                }
+                ftcGaDescNext();
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                // Rows left without a descriptor keep cfgValid false and are reported as unknown, never as
+                // "no flags" - the two are different statements about the device.
+                if (_gaRetry < FTC_GA_RETRY)
+                {
+                    _gaRetry++;
+                    _ftcSince = millis();
+                    SecurityControl sec{false, None};
+                    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
+                    knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef);
+                    return;
+                }
+                _gaTruncated = true;
+                ftcOut(CONSOLE_HEADLINE_COLOR, "  (group object table read timed out -- flags incomplete)");
                 _gaWhich++;
                 ftcGaAdvance();
             }
@@ -5676,7 +6068,10 @@ void FileTransferClient::loopScan()
             {
                 const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
                 _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
-                if (m.pa <= (uint16_t)_scanEnd)
+                // Both bounds, the same predicate ftcScanAck already uses: a KNXnet/IP server fans every
+                // indication out to every tunnel, so an answer caused by someone else's traffic must not
+                // be recorded as a hit of THIS range.
+                if (m.pa >= (uint16_t)_scanStart && m.pa <= (uint16_t)_scanEnd)
                 {
                     scanRecord(m.pa, m.mask);
                     _ftcSince = millis(); // an answer just arrived -> keep the drain window open (adaptive)
@@ -5787,7 +6182,10 @@ void FileTransferClient::loopScan()
             {
                 const FtcDdMsg m = _ftcDdQ[_ftcDdTail];
                 _ftcDdTail = (uint8_t)((_ftcDdTail + 1) & (FTC_DD_Q - 1));
-                if (m.pa <= (uint16_t)_scanEnd)
+                // Both bounds, the same predicate ftcScanAck already uses: a KNXnet/IP server fans every
+                // indication out to every tunnel, so an answer caused by someone else's traffic must not
+                // be recorded as a hit of THIS range.
+                if (m.pa >= (uint16_t)_scanStart && m.pa <= (uint16_t)_scanEnd)
                 {
                     scanRecord(m.pa, m.mask);
                     if (m.pa == (uint16_t)_scanNext) _scanCoGot = true;
@@ -8014,6 +8412,8 @@ void FileTransferClient::loop(bool configured)
         case FtcGaRef:
         case FtcGaPtr:
         case FtcGaMem:
+        case FtcGaDesc:
+        case FtcGaRep:
             loopDeviceInfo();
             return;
 #endif
