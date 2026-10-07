@@ -1,6 +1,13 @@
 # Changes
 
 
+## 2026-10-07 -- the interface's own console finds its socket again
+
+* The device moved its web console onto one socket shared by the whole web UI: `ws://<ip>/openknx/ws` instead of `/console`, and every frame on it is `key:payload`. `oknx -i <ip> con` still asked for `/console` and got a 404 -- "no websocket upgrade (no webconsole?)"
+* A path change alone would not have been enough: on the shared socket a command goes out as `cmd:<line>` and only the frames keyed `log` are console output. Sending the bare line reached nothing, and the other pages' status frames would have been printed as console text
+* Both generations are in the field, so the path is probed, newest first, and the framing follows from the one that answered. Nothing has to be configured
+* `con --ws-path <path>` skips the probe and takes exactly this path, to pin a generation without guessing: `/console` is read as the bare text of older firmware, every other path as `key:payload`. Per invocation, not a stored default: which socket a device serves is a property of that device, and a stored default would break the other half of a mixed installation. The path has to start with `/`; the option is refused with a `<pa>`, with `-D` and with any command other than `con` (`help` still prints the usage)
+
 ## 2026-10-03 -- the scan reads every device by default; the parallel range scan is gone
 
 * `scan` now reads each found device's identity by default. `--no-details` turns that off, `openknx` narrows it to the System B candidates, and `--workers N` / `-W N` says how many of those reads run at once (5). `details` is still accepted and does nothing
