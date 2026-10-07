@@ -57,6 +57,7 @@ rename this variable was named FTC_LANG; that name is not read any more.
 | `gm\|bm --frames N` / `--seconds N` | stop after N — scriptable |
 | `progscan` / `ps [global\|locate]` · `ps --seconds 0` | find devices in programming mode; `--seconds 0` watches continuously |
 | `con` / `console` | the interface's **own** console over its web console (WebSocket, no tunnel) |
+| `con … --ws-path <path>` | take this path instead of probing for it — `/openknx/ws`, or `/console` on older firmware; `/console` means bare text, every other path `key:payload` |
 | `scan <a.l \| a b> [ets] [deep N]` | find devices on a line or area |
 | `scan … pace <ms>` / `drain <ms>` / `tmo <ms>` | spacing between questions · wait at the end for slow answers · how long one may stay unacknowledged |
 | `scan … --no-details` | sweep only, without reading identities (they are read by default) |
