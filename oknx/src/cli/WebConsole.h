@@ -1,8 +1,9 @@
 /**
  * @file        WebConsole.h
  * @brief       Minimal RFC6455 WebSocket client for `oknx -i <ip> con` (interface webconsole transport)
- * @details     Connects to ws://<ip>:80/console (text frames: log lines out / commands in). Host-only, no
- *              external deps: TCP + HTTP upgrade + client-masked frames + ping/pong. The handshake sends a
+ * @details     Connects to ws://<ip>:80/openknx/ws, the device's one UI socket (frames `key:payload`: `log` out,
+ *              `cmd` in), else to /console of older firmware (bare text). Host-only, no external deps:
+ *              TCP + HTTP upgrade + client-masked frames + ping/pong. The handshake sends a
  *              fixed key and only checks for "101" (Sec-WebSocket-Accept is not verified — we are the only
  *              party). Display + input reuse ConsoleUi; this is just the transport.
  * @date        2026-08-03
@@ -25,6 +26,20 @@ namespace ftc
 class WebConsole
 {
   public:
+    /**
+     * @brief Connect to the console this device serves: /openknx/ws (`key:payload`), else /console (bare text).
+     * @details The path that answers sets the framing.
+     */
+    bool connectAuto(const std::string& ip, uint16_t port, std::string& err)
+    {
+        if (connect(ip, port, "/openknx/ws", err)) { _keyed = true;  return true; }
+        if (connect(ip, port, "/console",    err)) { _keyed = false; return true; }
+        return false;
+    }
+
+    /// @brief Path of the open connection, e.g. /openknx/ws.
+    const std::string& path() const { return _path; }
+
     /**
      * @brief Connect to ws://ip:port/path; true iff the server answered "101 Switching Protocols".
      * @param err set to a short reason on failure.
@@ -107,6 +122,7 @@ class WebConsole
         }
         const size_t he = resp.find("\r\n\r\n"); // bytes after the headers are already the first WS frame(s)
         if (he != std::string::npos && he + 4 < resp.size()) _rx.append(resp.substr(he + 4));
+        _path = path;
         _connected = true;
         return true;
     }
@@ -182,7 +198,7 @@ class WebConsole
             else
                 payload.assign(p, (size_t)len);
             i += hdr + maskLen + (size_t)len;
-            if (opcode == 0x1 || opcode == 0x0) pushLines(payload, out); // text / continuation
+            if (opcode == 0x1 || opcode == 0x0) pushKeyed(payload, out); // text / continuation
             else if (opcode == 0x9)
                 sendFrame(0x0A, payload); // ping -> pong
             else if (opcode == 0xA)
@@ -226,8 +242,10 @@ class WebConsole
 
     /**
      * @brief Send one command as a masked text frame (the webconsole runs it and echoes it back).
+     * @details Keyed like every frame on the UI socket: `cmd:<line>` is what the device's own console
+     *          page sends (`web/assets/console.js`). /console of older firmware takes the bare line.
      */
-    bool send(const std::string& text) { return sendFrame(0x01, text); }
+    bool send(const std::string& text) { return sendFrame(0x01, _keyed ? "cmd:" + text : text); }
 
     /**
      * @brief Close the socket (idempotent).
@@ -242,12 +260,26 @@ class WebConsole
   private:
     detail::socket_t _sock = (detail::socket_t)-1;
     bool _connected = false;
+    bool _keyed = true; // true = the UI socket (`key:payload`), false = /console of older firmware
+    std::string _path;  // path of the open connection
     std::string _rx;      // unparsed inbound bytes
     std::string _lineBuf; // partial (no-newline-yet) inbound text line
     uint32_t _bytesIn = 0, _bytesOut = 0;
     uint64_t _lastRxMs = 0;   // last byte received -> the liveness clock
     uint64_t _lastPingMs = 0; // last probe sent
     bool _lost = false;       // session ended by silence, not by a clean close
+
+    /**
+     * @brief Pass the console lines of one frame on: on the UI socket only key `log`, on /console the whole frame.
+     */
+    void pushKeyed(const std::string& f, std::vector<std::string>& out)
+    {
+        if (!_keyed) { pushLines(f, out); return; } // /console: the frame is the text
+        const size_t sep = f.find(':');
+        if (sep == std::string::npos) return;
+        if (f.compare(0, sep, "log") != 0) return;
+        pushLines(f.substr(sep + 1), out);
+    }
 
     /**
      * @brief Split inbound text on '\n' into complete lines, buffering the trailing partial.

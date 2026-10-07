@@ -135,10 +135,10 @@ class ConsoleUi
      * @details The l3/l4 tunnel/APDU/drain fields are replaced by the ws:// endpoint; l1 shows
      *          "webconsole <ip>" instead of the via/target chips.
      */
-    void setWsMode(const std::string& ip)
+    void setWsMode(const std::string& ip, const std::string& path)
     {
         _wsMode = true;
-        _wsUrl = "ws://" + ip + "/console";
+        _wsUrl = "ws://" + ip + path;
     }
 
     /**
@@ -874,7 +874,7 @@ class ConsoleUi
     bool _wsMode = false;                 // WebSocket console (oknx -i <ip> con): no tunnel/APDU/drain
     Link _link = Link::Connecting;        // tunnel-console link state (connected only once the target answers)
     std::string _prioTag;                 // pre-coloured "PRIO: <LEVEL> ⚠…" header indicator (empty = low default)
-    std::string _wsUrl;                   // ws://<ip>/console (shown in the verbose line / stats)
+    std::string _wsUrl;                   // ws://<ip><path> of the open session (shown in the verbose line / stats)
     uint32_t _prevRx = 0;
     uint64_t _prevRateMs = 0;
     uint32_t _rxRate = 0; // RX B/s, sampled between ticks

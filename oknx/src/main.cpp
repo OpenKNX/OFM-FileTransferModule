@@ -1454,6 +1454,8 @@ static void examples()
         {"oknx -i 11.11.0.126 5.0.3 login 'secret'", "a device that asks for a password",
          "ein Gerät, das ein Passwort verlangt"},
         {"oknx -i 11.11.0.126 5.0.3 con", "its console, over the tunnel", "seine Konsole, über den Tunnel"},
+        {"oknx -i 11.11.0.126 con", "the INTERFACE's own console, over its web socket",
+         "die Konsole des INTERFACE selbst, über seinen Web-Socket"},
     };
     static const Ex gFw[] = {
         {"oknx knxota firmware.uf2 --check", "FIRST: compare and report, write nothing",
@@ -7194,8 +7196,9 @@ int main(int argc, char** argv)
     }
 
     // `oknx -i <ip> con|console` (no PA) — the INTERFACE'S OWN console via the OFM-Network webconsole (WebSocket
-    // ws://<ip>:80/console), NOT the KNX tunnel: no APDU/drain, fast local streaming, no truncation. If the
-    // device has no webconsole -> one clean error and exit. `oknx -i <ip> <pa> con` (with a PA) still tunnels.
+    // ws://<ip>:80/openknx/ws, else /console of older firmware), NOT the KNX tunnel:
+    // no APDU/drain, fast local streaming, no truncation. If the device has no webconsole -> one error and exit.
+    // `oknx -i <ip> <pa> con` (with a PA) still tunnels.
     if (pos.size() == 1 && (pos[0] == "con" || pos[0] == "console"))
     {
         ftc::I18n& L = g_i18n;
@@ -7207,10 +7210,10 @@ int main(int argc, char** argv)
         }
         ftc::WebConsole ws;
         std::string werr;
-        if (!ws.connect(ip, 80, "/console", werr))
+        if (!ws.connectAuto(ip, 80, werr))
         {
             g_ui.errorBlock(false, L.tr("no webconsole", "keine Web-Konsole") + std::string(" \xC2\xB7 ") + ip, {werr},
-                            "ws://" + ip + "/console " + L.tr("did not answer — this device has no OFM-Network webconsole", "antwortet nicht — dieses Gerät hat keine OFM-Network-Webconsole"));
+                            "ws://" + ip + "/openknx/ws " + L.tr("and /console did not answer — this device has no OFM-Network webconsole", "und /console antworten nicht — dieses Gerät hat keine OFM-Network-Webconsole"));
             socketCleanup();
             return 1;
         }
@@ -7266,7 +7269,7 @@ int main(int argc, char** argv)
 
         ftc::ConsoleUi ui(g_term, g_theme, g_i18n);
         ui.setVerbose(verbose);
-        ui.setWsMode(ip);
+        ui.setWsMode(ip, ws.path());
         ui.setIface(std::string(), wIfName, wIfMask);
         ui.begin(ip, std::string(), ip, g_logPath, consoleHistoryPath());
         g_consoleUi = &ui;
