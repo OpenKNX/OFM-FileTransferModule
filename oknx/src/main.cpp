@@ -139,6 +139,8 @@ static constexpr int FTC_DETAIL_WORKERS = 5;
 // devices instead of 255 addresses, and the bus is not the limit there.
 static int g_workers = 0;
 static bool g_probeSlot = false; // internal: this process is a tunnel-slot probe child (connect, emit SLOT, hold, exit)
+// `--ws-path`: where the interface's own web console lives. Empty = probe for it, newest path first.
+static std::string g_wsPath;
 
 // Probe which tunnel additional-addresses are currently free: spawn one short-lived tunnel per slot (children
 // hold the slot briefly so the interface hands each a distinct free PA); the PAs that come back are free.
@@ -1456,6 +1458,8 @@ static void examples()
         {"oknx -i 11.11.0.126 5.0.3 con", "its console, over the tunnel", "seine Konsole, über den Tunnel"},
         {"oknx -i 11.11.0.126 con", "the INTERFACE's own console, over its web socket",
          "die Konsole des INTERFACE selbst, über seinen Web-Socket"},
+        {"oknx -i 11.11.0.126 con --ws-path /console", "same, on older firmware that serves /console",
+         "dasselbe bei älterer Firmware, die /console bedient"},
     };
     static const Ex gFw[] = {
         {"oknx knxota firmware.uf2 --check", "FIRST: compare and report, write nothing",
@@ -1600,6 +1604,8 @@ static void usage()
 
     U.section(L.tr("THE INTERFACE ITSELF", "DAS INTERFACE SELBST"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
     U.cmdRow("info", L.tr("full interface report (DESCRIPTION + device-mgmt)", "kompletter Interface-Report (DESCRIPTION + Device-Mgmt)"));
+    U.cmdRow("con … --ws-path <path>", L.tr("take this websocket path instead of probing: /openknx/ws, or /console on older firmware",
+                                            "diesen WebSocket-Pfad nehmen statt zu suchen: /openknx/ws, oder /console bei älterer Firmware"));
     U.cmdRow("con | console", L.tr("the interface's OWN console via its webconsole (WebSocket, no tunnel)",
                                    "die EIGENE Konsole des Interfaces über dessen Webconsole (WebSocket, kein Tunnel)"));
     U.cmdRow("prop dump", L.tr("every readable property of every interface object",
@@ -5506,6 +5512,17 @@ int main(int argc, char** argv)
             ip = argv[++i];
         else if (a == "--port" && i + 1 < argc)
             port = (uint16_t)std::atoi(argv[++i]);
+        else if (a == "--ws-path")
+        {
+            g_wsPath = i + 1 < argc ? argv[++i] : ""; // `con` without a <pa>: take this path instead of probing for it
+            if (g_wsPath.empty() || g_wsPath[0] != '/')
+            {
+                std::fprintf(stderr, "%s\n", g_i18n.tr("error: --ws-path takes a path that starts with '/', e.g. /console",
+                                                       "Fehler: --ws-path braucht einen Pfad, der mit '/' beginnt, z. B. /console"));
+                socketCleanup();
+                return 1;
+            }
+        }
         else if ((a == "--workers" || a == "-W") && i + 1 < argc)
             g_workers = std::atoi(argv[++i]); // identity readers for `details`/`openknx`; each takes one tunnel
         // Retired with the parallel range scan. Named explicitly because a long option after a command is
@@ -5612,6 +5629,16 @@ int main(int argc, char** argv)
             pos.push_back(a);
     }
 
+    // --ws-path: only `con` without a <pa> and without -D uses it; `help` still prints the usage.
+    const bool wsCon = pos.size() == 1 && (pos[0] == "con" || pos[0] == "console");
+    const bool wsHelp = !pos.empty() && (pos[0] == "?" || pos[0] == "help");
+    if (!g_wsPath.empty() && (discover || !(wsCon || wsHelp)))
+    {
+        std::fprintf(stderr, "%s\n", g_i18n.tr("error: --ws-path applies only to `con` without a <pa> and without -D (oknx -i <ip> con --ws-path <path>)",
+                                               "Fehler: --ws-path gilt nur für `con` ohne <pa> und ohne -D (oknx -i <ip> con --ws-path <pfad>)"));
+        socketCleanup();
+        return 1;
+    }
 
     // --- internal: tunnel-slot probe child --------------------------------------------------------
     // Open ONE tunnel; on success print the assigned free PA and hold it briefly so sibling probes each get a
@@ -7196,7 +7223,7 @@ int main(int argc, char** argv)
     }
 
     // `oknx -i <ip> con|console` (no PA) — the INTERFACE'S OWN console via the OFM-Network webconsole (WebSocket
-    // ws://<ip>:80/openknx/ws, else /console of older firmware), NOT the KNX tunnel:
+    // ws://<ip>:80/openknx/ws, else /console of older firmware; --ws-path takes one path), NOT the KNX tunnel:
     // no APDU/drain, fast local streaming, no truncation. If the device has no webconsole -> one error and exit.
     // `oknx -i <ip> <pa> con` (with a PA) still tunnels.
     if (pos.size() == 1 && (pos[0] == "con" || pos[0] == "console"))
@@ -7210,10 +7237,15 @@ int main(int argc, char** argv)
         }
         ftc::WebConsole ws;
         std::string werr;
-        if (!ws.connectAuto(ip, 80, werr))
+        if (!(g_wsPath.empty() ? ws.connectAuto(ip, 80, werr) : ws.connectPath(ip, 80, g_wsPath, werr)))
         {
-            g_ui.errorBlock(false, L.tr("no webconsole", "keine Web-Konsole") + std::string(" \xC2\xB7 ") + ip, {werr},
-                            "ws://" + ip + "/openknx/ws " + L.tr("and /console did not answer — this device has no OFM-Network webconsole", "und /console antworten nicht — dieses Gerät hat keine OFM-Network-Webconsole"));
+            const std::string hint =
+                g_wsPath.empty()
+                    ? "ws://" + ip + "/openknx/ws " + L.tr("and /console did not answer — this device has no OFM-Network webconsole",
+                                                           "und /console antworten nicht — dieses Gerät hat keine OFM-Network-Webconsole")
+                    : "ws://" + ip + g_wsPath + " " + L.tr("did not answer — without --ws-path oknx tries /openknx/ws and /console",
+                                                           "antwortet nicht — ohne --ws-path versucht oknx /openknx/ws und /console");
+            g_ui.errorBlock(false, L.tr("no webconsole", "keine Web-Konsole") + std::string(" \xC2\xB7 ") + ip, {werr}, hint);
             socketCleanup();
             return 1;
         }

@@ -37,6 +37,15 @@ class WebConsole
         return false;
     }
 
+    /**
+     * @brief Connect to exactly this path (`--ws-path`); /console means bare text, any other path `key:payload`.
+     */
+    bool connectPath(const std::string& ip, uint16_t port, const std::string& path, std::string& err)
+    {
+        _keyed = (path != "/console");
+        return connect(ip, port, path, err);
+    }
+
     /// @brief Path of the open connection, e.g. /openknx/ws.
     const std::string& path() const { return _path; }
 
