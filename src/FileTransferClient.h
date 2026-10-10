@@ -508,7 +508,8 @@ class FileTransferClient : public OpenKNX::Module
         FtcDevCoDescr,       // device info: CO DeviceDescriptor_Read sent over the T_Connect, waiting for the mask
         FtcBcuConn,          // device info (BCU2 memory-mapped): T_Connect opening before the fixed identity block read
         FtcBcu1Mem,          // device info (BCU1/BCU2): A_Memory_Read of the fixed identity block (0x0100..) -> Bcu*::decode
-        FtcBcuAdc,           // device info (BCU1/BCU2): A_ADC_Read of the bus-voltage channel, waiting for the response
+        FtcBcuAdc,           // device info: A_ADC_Read of the bus-voltage channel over the CO link, waiting for the response
+        FtcDevAdcConn,       // device info: own T_Connect opening for the bus-voltage read
         FtcDevVer,
         FtcDevFeat,
         FtcDevProp,
@@ -914,6 +915,8 @@ class FileTransferClient : public OpenKNX::Module
     void ftcDevInfoBegin(uint16_t pa, bool fromScan);
     void ftcDevReport();        // print the assembled device-info block
     void ftcBcuStartBlockRead(); // BCU1/BCU2: A_Memory_Read the fixed identity block (0x0100..) over the open CO link -> FtcBcu1Mem
+    void ftcDevAdcOrFinish();   // end of device info: bus voltage over an own T_Connect, then report
+    void ftcDevStartAdc();      // A_ADC_Read over the open CO link -> FtcBcuAdc
     // --- group communication (ftc <pa> info ga): reuse the device-info discovery, then A_Memory_Read walk ---
     void ftcGaBeginWalk();     // open a T_Connect for the walk (ETS reads memory CO); connectionless fallback if it can't
     void ftcGaAdvance();       // send the next present table's PID_TABLE_REFERENCE read, or emit the report + finish

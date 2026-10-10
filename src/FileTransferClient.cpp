@@ -426,6 +426,7 @@ static constexpr size_t FTC_OUT_KEEP = 4;
 // CO scan (`ets`) per-address deadlines. Both exceed the TP 3-retry window (~300 ms), so a present device
 // is never mis-timed as absent. Serial, so these bound the worst-case time-per-address, not a burst.
 static constexpr uint32_t FTC_CO_CONNECT_TMO = 600; // no T_Connect ack in this window -> ABSENT
+static constexpr uint32_t FTC_ADC_TMO = 2000;       // no A_ADC_Response in this window -> report without bus voltage
 static constexpr uint32_t FTC_CO_READ_TMO = 400;    // no T_ACK/DeviceDescriptor -> ABSENT. Safe to keep short: a PRESENT device
                                                     // T_ACKs our read in ~one round-trip (presence-on-ACK), so this is the per-absent-address cost -> halved for a much faster scan
 static constexpr uint32_t FTC_CO_SETTLE_MS = 25;    // quiet gap after a disconnect before the next connect
@@ -2780,7 +2781,9 @@ void FileTransferClient::ftcFinish()
     // Close the T_Connect opened by the CO DeviceDescriptor fallback (BCU1 info/ga), if the GA walk did not adopt it.
     if (_devCoConn)
     {
-        knx.bau().ftcScanDisconnect();
+        // Ours (open or still connecting) is closed; a connection someone else opened meanwhile is left alone.
+        if (!knx.bau().ftcScanConnected() || knx.bau().ftcScanConnectedTo(_ftcTarget))
+            knx.bau().ftcScanDisconnect();
         _devCoConn = false;
     }
 
@@ -3884,6 +3887,48 @@ void FileTransferClient::requestGroupComm(uint16_t pa)
     _memLen = 0;
     _ftcRespT = 0; // arm the memory-answer duplicate guard (ftcDropDup) fresh for this walk
     ftcStatusMsg("querying group communication...");
+}
+
+/**
+ * @brief Ends the device info: first reads the bus voltage over a T_Connect of our own (A_ADC_Read is
+ * connection-oriented only, 03_03_07 Table 1 p.9); single-device info only, never in a scan.
+ */
+void FileTransferClient::ftcDevAdcOrFinish()
+{
+    if (_devCoConn)
+    {
+        ftcDevStartAdc(); // our CO link to the target is still open
+        return;
+    }
+    if (!_scanInfoActive && knx.bau().ftcScanConnect(_ftcTarget))
+    {
+        _devCoConn = true; // ours -> ftcFinish() disconnects
+        _ftcSince = millis();
+        _ftcState = FtcDevAdcConn;
+        return;
+    }
+    ftcDevReport(); // a foreign connection is open (e.g. ETS) or a scan runs -> report without bus voltage
+    ftcFinish();
+}
+
+/**
+ * @brief A_ADC_Read channel 1, 8 conversions (the ETS bus-voltage probe) over the open CO link -> FtcBcuAdc.
+ */
+void FileTransferClient::ftcDevStartAdc()
+{
+    _adcPending = false;
+    _adcVal = 0;
+    _adcCnt = 0;
+    knx.bau().ftcSetAdcCallback(ftcOnAdc);
+    SecurityControl sec{false, None};
+    if (!knx.bau().ftcSendAdcRead(_ftcTarget, sec, 1, 8))
+    {
+        ftcDevReport(); // no CO link to the target -> report without bus voltage
+        ftcFinish();
+        return;
+    }
+    _ftcSince = millis();
+    _ftcState = FtcBcuAdc;
 }
 
 /**
@@ -5367,18 +5412,8 @@ void FileTransferClient::loopDeviceInfo()
                 _devHasBcuApp = id.haveApp;
                 _devHasBcu1 = id.valid && _gaGot > 0;
             }
-            // Identity done -> read the bus voltage via A_ADC_Read over the open CO link (BCU has a real ADC;
-            // OpenKNX devices answer zero). Channel 1, 8 conversions (the ETS bus-voltage probe).
-            _adcPending = false;
-            _adcVal = 0;
-            _adcCnt = 0;
-            knx.bau().ftcSetAdcCallback(ftcOnAdc);
-            _ftcSince = millis();
-            {
-                SecurityControl sec{false, None};
-                knx.bau().ftcSendAdcRead(_ftcTarget, sec, 1, 8);
-            }
-            _ftcState = FtcBcuAdc;
+            // Identity done -> read the bus voltage over the open CO link.
+            ftcDevStartAdc();
             return;
         }
 
@@ -5397,7 +5432,7 @@ void FileTransferClient::loopDeviceInfo()
                 ftcDevReport();
                 ftcFinish();
             }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            else if (millis() - _ftcSince > FTC_ADC_TMO)
             {
                 ftcDevReport(); // no ADC answer (device has no ADC / did not respond) -> report without voltage
                 ftcFinish();
@@ -5697,8 +5732,7 @@ void FileTransferClient::loopDeviceInfo()
                 ftcDevBuildLoadQueue();
                 if (_loadQN == 0)
                 {
-                    ftcDevReport();
-                    ftcFinish();
+                    ftcDevAdcOrFinish();
                 }
                 else
                 {
@@ -5763,12 +5797,24 @@ void FileTransferClient::loopDeviceInfo()
 
             if (_loadQi >= _loadQN)
             {
-                ftcDevReport();
-                ftcFinish();
+                ftcDevAdcOrFinish();
             }
             else
             {
                 ftcDevSendLoad();
+            }
+            return;
+        }
+
+        case FtcDevAdcConn:
+        {
+            // Own T_Connect for the bus-voltage read; no ack in time -> report without it (ftcFinish closes the link).
+            if (knx.bau().ftcScanConnectedTo(_ftcTarget))
+                ftcDevStartAdc();
+            else if (millis() - _ftcSince > FTC_CO_CONNECT_TMO)
+            {
+                ftcDevReport();
+                ftcFinish();
             }
             return;
         }
@@ -8403,6 +8449,7 @@ void FileTransferClient::loop(bool configured)
         case FtcBcuConn:
         case FtcBcu1Mem:
         case FtcBcuAdc:
+        case FtcDevAdcConn:
         case FtcDevVer:
         case FtcDevFeat:
         case FtcDevProp:
