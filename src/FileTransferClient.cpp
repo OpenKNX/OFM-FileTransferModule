@@ -8406,6 +8406,7 @@ void FileTransferClient::loop(bool configured)
         case FtcDevVer:
         case FtcDevFeat:
         case FtcDevProp:
+        case FtcDevRouter:
         case FtcDevEnum:
         case FtcDevLoad:
         case FtcGaConnect:
