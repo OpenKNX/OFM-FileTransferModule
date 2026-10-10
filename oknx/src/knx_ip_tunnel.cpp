@@ -563,8 +563,8 @@ static void dispatchResponse(const DispatchCbs& cb, uint16_t sa, uint8_t tpduByt
     uint16_t apci = (uint16_t)(((tpduByte0 << 8) | apduData[0]) & 0x3FF);
     uint16_t hi = (uint16_t)(apci >> 6);
     if (hi < 11 && hi != 7) apci &= 0x3C0; // collapse short APCIs (apdu.cpp)
-    else if (hi == 7)
-        apci &= 0x3C0; // ADCResponse (0x1C0): channel in the low 6 bits + data[0], collapse to the opcode
+    else if (hi == 7 && (apci & 0x3F) < 8)
+        apci &= 0x3C0; // ADCResponse, channel 0-7 in the low 6 bits; 0x1C8 and up are other services
 
     switch (apci)
     {
@@ -1179,6 +1179,7 @@ bool KnxIpTunnel::sendRestart(uint16_t pa, bool masterReset, uint8_t eraseCode, 
  */
 bool KnxIpTunnel::sendAdcRead(uint16_t pa, uint8_t channelNr, uint8_t readCount)
 {
+    if (!s.coConnected || pa != s.coPa) return false; // A_ADC_Read is connection-oriented only (03_03_07 Table 1 p.9)
     uint8_t apdu[3];
     uint8_t n = buildAdcRead(apdu, channelNr, readCount);
     return txApdu(this, pa, apdu, n, false);
@@ -1210,6 +1211,7 @@ bool KnxIpTunnel::scanConnect(uint16_t pa)
 }
 
 bool KnxIpTunnel::scanConnected() { return s.coConnected; }
+bool KnxIpTunnel::scanConnectedTo(uint16_t pa) { return s.coConnected && s.coPa == pa; }
 bool KnxIpTunnel::scanReadAcked() { return s.coReadAcked; }
 
 /**

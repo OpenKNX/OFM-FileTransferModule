@@ -108,6 +108,7 @@ class KnxIpTunnel
     // Connection-oriented (ETS-parity) scan: T_Connect / T_Data_Connected(DeviceDescriptor_Read) / T_Disconnect.
     bool scanConnect(uint16_t pa);
     bool scanConnected(); // true once the T_Connect is acknowledged / the CO session is up
+    bool scanConnectedTo(uint16_t pa); // CO session is up and to pa
     bool scanReadAcked(); // true once the device T_ACKed our CO read -> present (presence-on-ACK, before the DD response)
     void scanReadDescriptor();
     void scanDisconnect();

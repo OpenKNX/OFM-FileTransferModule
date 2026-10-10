@@ -71,6 +71,7 @@ class HostBau
     // --- connection-oriented (ETS-parity) scan ---------------------------------------------------
     bool ftcScanConnect(uint16_t pa) { return g_knxTunnel.scanConnect(pa); }
     bool ftcScanConnected() { return g_knxTunnel.scanConnected(); }
+    bool ftcScanConnectedTo(uint16_t pa) { return g_knxTunnel.scanConnectedTo(pa); }
     bool ftcScanReadAcked() { return g_knxTunnel.scanReadAcked(); }
     // SecurityControl by const ref here (overload identity differs from the senders).
     void ftcScanReadDescriptor(const SecurityControl& sec)

@@ -119,6 +119,7 @@ bool ftcSendAdcRead(uint16_t asap, const SecurityControl secCtrl, uint8_t channe
 // --- connection-oriented (ETS-parity) scan shims ---
 bool ftcScanConnect(uint16_t pa);                                                 // bau_systemB.h:57
 bool ftcScanConnected();                                                          // bau_systemB.h:58
+bool ftcScanConnectedTo(uint16_t pa);                                             // the open CO link goes to pa
 bool ftcScanReadAcked();                                                          // present once the device T_ACKed the CO read
 void ftcScanReadDescriptor(const SecurityControl& sec);                          // bau_systemB.h:59
 void ftcScanDisconnect();                                                        // bau_systemB.h:60
