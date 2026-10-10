@@ -611,8 +611,12 @@ function otaDrawChart() {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
   if (otaSeries.length < 2) { _o("otaChartLegend").textContent = ""; return; }
-  const pad = { l: 46, r: 44, t: 12, b: 16 }, w = W - pad.l - pad.r, h = H - pad.t - pad.b;
-  const bpsMax = Math.max(120, ...otaSeries.map(p => p.bps)) * 1.15, winMax = 64;
+  const winMax = 64, winLabel = "Fenster " + winMax;
+  g.font = "10px sans-serif";
+  // The right margin holds the window scale label: sized to its text, never narrower than before.
+  const pad = { l: 46, r: Math.max(44, Math.ceil(g.measureText(winLabel).width) + 10), t: 12, b: 16 };
+  const w = W - pad.l - pad.r, h = H - pad.t - pad.b;
+  const bpsMax = Math.max(120, ...otaSeries.map(p => p.bps)) * 1.15;
   const x = i => pad.l + (i / (otaSeries.length - 1)) * w;
   g.strokeStyle = "#e8e8e8"; g.lineWidth = 1; g.fillStyle = "#999"; g.font = "10px sans-serif";
   for (let k = 0; k <= 2; k++) {
@@ -624,7 +628,7 @@ function otaDrawChart() {
   otaSeries.forEach((p, i) => { const y = pad.t + h - (p.win / winMax) * h; i ? g.lineTo(x(i), y) : g.moveTo(x(i), y); });
   g.stroke();
   g.textAlign = "left"; g.fillStyle = "#8aa88a";
-  g.fillText("Fenster " + winMax, pad.l + w + 6, pad.t + 8);
+  g.fillText(winLabel, pad.l + w + 6, pad.t + 8);
   g.fillText("0", pad.l + w + 6, pad.t + h + 3);
   g.beginPath(); g.moveTo(pad.l, pad.t + h);
   otaSeries.forEach((p, i) => g.lineTo(x(i), pad.t + h - (p.bps / bpsMax) * h));
