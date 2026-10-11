@@ -1,6 +1,22 @@
 # Changes
 
 
+## ec/v0.3.0-beta.1: 2026-10-11
+
+The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-10
+below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
+
+
+## 2026-10-10 -- the device info reads the bus voltage of every device
+
+* `ftc <pa> info` and `oknx -i <ip> <pa> info` end with a transport connection of their own and an `A_ADC_Read` for channel 1 with 8 conversions on every device; before, only a BCU1 or BCU2 was asked. A scan does not read it. A device that returns conversions shows its bus voltage -- measured: 28.5 V on a Siemens BCU1 -- and an OpenKNX device answers read count 0 and shows none
+* `A_ADC_Read` goes out over the connection only. 03_03_07 Table 1 p.9 lists it for `T_Data_Connected` and not for `T_Data_Individual`, and a device with the matching knx fix no longer answers it connectionless. When the read cannot go over a connection to the target, for example while an ETS holds the connection, the report follows at once without the voltage; `FTC_ADC_TMO` (2 s) bounds the wait for the answer
+* `ftcFinish()` closes the connection the info opened, open or still connecting, and leaves a connection someone else opened meanwhile. The teardown of the `info ga` walk still closes without that check
+* The device info of a device with a router object never finished. The state `FtcDevRouter` was missing from the dispatcher in `loop()`, so the client stayed busy until `ftc cancel` and oknx gave up without device info. Measured: `ftc 1.1.0 info` from an interface console and `oknx -i <ip> 1.1.0 info` now report after 7 to 8 s
+* oknx took every APCI from 0x1C0 to 0x1FF as `A_ADC_Response`. Only 0x1C0 to 0x1C7 are; from 0x1C8 on the codes belong to other services
+* knxOTA page: the label of the window scale was cut off to "Fenster (", because the chart reserved a fixed 44 px for it. The margin now follows the measured width of the label
+* The bus voltage read needs the knx version that carries `ftcScanConnectedTo()`
+
 ## 2026-10-07 -- the interface's own console finds its socket again
 
 * The device moved its web console onto one socket shared by the whole web UI: `ws://<ip>/openknx/ws` instead of `/console`, and every frame on it is `key:payload`. `oknx -i <ip> con` still asked for `/console` and got a 404 -- "no websocket upgrade (no webconsole?)"
