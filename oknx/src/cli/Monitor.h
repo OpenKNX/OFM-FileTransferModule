@@ -42,7 +42,8 @@ namespace ftc
  * @brief Header-derived total telegram length incl. FCS (03_02_02 §2.2.2/2.2.4).
  * @details Standard = 8 + LG (low nibble of octet 5) · Extended = 9 + LG (octet 6, max 263). 0 = header not
  *          complete yet. The announced length is the ONLY legitimate cut: a busmon indication may carry less
- *          than it announces (a telegram cut short on the bus), and then the last octet is not an FCS.
+ *          than it announces (cut short on the bus, or not delivered in full by the monitoring interface),
+ *          and then the last octet is not an FCS.
  */
 inline int tpExpectedLen(const uint8_t* a, int n)
 {
@@ -168,8 +169,10 @@ class Monitor
                        _i.tr("Ctrl+C to stop", "Ctrl+C zum Beenden")});
             if (mode == Mode::Group) groupHeader();
             else
-                _p.note(_i.tr("green = NOT acknowledged · grey = acknowledged · full bytes wrap (never truncate)",
-                              "grün = NICHT quittiert · grau = quittiert · alle Bytes umbrochen (nie gekürzt)"));
+                _p.note(_i.tr("green = NOT acknowledged · grey = acknowledged · full bytes wrap (never truncate) · "
+                              "INCOMPLETE a/b = a of the b octets the telegram announces were delivered",
+                              "grün = NICHT quittiert · grau = quittiert · alle Bytes umbrochen (nie gekürzt) · "
+                              "UNVOLLSTÄNDIG a/b = a von b Oktetten, die das Telegramm ankündigt, wurden geliefert"));
         }
 
         // Interactive hot-keys (TTY only, never under -q / a pipe -> the scripted output stays byte-identical).
@@ -942,11 +945,12 @@ class Monitor
         if (_pend.active) flushPending(0); // ackKind 0 = none observed
 
         // 03_02_02 §2.2.2/2.2.4: the header announces the total length and an indication may carry less (a
-        // telegram cut short on the bus). Then the last octet is no FCS -- read neither checksum nor TPDU.
+        // telegram cut short on the bus, or one the monitoring interface did not deliver in full). Then the
+        // last octet is no FCS -- read neither checksum nor TPDU.
 
 
         const int expLen = tpExpectedLen(lpdu, n);
-        const bool torso = expLen > 0 && n < expLen;
+        const bool incomplete = expLen > 0 && n < expLen;
         const bool fcsBad = expLen > 0 && n >= expLen && !tpFcsOk(lpdu, expLen);
 
         // Parse control + addresses. Standard: ctrl bit7=1. Extended: ctrl bit7=0, extra CTRLE octet.
@@ -976,16 +980,17 @@ class Monitor
             if (7 + tpduLen > n - 1) tpduLen = 0;
         }
 
-        if (torso) tpduLen = 0; // announced more than was delivered -> the TPDU is incomplete, do not read it
+        if (incomplete) tpduLen = 0; // announced more than was delivered -> the TPDU is incomplete, do not read it
         std::string dec = interpret(src, dst, group, tpdu, tpduLen);
         _pend.active = true;
         _pend.ms = detail::nowMs();
         _pend.tag = ext ? _p.chip("EXT", 'o') : _p.chip("STD", 'c');
-        // A torso is not a frame, a bad FCS is not packaging, a sequence gap means the capture missed one.
-        if (torso)
+        // An incomplete indication is not a frame, a bad FCS is not packaging, a sequence gap means the
+        // capture missed one. The two numbers are octets delivered / octets the header announces.
+        if (incomplete)
         {
             char t[48];
-            std::snprintf(t, sizeof(t), "TORSO %d/%d", n, expLen);
+            std::snprintf(t, sizeof(t), "%s %d/%d", _i.tr("INCOMPLETE", "UNVOLLSTÄNDIG"), n, expLen);
             _pend.tag += " " + _p.chip(t, 'r');
         }
         else if (fcsBad)

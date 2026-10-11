@@ -20,6 +20,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * A block map under the chart shows how far the transfer is: one cell per block while they fit, a share of the file per pixel for a large file, with repeated ranges in orange and checksum errors in red
 * A target that does not report gzip shows a "?" instead of a cross. Only ESP32 reports it; an RP2040 or RP2350 unpacks in its bootloader, and the page cannot read the chip
 * Step titles, job types and status texts are worded for an operator in a neutral form, and the page calls itself "this device" instead of "interface". The progress bar, the block map and the count of confirmations reach their final value when a transfer ends
+* `oknx bm`: a busmonitor indication that carries fewer octets than its telegram announces is tagged `INCOMPLETE a/b` (German `UNVOLLSTÄNDIG a/b`), and the legend says what the two numbers are. The tag was `TORSO`, a word of this tool and not of KNX. The cause can be the bus or the monitoring interface: a third-party interface delivered 219 of the 263 octets of every long file transfer block that was acknowledged on the bus
 
 
 ## 2026-10-10 -- the device info reads the bus voltage of every device
