@@ -11,13 +11,13 @@ const otaNorm = p => {
 // The markup lives here, not as a C++ literal: in the gzipped asset the same text costs a third.
 // The three build switches arrive as data attributes on the shell.
 const OTA_HTML = {
- A: `<h1>knxOTA</h1><p class='lead'>Firmware oder Differenz von diesem Gerät über KNX auf ein anderes übertragen — PA zu PA, ohne PC.</p><div class='ctx'><div class='ctx-line'><span><span class='k'>Ziel</span> <b id='cxTarget'>—</b> <span id='cxDev' class='k'></span></span><span><span class='k'>Zugriff:</span> <b id='cxAcc'>unbekannt</b> <span class='k' id='cxAccAge'></span></span><span><span class='k'>Datei</span> <b id='cxFile'>keine</b></span><span class='cx-run'><span class='k'>Interface:</span> <b id='cxBus'>nichts läuft</b></span></div><div class='ctx-prog fm-hidden' id='cxProgWrap'><div class='ctx-bar'><i id='cxBar'></i></div><span class='k' id='cxLeft'></span><button class='mini' id='cxStop'>Abbrechen</button></div></div><details class='log' id='logBox'><summary><span id='logSum'>Protokoll</span></summary><div class='logbox' id='otaLog'><div>bereit</div></div></details><div class='warnbox fm-hidden' id='otaLegacyBox'><svg width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='#c98a00' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12 3 2.5 20h19L12 3z'/><path d='M12 9v5'/><path d='M12 17.2h.01'/></svg><div id='otaLegacyText'></div></div><div class='fm-tabs steps' id='steps'><a class='fm-tab active' href='#' data-step='1'><span class='n'>1</span>Ziel<span class='st' id='stp1'></span></a><a class='fm-tab' href='#' data-step='2'><span class='n'>2</span>Auftrag<span class='st' id='stp2'></span></a><a class='fm-tab' href='#' data-step='3'><span class='n'>3</span>Übertragen<span class='st' id='stp3'></span></a></div><p class='ota-hint warn' id='stepNote'></p><section class='reg pane' id='pane1'><h2>Ziel<span class='sub'>wer, was, und ob es schreiben lässt</span></h2><div class='body'><div class='sec'><div class='fm-row' style='margin:0'><input type='text' id='otaPa' value='' placeholder='z. B. 5.0.3' style='flex:0 0 120px;min-width:120px'><button id='otaRead'>Gerät lesen</button><button class='mini' id='otaSearchToggle'>Andere Adresse suchen</button></div><p class='ota-hint' id='otaPaNote'></p><div class='drawer fm-hidden' id='otaDrawer'><div class='fm-row' style='margin:0'><span class='lbl'>Bereich</span><input type='text' id='otaArea' value='1' style='flex:0 0 54px;min-width:54px'><span class='lbl'>Linie</span><input type='text' id='otaLine' value='1' style='flex:0 0 54px;min-width:54px'><select id='otaScope' style='height:34px;border:1px solid #d0d0d0;padding:0 8px'><option value='line'>nur diese Linie</option><option value='area'>alle 16 Linien dieses Bereichs</option></select><select id='otaKind' style='height:34px;border:1px solid #d0d0d0;padding:0 8px'><option value='oknx'>OpenKNX zuerst</option><option value='all'>nach Adresse</option><option value='ets'>wie ETS &mdash; findet auch BCU1/BCU2</option><option value='custom'>eigene Parameter &hellip;</option></select><button id='otaScan'>Suche starten</button></div><p class='ota-hint' id='otaScanRange'></p><div class='fm-row fm-hidden' id='otaParams' style='margin:0 0 8px'><span class='lbl'>Antwortfenster</span><input type='number' id='otaTmo' value='250' min='0' max='2000' step='50' style='flex:0 0 74px;min-width:74px'><span class='lbl' style='flex:0 0 auto'>ms</span><span class='lbl'>Durchläufe</span><input type='number' id='otaSweeps' value='2' min='1' max='3' style='flex:0 0 64px;min-width:64px'><span class='lbl'>Abstand</span><input type='number' id='otaPace' value='0' min='0' max='1000' step='10' style='flex:0 0 74px;min-width:74px'><span class='lbl' style='flex:0 0 auto'>ms &middot; 0 = Vorgabe</span></div><div class='scan fm-hidden' id='otaScanBox'><div class='fm-row' style='margin:0'><b style='font-size:.9em' id='otaScanTitle'>Suche</b><span class='ota-hint' style='margin:0;flex:1' id='otaScanState'></span></div><div class='scanbar'><i id='otaScanBar'></i></div><div class='hits fm-hidden' id='otaHitBox'><table class='tight'><thead><tr><th>Übernehmen</th><th>Adresse</th><th>Art</th><th>OpenKNX</th></tr></thead><tbody id='otaHits'></tbody></table></div><p class='ota-hint' id='otaScanFoot'></p></div></div></div><div class='sec'><div id='otaDevEmpty'><p class='ota-hint' style='margin:0'>Noch nicht gelesen.</p></div><div id='otaDevNone' class='fm-hidden'><p class='ota-hint err' style='margin:0'>Keine Antwort von <span id='otaDevNonePa'></span>. Prüfen Sie Adresse und Busspannung.</p></div><div id='otaDevCard' class='fm-hidden'><div class='runhead'><span class='t' id='otaDevHead'></span><span class='stale' id='otaDevAge'></span></div><div class='caps' id='otaDevCaps'></div><div class='fm-row' style='margin:10px 0 0'><span class='lbl'>Programmiermodus</span><b id='otaPmText' style='font-size:.88em'>nicht gelesen</b><button class='mini' id='otaPm'>einschalten</button><button class='mini' id='otaProps'>Eigenschaften</button><button class='mini' id='otaMore'>Weitere Angaben</button></div><p class='ota-hint' id='otaPmNote' style='margin:6px 0 0'></p><table class='attribute-table tight fm-hidden' id='otaTProps'><tbody id='otaDevRows'></tbody></table><table class='attribute-table tight fm-hidden' id='otaTMore'><tbody id='otaDevRows2'></tbody></table></div></div><div class='sec'><h3>Zugriff</h3><div class='fm-row' style='margin:0'><span id='otaAccText'>noch nicht gelesen</span><span class='na fm-hidden' id='otaAccTag'>eingeschränkt – ab FTM 0.2.0</span><span class='stale' id='otaAccAge'></span></div>`,
+ A: `<h1>knxOTA</h1><p class='lead'>Mit knxOTA bekommt ein OpenKNX-Gerät eine neue Firmware direkt über die KNX-Leitung, ohne USB-Kabel und ohne es auszubauen. Die Firmware-Datei liegt dazu auf diesem Gerät. Es schickt sie Stück für Stück an das Zielgerät, das sie am Ende prüft und auf Wunsch selbst einspielt. Das dauert je nach Größe der Datei eine halbe Stunde und länger; die voraussichtliche Dauer steht vor dem Start in der Vorschau. Die übrigen Aufgaben dieses Geräts laufen währenddessen weiter.</p><div class='ctx'><div class='ctx-line'><span><span class='k'>Ziel</span> <b id='cxTarget'>—</b> <span id='cxDev' class='k'></span></span><span><span class='k'>Zugriff:</span> <b id='cxAcc'>unbekannt</b> <span class='k' id='cxAccAge'></span></span><span><span class='k'>Datei</span> <b id='cxFile'>keine</b></span><span class='cx-run'><span class='k'>Dieses Gerät:</span> <b id='cxBus'>bereit</b></span></div><div class='ctx-prog fm-hidden' id='cxProgWrap'><div class='ctx-bar'><i id='cxBar'></i></div><span class='k' id='cxLeft'></span><button class='mini' id='cxStop'>Abbrechen</button></div></div><details class='log' id='logBox'><summary><span id='logSum'>Protokoll</span></summary><div class='logbox' id='otaLog'><div>bereit</div></div></details><div class='warnbox fm-hidden' id='otaLegacyBox'><svg width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='#c98a00' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12 3 2.5 20h19L12 3z'/><path d='M12 9v5'/><path d='M12 17.2h.01'/></svg><div id='otaLegacyText'></div></div><div class='fm-tabs steps' id='steps'><a class='fm-tab active' href='#' data-step='1'><span class='n'>1</span>Ziel<span class='st' id='stp1'></span></a><a class='fm-tab' href='#' data-step='2'><span class='n'>2</span>Auftrag<span class='st' id='stp2'></span></a><a class='fm-tab' href='#' data-step='3'><span class='n'>3</span>Übertragen<span class='st' id='stp3'></span></a><a class='step-q' id='stepQ' href='#' title='Was ist hier zu tun?' aria-expanded='false'>?</a></div><p class='ota-hint warn' id='stepNote'></p><p class='step-help fm-hidden' id='stepHelp'></p><section class='reg pane' id='pane1'><h2>Ziel<span class='sub'>Zielgerät wählen und prüfen</span></h2><div class='body'><div class='sec'><div class='fm-row' style='margin:0'><input type='text' id='otaPa' value='' placeholder='z. B. 5.0.3' style='flex:0 0 120px;min-width:120px'><button id='otaRead'>Gerät lesen</button><button class='mini' id='otaSearchToggle'>Andere Adresse suchen</button></div><p class='ota-hint' id='otaPaNote'></p><div class='drawer fm-hidden' id='otaDrawer'><div class='fm-row' style='margin:0'><span class='lbl'>Bereich</span><input type='text' id='otaArea' value='1' style='flex:0 0 54px;min-width:54px'><span class='lbl'>Linie</span><input type='text' id='otaLine' value='1' style='flex:0 0 54px;min-width:54px'><select id='otaScope' style='height:34px;border:1px solid #d0d0d0;padding:0 8px'><option value='line'>nur diese Linie</option><option value='area'>alle 16 Linien dieses Bereichs</option></select><select id='otaKind' style='height:34px;border:1px solid #d0d0d0;padding:0 8px'><option value='oknx'>OpenKNX zuerst</option><option value='all'>nach Adresse</option><option value='ets'>wie ETS &mdash; findet auch BCU1/BCU2</option><option value='custom'>eigene Parameter &hellip;</option></select><button id='otaScan'>Suche starten</button></div><p class='ota-hint' id='otaScanRange'></p><div class='fm-row fm-hidden' id='otaParams' style='margin:0 0 8px'><span class='lbl'>Antwortfenster</span><input type='number' id='otaTmo' value='250' min='0' max='2000' step='50' style='flex:0 0 74px;min-width:74px'><span class='lbl' style='flex:0 0 auto'>ms</span><span class='lbl'>Durchläufe</span><input type='number' id='otaSweeps' value='2' min='1' max='3' style='flex:0 0 64px;min-width:64px'><span class='lbl'>Abstand</span><input type='number' id='otaPace' value='0' min='0' max='1000' step='10' style='flex:0 0 74px;min-width:74px'><span class='lbl' style='flex:0 0 auto'>ms &middot; 0 = Vorgabe</span></div><div class='scan fm-hidden' id='otaScanBox'><div class='fm-row' style='margin:0'><b style='font-size:.9em' id='otaScanTitle'>Suche</b><span class='ota-hint' style='margin:0;flex:1' id='otaScanState'></span></div><div class='scanbar'><i id='otaScanBar'></i></div><div class='hits fm-hidden' id='otaHitBox'><table class='tight'><thead><tr><th>Übernehmen</th><th>Adresse</th><th>Art</th><th>OpenKNX</th></tr></thead><tbody id='otaHits'></tbody></table></div><p class='ota-hint' id='otaScanFoot'></p></div></div></div><div class='sec'><div id='otaDevEmpty'><p class='ota-hint' style='margin:0'>Noch nicht gelesen.</p></div><div id='otaDevNone' class='fm-hidden'><p class='ota-hint err' style='margin:0'>Keine Antwort von <span id='otaDevNonePa'></span>. Adresse und Busspannung prüfen.</p></div><div id='otaDevCard' class='fm-hidden'><div class='runhead'><span class='t' id='otaDevHead'></span><span class='stale' id='otaDevAge'></span></div><div class='caps' id='otaDevCaps'></div><details class='help caps-help' id='otaCapsHelp'><summary><em>?</em>Was bedeuten die Merkmale?</summary><ul><li><b>fortsetzen:</b> Eine abgebrochene Übertragung kann an derselben Stelle weiterlaufen.</li><li><b>selbst anwenden:</b> Das Ziel spielt die übertragene Firmware selbst ein und startet neu.</li><li><b>fast:</b> Die schnelle Übertragung ist möglich.</li><li><b>Konsole:</b> Die Gerätekonsole des Ziels ist über KNX erreichbar<span id='otaCapCon'></span>.</li><li><b>gzip:</b> Das Ziel entpackt gepackte Firmware (.gz) selbst. Ein „?“ heißt: nicht gemeldet. Geräte mit RP2040/RP2350 nehmen .gz trotzdem an.</li><li><b>Differenz:</b> Das Ziel kann ein Differenz-Update verarbeiten.</li></ul></details><div class='fm-row' style='margin:10px 0 0'><span class='lbl'>Programmiermodus</span><b id='otaPmText' style='font-size:.88em'>nicht gelesen</b><button class='mini' id='otaPm'>einschalten</button><button class='mini' id='otaProps'>Eigenschaften</button><button class='mini' id='otaMore'>Weitere Angaben</button></div><p class='ota-hint' id='otaPmNote' style='margin:6px 0 0'></p><table class='attribute-table tight fm-hidden' id='otaTProps'><tbody id='otaDevRows'></tbody></table><table class='attribute-table tight fm-hidden' id='otaTMore'><tbody id='otaDevRows2'></tbody></table></div></div><div class='sec'><h3>Zugriff</h3><div class='fm-row' style='margin:0'><span id='otaAccText'>noch nicht gelesen</span><span class='na fm-hidden' id='otaAccTag'>eingeschränkt – ab FTM 0.2.0</span><span class='stale' id='otaAccAge'></span></div>`,
  SEC: `<div class='fm-row fm-hidden' id='otaLockRow' style='margin-top:8px'><input type='password' id='otaPw' placeholder='Passwort des Ziels' autocomplete='off' style='flex:0 0 210px;min-width:170px'><button id='otaUnlock'>Entsperren</button><button id='otaLock'>Abmelden</button><button class='mini' id='otaCheck'>Zugriff prüfen</button></div>`,
- B: `<p class='ota-hint fm-hidden' id='otaAccHint'></p></div><div class='sec'><div class='fm-row' style='margin:0'><span class='lbl' style='flex:0 0 150px'>Letzte Suche</span><span style='font-size:.88em;flex:1' id='otaLastScan'>keine</span></div><div class='fm-row' style='margin:6px 0 0'><span class='lbl' style='flex:0 0 150px'>Gruppenadressen</span><span style='font-size:.88em;flex:1' id='otaGaState'>erst das Gerät lesen</span><button class='mini' id='otaGa'>Lesen</button></div><details class='ga fm-hidden' id='otaGaBox' style='margin-top:8px'><summary id='otaGaSum'></summary><div class='gabox'><table class='tight'><thead><tr><th>GA</th><th>KO</th><th>Flags</th><th>Priorität</th><th>Größe</th></tr></thead><tbody id='otaGaRows'></tbody></table></div></details></div></div></section><section class='reg pane fm-hidden' id='pane2'><h2>Auftrag<span class='sub'>was gesendet wird und wie</span></h2><div class='body'><div class='sec'><h3>Art</h3><div class='fm-tabs' style='margin-bottom:12px'><a class='fm-tab active' href='#' data-job='full'>Voll-Abbild</a><a class='fm-tab' href='#' data-job='delta'>Differenz<span class='na fm-hidden' id='otaDeltaTag'>ab FTM 0.2.0</span></a><a class='fm-tab' href='#' data-job='perf'>Durchsatz</a></div><p class='ota-hint' style='margin:0' id='otaJobNote'></p></div><div class='sec'><h3>Quelle</h3><div id='otaFile'><div class='fm-tabs' style='border:none;margin-bottom:8px'><a class='fm-tab active' href='#' data-otafs='int'>/flash</a>`,
+ B: `<div class='fm-row fm-hidden' id='otaProgRow' style='margin-top:8px'><button class='act' id='otaAccProg'>Programmiermodus einschalten</button><button class='mini' id='otaCheckP'>Zugriff prüfen</button></div><p class='ota-hint fm-hidden' id='otaAccHint'></p></div><div class='sec'><div class='fm-row' style='margin:0'><span class='lbl' style='flex:0 0 150px'>Letzte Suche</span><span style='font-size:.88em;flex:1' id='otaLastScan'>keine</span></div><div class='fm-row' style='margin:6px 0 0'><span class='lbl' style='flex:0 0 150px'>Gruppenadressen</span><span style='font-size:.88em;flex:1' id='otaGaState'>erst das Gerät lesen</span><button class='mini' id='otaGa'>Lesen</button></div><details class='ga fm-hidden' id='otaGaBox' style='margin-top:8px'><summary id='otaGaSum'></summary><div class='gabox'><table class='tight'><thead><tr><th>GA</th><th>KO</th><th>Flags</th><th>Priorität</th><th>Größe</th></tr></thead><tbody id='otaGaRows'></tbody></table></div></details></div></div></section><section class='reg pane fm-hidden' id='pane2'><h2>Auftrag<span class='sub'>Datei und Übertragungsart wählen</span></h2><div class='body'><div class='sec'><h3>Art</h3><div class='fm-tabs' style='margin-bottom:12px'><a class='fm-tab active' href='#' data-job='full'>Vollständig</a><a class='fm-tab' href='#' data-job='delta'>Differenz<span class='na fm-hidden' id='otaDeltaTag'>ab FTM 0.2.0</span></a><a class='fm-tab' href='#' data-job='perf'>Geschwindigkeitstest</a></div><p class='ota-hint' style='margin:0' id='otaJobNote'></p></div><div class='sec'><h3>Quelle</h3><div id='otaFile'><div class='fm-tabs' style='border:none;margin-bottom:8px'><a class='fm-tab active' href='#' data-otafs='int'>/flash</a>`,
  SD: `<a class='fm-tab' href='#' data-otafs='sd'>sd/</a>`,
  C: ``,
  EFC: `<a class='fm-tab' href='#' data-otafs='efc'>efc/</a>`,
- D: `</div><table class='tight'><thead><tr><th>Datei</th><th class='right'>Größe</th></tr></thead><tbody id='otaFiles'></tbody></table><p class='ota-hint' id='otaSrcNote'></p><div class='fm-row' style='margin:10px 0 0'><span class='lbl' style='flex:0 0 150px'>Ablegen auf dem Ziel</span><select id='otaDst' style='height:32px;border:1px solid #d0d0d0;padding:0 8px'></select><span class='ota-hint' style='margin:0;flex:1' id='otaDstNote'></span><button class='mini' id='otaDrives'>Speicher abfragen</button><span class='na fm-hidden' id='otaDrvTag'>Platzprüfung – ab FTM 0.2.0</span></div><table class='attribute-table tight' style='margin-top:6px'><tbody id='otaDrvRows'></tbody></table></div><div id='otaPerf' class='fm-hidden'><div class='fm-row ota-seg' style='margin:0'><input type='text' id='otaKb' value='50' style='flex:0 0 74px;min-width:74px'><span class='lbl'>KB Muster nach</span><select id='otaDrive' style='height:32px;border:1px solid #d0d0d0;padding:0 8px'><option value=''>/flash</option><option value='sd'>sd/</option><option value='efc'>efc/</option></select><label class='ota-sw' style='margin:0'><input type='checkbox' id='otaKeep'>Mess-Datei behalten</label></div><p class='ota-hint'>Erzeugtes Muster statt einer Datei.</p></div></div><div class='sec'><h3>Verfahren</h3><div class='fm-row ota-seg' style='margin:0'><button id='otaSafe' aria-pressed='false'>safe</button><button id='otaFast' aria-pressed='true'>fast</button><select id='otaWin' style='height:32px;border:1px solid #d0d0d0;padding:0 8px'><option value=''>Fenster: automatisch</option><option value='8'>fest 8</option><option value='16'>fest 16</option><option value='24'>fest 24</option><option value='32'>fest 32</option><option value='48'>fest 48</option><option value='64'>fest 64</option></select><span class='na fm-hidden' id='otaFastTag'>fast – ab FTM 0.2.0</span></div><p class='ota-hint' id='otaSpeedNote'></p><div class='ota-sw' id='otaSw'><label><input type='checkbox' id='otaApply' checked>Nach dem Übertragen anwenden <span class='gray'>(das Ziel startet neu)</span></label><label id='otaResumeLbl'><input type='checkbox' id='otaResume' checked>Abbruch fortsetzen</label><span class='na fm-hidden' id='otaResTag'>Fortsetzen – hier zurückgehalten</span></div><p class='ota-hint warn' id='otaSwNote'></p></div><div class='sec'><h3>Vorschau</h3><p class='ota-hint' style='margin:0' id='otaPreview'></p></div></div></section><section class='reg pane fm-hidden' id='pane3'><h2>Übertragen<span class='sub'>starten, zusehen, Bilanz</span></h2><div class='body'><div class='sec'><div class='ready'><span><span class='k'>Ziel</span><b id='rdTarget'>fehlt</b></span><span><span class='k'>Zugriff</span><b id='rdAcc'>unbekannt</b></span><span><span class='k'>Datei</span><b id='rdFile'>fehlt</b></span><span><span class='k'>Platz</span><b id='rdSpace'>unbekannt</b></span><span><span class='k'>Interface</span><b id='rdBus'>nichts läuft</b></span></div><div class='gobar'><button id='otaStart'>Übertragen</button><span class='why' id='otaWhy'></span><button class='mini fm-hidden' id='otaFix'></button><button class='mini fm-hidden' id='otaStop'>Abbrechen</button></div></div><div class='sec fm-hidden' id='otaRunSec'><div class='runhead'><span class='t' id='otaRunTitle'></span></div><div class='bar'><i id='otaBar'></i></div><canvas id='otaChart' width='900' height='150' class='chart'></canvas><p class='ota-hint' id='otaChartLegend'></p><div id='otaRunWrap'><table class='attribute-table tight'><tbody id='otaRunRows'></tbody></table></div><p class='ota-hint' id='otaRunFoot'></p><div class='fm-row fm-hidden' id='otaFixRow' style='margin-top:12px'><span class='ota-hint err' style='margin:0;flex:0 0 100%' id='otaFixWhy'></span><input type='password' id='otaFixPw' placeholder='Passwort des Ziels' autocomplete='off' style='flex:0 0 200px;min-width:160px'><button id='otaFixGo'>Anmelden und anwenden</button></div><div class='fm-row fm-hidden' id='otaAfter' style='margin-top:12px'><button class='mini' id='otaReread'>Gerät neu lesen</button><button class='mini' id='otaAgain'>Erneut übertragen</button><button class='mini fm-hidden' id='otaTrigger'>Update auslösen</button></div></div><p class='ota-hint' id='otaEmptyRun'>Noch nichts übertragen.</p></div></section>`,
+ D: `</div><table class='tight'><thead><tr><th>Datei</th><th class='right'>Größe</th></tr></thead><tbody id='otaFiles'></tbody></table><p class='ota-hint' id='otaSrcNote'></p><div class='warnbox fm-hidden' id='otaNoFile' style='margin:10px 0 0'><svg width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='#c98a00' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M12 3 2.5 20h19L12 3z'/><path d='M12 9v5'/><path d='M12 17.2h.01'/></svg><div id='otaNoFileText'></div></div><div class='fm-row' style='margin:10px 0 0'><span class='lbl' style='flex:0 0 150px'>Ablegen auf dem Ziel</span><select id='otaDst' style='height:32px;border:1px solid #d0d0d0;padding:0 8px'></select><span class='ota-hint' style='margin:0;flex:1' id='otaDstNote'></span><button class='mini' id='otaDrives'>Speicher abfragen</button><span class='na fm-hidden' id='otaDrvTag'>Platzprüfung – ab FTM 0.2.0</span></div><table class='attribute-table tight' style='margin-top:6px'><tbody id='otaDrvRows'></tbody></table></div><div id='otaPerf' class='fm-hidden'><div class='fm-row ota-seg' style='margin:0'><input type='text' id='otaKb' value='50' style='flex:0 0 74px;min-width:74px'><span class='lbl'>KB Testdaten nach</span><select id='otaDrive' style='height:32px;border:1px solid #d0d0d0;padding:0 8px'><option value=''>/flash</option><option value='sd'>sd/</option><option value='efc'>efc/</option></select><label class='ota-sw' style='margin:0'><input type='checkbox' id='otaKeep'>Mess-Datei behalten</label></div><p class='ota-hint'>Gesendet werden Testdaten statt einer Datei.</p></div></div><div class='sec'><h3>Verfahren</h3><div class='fm-row ota-seg' style='margin:0'><button id='otaSafe' aria-pressed='true'>safe</button><button id='otaFast' aria-pressed='false'>fast</button><select id='otaWin' disabled style='height:32px;border:1px solid #d0d0d0;padding:0 8px'><option value=''>Fenster: automatisch</option><option value='8'>fest 8</option><option value='16'>fest 16</option><option value='24'>fest 24</option><option value='32'>fest 32</option><option value='48'>fest 48</option><option value='64'>fest 64</option></select><span class='na fm-hidden' id='otaFastTag'>fast – ab FTM 0.2.0</span></div><p class='ota-hint' id='otaSpeedNote'></p><details class='help caps-help' id='otaModeHelp'><summary><em>?</em>Welches Verfahren?</summary><ul><li><b>safe</b> (Standard): Jeder Block wird einzeln bestätigt. Kommt mit Störungen und einem vollen Bus zurecht. Die richtige Wahl im laufenden Betrieb.</li><li><b>fast:</b> Sendet viele Blöcke direkt hintereinander und lastet den Bus aus; andere Telegramme können sich verzögern. Der Gewinn ist klein, gemessen rund ein Zehntel. Nur wählen, wenn die Anlage das verträgt, etwa bei der Inbetriebnahme.</li><li><b>Fenster:</b> Nur bei fast. „automatisch“ passt die Zahl der Blöcke am Stück selbst an. Ein fester Wert ist für Tests gedacht.</li></ul></details><div class='ota-sw' id='otaSw'><label><input type='checkbox' id='otaApply' checked>Nach dem Übertragen anwenden <span class='gray'>(das Ziel startet neu)</span></label><label id='otaResumeLbl'><input type='checkbox' id='otaResume' checked>Abgebrochene Übertragung fortsetzen</label><span class='na fm-hidden' id='otaResTag'>Fortsetzen – hier zurückgehalten</span></div><p class='ota-hint warn' id='otaSwNote'></p></div><div class='sec'><h3>Vorschau</h3><p class='ota-hint' style='margin:0' id='otaPreview'></p></div></div></section><section class='reg pane fm-hidden' id='pane3'><h2>Übertragen<span class='sub'>Starten und Ergebnis</span></h2><div class='body'><div class='sec'><div class='ready'><span><span class='k'>Ziel</span><b id='rdTarget'>fehlt</b></span><span><span class='k'>Zugriff</span><b id='rdAcc'>unbekannt</b></span><span><span class='k'>Datei</span><b id='rdFile'>fehlt</b></span><span><span class='k'>Platz</span><b id='rdSpace'>unbekannt</b></span><span><span class='k'>Dieses Gerät</span><b id='rdBus'>bereit</b></span></div><div class='gobar'><button id='otaStart'>Übertragen</button><span class='why' id='otaWhy'></span><button class='mini fm-hidden' id='otaFix'></button><button class='mini fm-hidden' id='otaStop'>Abbrechen</button></div></div><div class='sec fm-hidden' id='otaRunSec'><div class='runhead'><span class='t' id='otaRunTitle'></span></div><div class='bar'><i id='otaBar'></i></div><canvas id='otaChart' width='900' height='150' class='chart'></canvas><p class='ota-hint' id='otaChartLegend'></p><canvas id='otaBlocks' width='900' height='16' class='blocks'></canvas><p class='ota-hint' id='otaBlocksLegend'></p><div id='otaRunWrap'><table class='attribute-table tight'><tbody id='otaRunRows'></tbody></table></div><p class='ota-hint' id='otaRunFoot'></p><div class='fm-row fm-hidden' id='otaFixRow' style='margin-top:12px'><span class='ota-hint err' style='margin:0;flex:0 0 100%' id='otaFixWhy'></span><input type='password' id='otaFixPw' placeholder='Passwort des Ziels' autocomplete='off' style='flex:0 0 200px;min-width:160px'><button id='otaFixGo'>Anmelden und anwenden</button></div><div class='fm-row fm-hidden' id='otaAfter' style='margin-top:12px'><button class='mini' id='otaReread'>Gerät neu lesen</button><button class='mini' id='otaAgain'>Erneut übertragen</button><button class='mini fm-hidden' id='otaTrigger'>Update auslösen</button></div></div><p class='ota-hint' id='otaEmptyRun'>Noch nichts übertragen.</p></div></section>`,
 };
 function otaBuild() {
  const el = _o("ota");
@@ -28,7 +28,7 @@ function otaBuild() {
   + (f.efc === "1" ? OTA_HTML.EFC : "") + OTA_HTML.D;
 }
 
-let otaStep = 1, otaJob = "full", otaFs = "int", otaSel = null, otaFast = true, otaFiles = [];
+let otaStep = 1, otaJob = "full", otaFs = "int", otaSel = null, otaFast = false, otaFiles = [];
 // Gepackte FTM-Version (major<<8 | minor<<4 | revision) als Text.
 const otaFtmText = v => v ? ((v >> 8) + "." + ((v >> 4) & 0x0F) + "." + (v & 0x0F)) : "?";
 // Was das Ziel KANN. Ein FTM vor 0.1.0 hat kein CheckFeatures, `can` ist dort aus seiner Version abgeleitet;
@@ -51,7 +51,7 @@ let otaT0 = 0, otaD0 = 0, otaAvg = 0, otaFailCheck = false;
 let otaSentFile = "", otaSentPa = ""; // what was actually transferred -- the apply hangs off this
 let otaChain = [];          // step sequence waiting on the bus: login -> re-read -> apply
 let otaVerBefore = "";      // application version before the trigger -- the only proof afterwards
-let otaSeries = [], otaLastChunk = -1, otaResult = null, otaRunning = false, otaSawRun = false;
+let otaSeries = [], otaLastChunk = -1, otaLastVer = -1, otaLastCrc = -1, otaChecks = 0, otaBlk = { total: 0, done: 0, last: -1, res: -1, marks: [] }, otaResult = null, otaRunning = false, otaSawRun = false;
 // The reported throughput is a momentary rate that decays between two windows (measured: 4913 -> 352 B/s
 // without a byte of progress). The page measures its own average instead.
 const OTA_ACT = ["otaRead", "otaScan", "otaGa", "otaDrives", "otaUnlock", "otaLock", "otaCheck",
@@ -110,9 +110,19 @@ const otaSize = c => OTA_SIZE[c] || ("Typ " + c);
 const otaClass = m => OTA_MASK[m] || (m ? "Maske 0x" + m.toString(16).toUpperCase().padStart(4, "0") : "antwortet");
 const otaRow = (k, v) => '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
 // ── Tabs ────────────────────────────────────────────────────────────────────────────────────────
+// What to do in each step, shown below the tab strip behind its "?".
+const OTA_STEP_HELP = {
+ 1: "Physikalische Adresse des Zielgeräts eingeben und <b>Gerät lesen</b> wählen. Ist die Adresse unbekannt, hilft <b>Andere Adresse suchen</b>. "
+  + "Verlangt das Ziel ein Passwort oder den Programmiermodus, steht das unter <b>Zugriff</b>. Ist die 1 grün, geht es mit <b>Auftrag</b> weiter.",
+ 2: "Art wählen, im Normalfall <b>Vollständig</b>, und die Firmware-Datei für das Zielgerät anklicken. "
+  + "Fehlt die Datei, zuerst im Dateimanager auf dieses Gerät laden (.bin, .uf2 oder .gz). Die voraussichtliche Dauer steht unten in der Vorschau.",
+ 3: "Mit <b>Übertragen</b> starten. Die Seite zeigt Fortschritt und Ergebnis. "
+  + "Ist <b>Nach dem Übertragen anwenden</b> gewählt, startet das Ziel danach mit der neuen Firmware neu."
+};
 function otaGoStep(n) {
   if (otaRunning && n !== 3) return;
   otaStep = n;
+  _o("stepHelp").innerHTML = OTA_STEP_HELP[n];
   document.querySelectorAll("[data-step]").forEach(t => t.classList.toggle("active", +t.dataset.step === n));
   [1, 2, 3].forEach(i => _o("pane" + i).classList.toggle("fm-hidden", i !== n));
   window.scrollTo({ top: 0 });
@@ -166,6 +176,7 @@ function otaGate(on) {
 async function otaLoadFiles() {
   const tb = _o("otaFiles");
   tb.innerHTML = '<tr><td colspan="2" class="gray">lädt …</td></tr>';
+  _o("otaNoFile").classList.add("fm-hidden");
   try { otaFiles = await (await fetch("/knxota/files?fs=" + otaFs + "&job=" + otaJob)).json(); }
   catch (e) { otaFiles = []; }
   otaSel = null;
@@ -174,8 +185,14 @@ async function otaLoadFiles() {
 function otaDrawFiles() {
   const tb = _o("otaFiles");
   tb.innerHTML = "";
+  // An empty list is the usual first visit: say where the file comes from, not only that it is missing.
+  _o("otaNoFile").classList.toggle("fm-hidden", otaFiles.length > 0);
   if (!otaFiles.length) {
     tb.innerHTML = '<tr><td colspan="2" class="gray">Keine passende Datei auf diesem Laufwerk</td></tr>';
+    _o("otaNoFileText").innerHTML = "<b>Hier liegt noch keine " + (otaJob === "delta" ? "Differenz-Datei (.okd)" : "Firmware-Datei") + ".</b> "
+      + "Die Datei für das Zielgerät zuerst " + (document.querySelector("a[href='/filemanager']")
+          ? "im <a href='/filemanager'>Dateimanager</a>" : "per Dateitransfer") + " auf dieses Gerät laden"
+      + (otaJob === "delta" ? "" : " (.bin, .uf2 oder .gz)") + ", dann hierher zurückkehren.";
     return;
   }
   otaFiles.forEach((f, i) => {
@@ -204,7 +221,7 @@ function otaGreyUnsupported() {
 }
 // Ein Ziel mit FTM vor 0.2.0: die Seite bleibt vollständig sichtbar, aber alles, was es nicht kann, ist
 // deaktiviert und trägt den Grund -- statt nur ausgegraut zu sein und beim Start abgelehnt zu werden.
-let otaLegacyOn = false, otaFastBefore = true, otaResumeBefore = true; // the choice a legacy target overrode
+let otaLegacyOn = false, otaFastBefore = false, otaResumeBefore = true; // the choice a legacy target overrode
 function otaLegacyUi(d) {
   const legacy = !!(d && d.ftm && d.legacy);
   if (legacy && !otaLegacyOn) { otaFastBefore = otaFast; otaResumeBefore = _o("otaResume").checked; }
@@ -341,7 +358,22 @@ function otaApply(s) {
     otaAvg = dt > 1 ? Math.max(0, Math.round((s.done - otaD0) / dt)) : 0;
     const gap = otaLastChunk >= 0 && s.chunk < otaLastChunk;
     otaLastChunk = s.chunk;
-    otaSeries.push({ bps: otaAvg, win: s.window || 8, gap: gap || false });
+    // The target's confirmations since the last poll: one per block in safe, one per window in fast.
+    const ver = s.verifies || 0, crc = s.crcErrors || 0;
+    const chk = otaLastVer >= 0 && ver > otaLastVer, bad = otaLastCrc >= 0 && crc > otaLastCrc;
+    otaLastVer = ver; otaLastCrc = crc; otaChecks = ver;
+    otaSeries.push({ bps: otaAvg, win: s.window || 0, gap: gap || false, chk: chk, bad: bad });
+    // The block map: how far the transfer is, and where blocks had to be sent again. A repeat or a
+    // checksum error is only known per poll, so it marks the blocks covered since the poll before.
+    const b = otaBlk, cur = s.chunk || 0, res = s.resends || 0;
+    b.total = s.chunks || 0;
+    if (b.last >= 0) {
+      const lo = Math.min(b.last, cur), hi = Math.max(b.last, cur, lo + 1);
+      if (bad) b.marks.push([lo, hi, 2]);
+      else if (gap || (b.res >= 0 && res > b.res)) b.marks.push([lo, hi, 1]);
+      if (b.marks.length > 600) b.marks.shift();
+    }
+    b.done = Math.max(b.done, cur); b.last = cur; b.res = res;
     if (otaSeries.length > 400) otaSeries.shift();
   } else if (!otaRunning) { otaT0 = 0; otaD0 = 0; }
   otaLive = s;
@@ -581,9 +613,13 @@ function otaSummaryOf(s) {
         : ap.kind === "other" ? '<span class="ota-err">vom Ziel abgelehnt</span>'
         : '<span class="ota-warn">unbestätigt</span>']);
     }
+    // The last poll before the end may be a block short: bar, block map and count follow the result.
+    if (otaBlk.total) otaBlk.done = otaBlk.total;
+    _o("otaBar").style.width = "100%";
+    otaChecks = Math.max(otaChecks, s.verifies || 0);
     otaResult = { ok: r.verify !== 2, rows: rows,
       title: r.kind === 1 ? "Gemessen" : "Übertragen",
-      foot: r.kind === 1 ? "" : "Erst die neu gelesene Version beweist, dass es sitzt." };
+      foot: r.kind === 1 ? "" : "Ob das Update übernommen wurde, zeigt die neu gelesene Version." };
     _o("otaTrigger").classList.toggle("fm-hidden", !(r.kind !== 1 && !r.apply));
   } else {
     const pc = s.total ? (s.done / s.total * 100).toFixed(0) : "0";
@@ -624,12 +660,16 @@ function otaDrawChart() {
     g.beginPath(); g.moveTo(pad.l, y + .5); g.lineTo(pad.l + w, y + .5); g.stroke();
     g.textAlign = "right"; g.fillText(v + " B/s", pad.l - 6, y + 3);
   }
-  g.strokeStyle = "#c8d8c8"; g.lineWidth = 1.5; g.beginPath();
-  otaSeries.forEach((p, i) => { const y = pad.t + h - (p.win / winMax) * h; i ? g.lineTo(x(i), y) : g.moveTo(x(i), y); });
-  g.stroke();
-  g.textAlign = "left"; g.fillStyle = "#8aa88a";
-  g.fillText(winLabel, pad.l + w + 6, pad.t + 8);
-  g.fillText("0", pad.l + w + 6, pad.t + h + 3);
+  // safe has no window (the status reports 0): no window line and no scale for it.
+  const hasWin = otaSeries.some(p => p.win > 0);
+  if (hasWin) {
+    g.strokeStyle = "#c8d8c8"; g.lineWidth = 1.5; g.beginPath();
+    otaSeries.forEach((p, i) => { const y = pad.t + h - (p.win / winMax) * h; i ? g.lineTo(x(i), y) : g.moveTo(x(i), y); });
+    g.stroke();
+    g.textAlign = "left"; g.fillStyle = "#8aa88a";
+    g.fillText(winLabel, pad.l + w + 6, pad.t + 8);
+    g.fillText("0", pad.l + w + 6, pad.t + h + 3);
+  }
   g.beginPath(); g.moveTo(pad.l, pad.t + h);
   otaSeries.forEach((p, i) => g.lineTo(x(i), pad.t + h - (p.bps / bpsMax) * h));
   g.lineTo(pad.l + w, pad.t + h); g.closePath();
@@ -637,12 +677,47 @@ function otaDrawChart() {
   g.beginPath();
   otaSeries.forEach((p, i) => { const y = pad.t + h - (p.bps / bpsMax) * h; i ? g.lineTo(x(i), y) : g.moveTo(x(i), y); });
   g.strokeStyle = "#449841"; g.lineWidth = 1.6; g.stroke();
-  g.fillStyle = "#c62828";
+  // A tick at the top edge for a poll in which the target confirmed data. Orange = sent again (a gap),
+  // red = checksum error, as in the block map below; the red line is dashed, so the two differ by
+  // more than their colour.
+  g.fillStyle = "#6f8fb8";
+  otaSeries.forEach((p, i) => { if (p.chk) g.fillRect(x(i) - .5, pad.t, 1, 7); });
+  g.fillStyle = "#e08a00";
   otaSeries.forEach((p, i) => { if (p.gap) g.fillRect(x(i) - 1.5, pad.t, 3, h); });
-  const gaps = otaSeries.filter(p => p.gap).length;
+  g.fillStyle = "#c62828";
+  otaSeries.forEach((p, i) => { if (p.bad) for (let y = 0; y < h; y += 9) g.fillRect(x(i) - 1.5, pad.t + y, 3, Math.min(5, h - y)); });
+  const gaps = otaSeries.filter(p => p.gap).length, bads = otaSeries.filter(p => p.bad).length;
   _o("otaChartLegend").innerHTML = '<span class="ota-ok">—</span> Durchsatz (Mittel) &nbsp; '
-    + '<span style="color:#8aa88a">—</span> Fenster &nbsp; '
-    + (gaps ? '<span class="ota-err">|</span> ' + gaps + ' Lücke' + (gaps > 1 ? 'n' : '') : 'keine Lücken');
+    + (hasWin ? '<span style="color:#8aa88a">—</span> Fenster &nbsp; ' : '')
+    + (gaps ? '<span style="color:#e08a00">|</span> ' + gaps + ' Lücke' + (gaps > 1 ? 'n' : '') : 'keine Lücken')
+    + (otaChecks ? ' &nbsp; <span title="Ein Strich je Abfrage, in der das Ziel Daten bestätigt hat. safe: Prüfsumme je Block · fast: Rückmeldung je Fenster">'
+        + '<span style="color:#6f8fb8">|</span> Prüfung durch das Ziel (' + (otaRunning ? 'bisher ' : '') + otaChecks + ')</span>' : '')
+    + (bads ? ' &nbsp; <span class="ota-err">¦</span> ' + bads + ' Prüfsummenfehler' : '');
+}
+// ── The block map: one cell per block while they fit, a share of the file per pixel beyond that ──
+function otaDrawBlocks() {
+  const c = _o("otaBlocks"), lg = _o("otaBlocksLegend");
+  if (!c) return;
+  const b = otaBlk, show = b.total > 0;
+  c.style.display = show ? "" : "none";
+  if (!show) { lg.textContent = ""; return; }
+  const dpr = window.devicePixelRatio || 1, W = c.clientWidth || 900, H = 16;
+  if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const g = c.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const x = i => Math.round(i / b.total * W);
+  g.fillStyle = "#e4e4e4"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#449841"; g.fillRect(0, 0, x(Math.min(b.done, b.total)), H);
+  b.marks.forEach(m => { g.fillStyle = m[2] === 2 ? "#c62828" : "#e08a00";
+    g.fillRect(x(m[0]), 0, Math.max(2, x(m[1]) - x(m[0])), H); });
+  const cells = W / b.total >= 3; // a cell needs room for itself and its gap
+  if (cells) { g.fillStyle = "#fff"; for (let i = 1; i < b.total; i++) g.fillRect(x(i), 0, 1, H); }
+  const rep = b.marks.filter(m => m[2] === 1).length, bad = b.marks.filter(m => m[2] === 2).length;
+  lg.innerHTML = '<span class="ota-ok">■</span> ' + Math.min(b.done, b.total) + ' von ' + b.total + ' Blöcken'
+    + (cells ? ' · ein Kästchen je Block' : ' · ein Pixel fasst etwa ' + Math.max(1, Math.round(b.total / W)) + ' Blöcke zusammen')
+    + (rep ? ' &nbsp; <span style="color:#e08a00">■</span> wiederholt' : '')
+    + (bad ? ' &nbsp; <span class="ota-err">■</span> Prüfsummenfehler' : '');
 }
 // ── Blocking reasons: the button is never silently disabled ─────────────────────────────────────
 function otaStepState() {
@@ -654,7 +729,7 @@ function otaStepState() {
  else if (otaDevMiss) { s1 = "red"; w1 = "keine Antwort von " + pa; }
  else if (fresh && !otaDev.ftm) { s1 = "red"; w1 = "kein Dateitransfer"; }
  else if (!fresh) { s1 = "amber"; w1 = "noch nicht gelesen"; }
- else if (otaDev.feat & 0x20) { s1 = "amber"; w1 = "kein Schreibzugriff"; }
+ else if (otaDev.feat & 0x20) { s1 = "amber"; w1 = "gesperrt"; }
  // FTM vor 0.2.0: grün, nicht bernstein -- bernstein sperrt Schritt 2 und 3, und genau die Übertragung, für
  // die dieser Weg gebaut wurde, wäre damit unerreichbar. Was fehlt, steht in der Auftragszeile.
  else if (otaDev.legacy) { s1 = "green"; w1 = pa + " · FTM " + otaFtmText(otaDev.ftm); }
@@ -662,7 +737,7 @@ function otaStepState() {
  // Step 2 -- the job
  let s2, w2;
  const f = otaJob === "perf" ? null : otaFiles[otaSel];
- if (otaJob === "perf") { s2 = "green"; w2 = (parseInt(_o("otaKb").value) || 50) + " KB Muster"; }
+ if (otaJob === "perf") { s2 = "green"; w2 = (parseInt(_o("otaKb").value) || 50) + " KB Testdaten"; }
  else if (otaSel === null) { s2 = "red"; w2 = "keine Datei"; }
  // Auf `can` geprüft, nicht auf `feat`: ein FTM vor 0.1.0 hat kein CheckFeatures, sein Merkmalsbyte ist 0,
  // weil es nichts SAGEN kann. Der Grund wird benannt, damit "kann keine Differenz" nicht wie ein Defekt liest.
@@ -692,8 +767,8 @@ function otaSpaceShort(f) {
 
 function otaBlocker() {
   const s = otaLive;
-  if (otaRunning) return ["Interface überträgt — eines auf einmal.", null, null];
-  if (otaBusy) return ["Interface beschäftigt — eines auf einmal.", null, null];
+  if (otaRunning) return ["Es läuft bereits eine Übertragung.", null, null];
+  if (otaBusy) return ["Dieses Gerät ist gerade beschäftigt.", null, null];
   const pa = otaNorm(_o("otaPa").value);
   if (!pa) return ["Die Zieladresse ist unvollständig.", "zum Ziel", () => { otaGoStep(1); _o("otaPa").focus(); }];
   if (otaJob === "perf") return null;
@@ -705,7 +780,7 @@ function otaBlocker() {
   if (otaDev.feat & 0x20)
     return ["Das Ziel verlangt den Programmiermodus.", "einschalten", () => { otaGoStep(1); otaPmWrite(true); }];
   if (otaJob === "delta" && !otaCan(0x80)) // wie ueberall: Koennen, nicht das gemeldete Byte
-    return ["Das Ziel kann keine Differenz verarbeiten.", "zu Voll-Abbild wechseln", () => { otaGoStep(2); otaSetJob("full"); }];
+    return ["Das Ziel kann keine Differenz verarbeiten.", "zu Vollständig wechseln", () => { otaGoStep(2); otaSetJob("full"); }];
   if (otaSel === null) return ["Es ist keine Datei gewählt.", "zur Auswahl", () => otaGoStep(2)];
   const dst = _o("otaDst").value, f = otaFiles[otaSel];
   if (f && otaDrv) {
@@ -744,13 +819,13 @@ function otaRender() {
   _o("cxAcc").textContent = acc;
   _o("cxAccAge").textContent = otaAccAt ? ("(" + otaAgo(otaAccAt).replace("vor ", "vor ") + " geprüft)") : "";
   const f = otaJob === "perf" ? null : otaFiles[otaSel];
-  _o("cxFile").textContent = otaJob === "perf" ? ((parseInt(_o("otaKb").value) || 50) + " KB Muster")
+  _o("cxFile").textContent = otaJob === "perf" ? ((parseInt(_o("otaKb").value) || 50) + " KB Testdaten")
     : (f ? f.name : "keine");
-  // What the interface is doing -- "frei" said nothing; this is an activity, with progress.
-  const act = { ping: "Anmeldung läuft", list: "liest ein Verzeichnis", info: "liest das Gerät",
+  // What this device is doing: an activity with progress, "bereit" while idle.
+  const act = { ping: "Anmeldung läuft", list: "liest ein Verzeichnis", info: "liest das Ziel",
          delete: "schreibt", scan: "Suche " + (otaScanTotal ? otaScanDone + " von " + otaScanTotal : ""),
          upload: "", verify: "prüft die Prüfsumme" };
-  let bus = "nichts läuft";
+  let bus = "bereit";
   if (otaRunning && s.total) bus = "Übertragung " + (s.done / s.total * 100).toFixed(0) + " %";
   else if (s.busy) bus = act[s.phase] || "arbeitet";
   _o("cxBus").textContent = bus;
@@ -827,19 +902,26 @@ _o("otaDevHead").textContent = pa
       const ic = k => k === "ok" ? "<svg class='ci' viewBox='0 0 24 24' fill='none' stroke='#2e7d32' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M4 12.5 9.5 18 20 6.5'/></svg>"
         : k === "q" ? "<svg class='ci' viewBox='0 0 24 24' fill='none' stroke='#c98a00' stroke-width='2.5' stroke-linecap='round' aria-hidden='true'><path d='M9 9a3 3 0 1 1 4.5 2.6c-1 .6-1.5 1.2-1.5 2.4'/><path d='M12 17.5h.01'/></svg>"
         : "<svg class='ci' viewBox='0 0 24 24' fill='none' stroke='#c62828' stroke-width='2.5' stroke-linecap='round' aria-hidden='true'><path d='M6 6l12 12M18 6 6 18'/></svg>";
-      const item = (k, t) => "<span class='cap-" + k + "'>" + ic(k) + otaEsc(t) + "</span>";
+      const item = (k, t, tip) => "<span class='cap-" + k + "'" + (tip ? " title='" + otaEsc(tip) + "'" : "") + ">" + ic(k) + otaEsc(t) + "</span>";
       const rows = [];
       if (d.legacy) rows.push(item("ok", "klassischer Upload"), item("ok", "Download"));
       names.forEach(n => {
         const has = !!(bits & n[0]);
         if (n[0] === 0x02 && has && d.derived) rows.push(item("q", "selbst anwenden — unbestätigt (nur RP2040/2350-Builds)"));
         else if (n[0] === 0x01 && d.legacy) rows.push(item("no", "fortsetzen (vom Client zurückgehalten)"));
+        // Only ESP32 reports gzip; on RP2040/RP2350 the bootloader unpacks, and the chip cannot be read from here.
+        else if (n[0] === 0x40 && !has) rows.push(item("q", n[1], "nicht gemeldet – RP2040/RP2350 entpacken trotzdem"));
         else rows.push(item(has ? "ok" : "no", n[1]));
       });
       if (d.legacy) rows.push(item("no", "Zugriffskontrolle"));
       _o("otaDevCaps").innerHTML = rows.join("")
         + (d.derived ? "<div class='caps-hint'>Aus der Version abgeleitet – dieses FTM meldet seine Merkmale nicht selbst.</div>" : "");
     } else _o("otaDevCaps").innerHTML = "";
+    _o("otaCapsHelp").classList.toggle("fm-hidden", !d.ftm);
+    // How to get there, with the address of this target: the command is typed into this device's console.
+    _o("otaCapCon").innerHTML = !(d.ftm && otaDevPa) ? ""
+      : ", z.&nbsp;B. in der " + (document.querySelector("a[href='/console']") ? "<a href='/console'>Gerätekonsole</a>" : "Gerätekonsole")
+        + " dieses Geräts mit <code>ftc " + otaEsc(otaDevPa) + " con</code> (zurück mit <code>quit</code>)";
     const pmOn = otaPmGuess !== null ? otaPmGuess : !!d.prog;
     _o("otaPmText").textContent = (pmOn ? "an" : "aus")
       + (otaPmGuess !== null && otaPmGuess !== !!d.prog ? " — geschrieben, noch nicht gelesen" : "");
@@ -850,14 +932,15 @@ _o("otaDevHead").textContent = pa
   // Access
   _o("otaAccText").textContent = !fresh ? "noch nicht gelesen"
     : !otaDev.ftm ? "kein Dateitransfer"
-    : !(otaDev.feat & 0x20) ? ((otaDev.feat & 0x10) ? "Angemeldet."
-                            : "Das Ziel verlangt kein Passwort.")
-    : "Nimmt keine Schreibvorgänge an.";
-  // The access line carries the verdict, so it carries the colour: refused writes red, an open
-  // session green. Not-yet-read stays neutral -- an unknown state is not a good one.
+    : !(otaDev.feat & 0x20) ? ((otaDev.feat & 0x10) ? "Entsperrt – das Ziel nimmt Daten an."
+                            : "Offen – das Ziel verlangt kein Passwort.")
+    : (otaDev.feat & 0x10) ? "Gesperrt – das Ziel verlangt ein Passwort."
+    : "Gesperrt – das Ziel nimmt derzeit keine Daten an.";
+  // A locked target is a state with a next step, not a fault: amber with the step right below it,
+  // an open session green. Not-yet-read stays neutral -- an unknown state is not a good one.
   _o("otaAccText").className =
     !(fresh && otaDev.ftm) ? ""
-    : (otaDev.feat & 0x20) ? "ota-err"
+    : (otaDev.feat & 0x20) ? "ota-warn acc-lock"
     : (otaDev.feat & 0x10) ? "ota-ok" : "";
   _o("otaAccAge").textContent = otaAccAt ? ("Stand: " + otaAgo(otaAccAt)) : "";
   const needPw = !!(fresh && otaDev.ftm && (otaDev.feat & 0x10));
@@ -865,10 +948,17 @@ _o("otaDevHead").textContent = pa
   const lockRow = _o("otaLockRow");
   if (lockRow) lockRow.classList.toggle("fm-hidden", !needPw);
   _o("otaAccHint").classList.toggle("fm-hidden", !needPw && !progGate);
+  const locked = !!(needPw && (otaDev.feat & 0x20));
+  _o("otaProgRow").classList.toggle("fm-hidden", !progGate);
   _o("otaAccHint").textContent = progGate
-    ? "Programmiermodus einschalten, dann neu lesen. Hilft das nicht, ist der Zugriff am Ziel aus."
-    : "Das Passwort geht nie im Klartext über den Bus. Das Ziel schließt von selbst.";
-  if (_o("otaUnlock")) { _o("otaUnlock").disabled = otaBusy || !(otaDev && (otaDev.feat & 0x20)); }
+    ? "Zuerst den Programmiermodus einschalten, danach Zugriff prüfen. Hilft das nicht, ist der Zugriff am Ziel abgeschaltet."
+    : locked ? "Passwort des Ziels eingeben und Entsperren wählen. Es wird nicht im Klartext über den Bus gesendet."
+    : "Die Anmeldung endet nach einiger Zeit ohne Aktivität von selbst.";
+  if (_o("otaUnlock")) { _o("otaUnlock").disabled = otaBusy || !(otaDev && (otaDev.feat & 0x20)); _o("otaUnlock").classList.toggle("act", locked); }
+  // One state, one action: locked shows the password field and "Entsperren", unlocked only "Abmelden".
+  if (_o("otaPw")) _o("otaPw").classList.toggle("fm-hidden", !locked);
+  if (_o("otaUnlock")) _o("otaUnlock").classList.toggle("fm-hidden", !locked);
+  if (_o("otaLock")) _o("otaLock").classList.toggle("fm-hidden", locked);
   if (_o("otaLock")) { _o("otaLock").disabled = otaBusy || !(otaDev && !(otaDev.feat & 0x20)); }
   // Sweep
   const sp = otaScanSpec();
@@ -877,7 +967,7 @@ _o("otaDevHead").textContent = pa
     : (sp.a + "." + sp.l + ".1 – " + sp.a + "." + sp.l + ".255 · " + sp.count + " Adressen"))
     + " · etwa " + otaScanEta(sp)
     + (otaScanKind() === "ets"
-        ? " · ein verbindungsorientierter Durchlauf, erreicht auch BCU1/BCU2"
+        ? " · ein Durchlauf wie in der ETS, erreicht auch BCU1/BCU2"
         : " · " + (otaSweeps() === 1 ? "ein Durchlauf" : otaSweeps() + " Durchläufe")
           + ", findet jedes antwortende Gerät");
   const parEl = _o("otaParams");
@@ -903,9 +993,9 @@ _o("otaDevHead").textContent = pa
     : (otaScanComplete ? ("beendet" + (otaScanWhen ? " " + otaScanWhen : "") + " · " + otaScanFound + " Geräte")
                        : (otaHits.length ? (otaScanFound + " Geräte aus der letzten Suche") : ""));
   _o("otaScanFoot").textContent = scanning
-    ? ((otaScanKind() === "ets" ? "Ein verbindungsorientierter Durchlauf"
+    ? ((otaScanKind() === "ets" ? "Ein Durchlauf wie in der ETS"
                                 : (otaSweeps() === 1 ? "Ein Durchlauf" : otaSweeps() + " Durchläufe"))
-       + " über den Bereich. Läuft auf dem Interface weiter.")
+       + " über den Bereich. Läuft auf diesem Gerät weiter.")
     : (otaScanComplete
         ? ("Vollständig · " + otaScanFound + " gefunden, davon "
            + otaHits.filter(h => h.ok).length + " OpenKNX"
@@ -954,7 +1044,7 @@ _o("otaDevHead").textContent = pa
   _o("otaGa").disabled = otaBusy || !fresh;
   _o("otaGaState").textContent = !fresh ? "erst das Gerät lesen"
     : otaGaLost ? "verworfen durch eine fast-Übertragung — erneut lesen"
-    : otaGa === null ? "nicht gelesen — eigener Buslauf, 1–3 min"
+    : otaGa === null ? "nicht gelesen — das Lesen dauert 1–3 min"
     : otaGa.length === 0 ? (otaGaCut
         ? ("abgebrochen " + otaGaAt + " — nichts gelesen, eine Tabelle brach ab")
         : ("gelesen " + otaGaAt + " — 0 Einträge (das Gerät führt keine Gruppenadressen)"))
@@ -982,13 +1072,13 @@ _o("otaDevHead").textContent = pa
   // Der Warnkasten über den Schritten nennt das FTM einmal; was genau fehlt, steht als Marke am jeweiligen
   // Bedienelement. Hier steht nur der Auftrag.
   _o("otaJobNote").textContent = (otaJob === "delta"
-    ? "Nur die Differenz geht über den Bus. Das Ziel muss die passende Vorlage laufen."
-    : otaJob === "perf" ? "Misst den Durchsatz — gleicher Weg, erzeugtes Muster."
-    : "Das ganze Abbild geht über den Bus und braucht Platz am Ziel.");
+    ? "Überträgt nur die Änderungen. Auf dem Ziel muss die passende Ausgangsversion laufen."
+    : otaJob === "perf" ? "Misst die Übertragungsgeschwindigkeit zum Ziel mit Testdaten."
+    : "Überträgt die komplette Firmware. Das Ziel braucht dafür freien Speicher.");
   _o("otaSrcNote").textContent = otaJob === "delta" ? "Angezeigt werden .okd." : "Angezeigt werden .bin, .uf2 und .gz.";
   _o("otaSpeedNote").textContent = otaFast
-    ? "Mehrere Blöcke, dann eine Lückenmeldung. Fenster 8–64, sucht die Obergrenze."
-    : "Ein Block, eine Bestätigung. Langsamer, aber busfest.";
+    ? "Sendet mehrere Blöcke am Stück, bevor das Ziel bestätigt. Etwas schneller, lastet den Bus aus."
+    : "Jeder Block wird einzeln bestätigt. Unempfindlich gegen Störungen.";
   // Target drives -- only what was asked for, never a guess
   const dd = _o("otaDst"), keep = dd.value;
   const opts = [["", "intern"]];
@@ -1027,16 +1117,26 @@ _o("otaDevHead").textContent = pa
   if (otaFast && fresh && otaDev.ftm && !otaCan(0x04))
     swn = (swn ? swn + " " : "") + "fast nicht verfügbar — es wird safe verwendet.";
   _o("otaSwNote").textContent = swn;
+  // A forecast, not a promise. The rate a transfer reaches follows the baud rate of THIS device's bus
+  // chip, which the status reports. Measured on 2026-10-12 with 50 KB to an RP2040 target: at 38400
+  // safe 400-440 B/s and fast 450-480 B/s (several runs); at 19200 safe 341 and 347 B/s, fast 364 and
+  // 367 B/s (two runs each, to two targets), with a margin below. Unknown baud rate: both bands.
+  const useFast = otaFast && !(fresh && otaDev.ftm && !otaCan(0x04));
+  const band = { 38400: { safe: [400, 440], fast: [450, 480] }, 19200: { safe: [325, 350], fast: [350, 370] } }[s.baud]
+    || { safe: [325, 440], fast: [350, 480] };
+  const rate = useFast ? band.fast : band.safe;
+  const span = bytes => { const a = otaDur(bytes / rate[1]), b = otaDur(bytes / rate[0]);
+    return "voraussichtlich " + (a === b ? "etwa " + a : a + " bis " + b) + " bei " + rate[0] + "–" + rate[1] + " B/s"
+      + (s.baud ? " (Bus-Chip dieses Geräts: " + s.baud + " Baud)" : "") + ", bei viel Busverkehr länger"; };
   _o("otaPreview").textContent = otaJob === "perf"
-    ? ((parseInt(_o("otaKb").value) || 50) + " KB nach " + (pa || "—") + " · geschätzt "
-     + otaDur((parseInt(_o("otaKb").value) || 50) * 1024 / 400))
+    ? ((parseInt(_o("otaKb").value) || 50) + " KB nach " + (pa || "—") + " · " + span((parseInt(_o("otaKb").value) || 50) * 1024))
     : (!f ? "Datei fehlt — Dauer nicht berechenbar"
-      : (f.name + " → " + (pa || "—") + " · " + f.size + " · geschätzt " + otaDur((f.bytes || 0) / 400) + " bei rund 400 B/s"));
+      : (f.name + " → " + (pa || "—") + " · " + f.size + " · " + span(f.bytes || 0)));
   // Readiness + blocking reason
   _o("rdTarget").textContent = !pa ? "fehlt" : (fresh && otaDev.ftm) ? "bereit"
     : otaDevMiss ? "keine Antwort" : fresh ? "kein Dateitransfer" : "nicht gelesen";
   _o("rdAcc").textContent = otaJob === "perf" ? "—" : acc;
-  _o("rdFile").textContent = otaJob === "perf" ? "Muster" : (f ? "bereit" : "fehlt");
+  _o("rdFile").textContent = otaJob === "perf" ? "Testdaten" : (f ? "bereit" : "fehlt");
   _o("rdSpace").textContent = (() => {
     if (!otaDrv) return "unbekannt";
     const i = dst === "sd" ? 1 : dst === "efc" ? 2 : 0, v = otaDrv[i];
@@ -1045,14 +1145,17 @@ _o("otaDevHead").textContent = pa
   const b = otaBlocker();
   _o("otaStart").disabled = !!b;
   _o("otaStart").textContent = otaJob === "perf" ? "Messen" : "Übertragen";
-  _o("otaWhy").textContent = b ? ("Nicht möglich: " + b[0]) : "Bereit.";
-  _o("otaWhy").className = "why" + (b ? " ota-warn" : "");
+  // A running transfer is not a refusal: say that it runs, the stop button is right beside it.
+  _o("otaWhy").textContent = otaRunning ? (otaJob === "perf" ? "Eine Messung läuft." : "Eine Übertragung läuft.")
+    : b ? ("Nicht möglich: " + b[0]) : "Bereit.";
+  _o("otaWhy").className = "why" + (b && !otaRunning ? " ota-warn" : "");
   const fx = _o("otaFix");
   if (b && b[1]) { fx.classList.remove("fm-hidden"); fx.textContent = b[1]; fx.onclick = b[2]; }
   else fx.classList.add("fm-hidden");
   _o("otaStop").classList.toggle("fm-hidden", !otaRunning);
   // Live values, then the balance -- the same table: the values BECOME the balance.
   otaDrawChart();
+  otaDrawBlocks();
   if (otaRunning) {
     _o("otaEmptyRun").classList.add("fm-hidden");
     _o("otaRunSec").classList.remove("fm-hidden");
@@ -1068,7 +1171,7 @@ _o("otaDevHead").textContent = pa
       + otaRow("Wiederholungen", (s.resends || 0) + (s.crcErrors ? " · Prüfsummenfehler " + s.crcErrors : ""))
       + otaRow("Verbleibend", otaAvg ? otaDur((s.total - s.done) / otaAvg) : "—");
     _o("otaRunWrap").className = "";
-    _o("otaRunFoot").textContent = "Läuft auf dem Interface. Abbrechen nur hier.";
+    _o("otaRunFoot").textContent = "Läuft auf diesem Gerät. Abbrechen nur hier.";
   } else if (otaResult) {
     _o("otaEmptyRun").classList.add("fm-hidden");
     _o("otaRunSec").classList.remove("fm-hidden");
@@ -1099,7 +1202,7 @@ function otaStartJob() {
     const d = _o("otaDst").value;
     if (d) p.dst = d;
   }
-  otaSeries = []; otaLastChunk = -1; otaResult = null; otaSawRun = false; otaT0 = 0; otaD0 = 0; otaAvg = 0;
+  otaSeries = []; otaLastChunk = -1; otaLastVer = -1; otaLastCrc = -1; otaChecks = 0; otaBlk = { total: 0, done: 0, last: -1, res: -1, marks: [] }; otaResult = null; otaSawRun = false; otaT0 = 0; otaD0 = 0; otaAvg = 0;
   _o("otaAfter").classList.add("fm-hidden");
   otaGoStep(3);
   otaArm("otaStart", "start", p);
@@ -1123,6 +1226,12 @@ function otaInit() {
     }
     otaGoStep(+t.dataset.step);
   });
+  _o("stepHelp").innerHTML = OTA_STEP_HELP[otaStep];
+  _o("stepQ").onclick = e => {
+    e.preventDefault();
+    const off = _o("stepHelp").classList.toggle("fm-hidden");
+    _o("stepQ").setAttribute("aria-expanded", off ? "false" : "true");
+  };
   document.querySelectorAll("[data-job]").forEach(t => t.onclick = e => { e.preventDefault(); otaSetJob(t.dataset.job); });
   document.querySelectorAll("[data-otafs]").forEach(t => t.onclick = e => {
     e.preventDefault();
@@ -1218,6 +1327,8 @@ function otaInit() {
     _o("otaCheck").onclick = () => otaArm("otaRead", "feat", { pa: _o("otaPa").value });
     _o("otaPw").onkeydown = e => { if (e.key === "Enter") unlock.click(); };
   }
+  _o("otaAccProg").onclick = () => otaPmWrite(true);
+  _o("otaCheckP").onclick = () => otaArm("otaRead", "feat", { pa: _o("otaPa").value });
   ["otaArea", "otaLine", "otaScope", "otaKind", "otaKb", "otaDst", "otaWin", "otaApply", "otaResume", "otaKeep", "otaDrive"]
     .forEach(id => { const e = _o(id); if (!e) return; e.onchange = otaRender; if (e.tagName === "INPUT") e.oninput = otaRender; });
   _o("logBox").open = false;

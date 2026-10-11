@@ -11,6 +11,10 @@
     #ifdef OPENKNX_EXTFLASH
         #include "EfcFileStore.h"
     #endif
+    #include "knx/config.h"
+    #ifdef KNX_HAS_TP
+        #include "knx.h"
+    #endif
 
 FileTransferWebClient openknxFtcWeb;
 
@@ -202,6 +206,15 @@ void FileTransferWebClient::handleStatus(WebRequest &req, WebResponse &res)
              paText(s.target).c_str(), (unsigned)s.resends, (unsigned)s.verifies,
              (unsigned)s.crcErrors);
     out += buf;
+
+#ifdef KNX_HAS_TP
+    // The baud rate of this device's bus chip bounds the rate a transfer reaches; the page forecasts with it.
+    if (TpUartDataLinkLayer *dll = KNX_TP_DLL)
+    {
+        snprintf(buf, sizeof(buf), ",\"baud\":%d", dll->getTPUart().getBaudrate());
+        out += buf;
+    }
+#endif
 
 #ifdef OPENKNX_FTC_SECURITY
     // What became of a login. The page cannot learn this from the POST -- that one only ARMS the

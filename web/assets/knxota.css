@@ -5,8 +5,18 @@
 .ota-ok   { color: #2e7d32; }
 .gray     { color: #888; }
 .mono     { font-family: monospace; }
-/* No max-width here: the intro is one 97-character sentence, and a 70ch cap broke it mid-line. */
-.lead { color:#555; font-size:.92em; margin:-4px 0 14px; }
+/* No max-width here: a 70ch cap broke the intro mid-line. */
+/* The intro explains, it must not lead: the size and grey of the row labels (.lbl). */
+.lead { color:#888; font-size:.88em; line-height:1.45; margin:-4px 0 14px; }
+/* Short how-to behind a "?", closed by default. */
+details.help { margin:-6px 0 12px; font-size:.88em; color:#555; }
+details.help > summary { list-style:none; cursor:pointer; display:inline-flex; align-items:center; gap:7px; }
+details.help > summary::-webkit-details-marker { display:none; }
+details.help > summary em { display:inline-flex; width:17px; height:17px; border-radius:50%; background:#888; color:#fff;
+                            font-style:normal; font-size:.8em; font-weight:700; align-items:center; justify-content:center; }
+details.help[open] > summary em { background:#449841; }
+details.help ol, details.help ul { margin:8px 0 0; padding-left:22px; line-height:1.5; }
+details.help.caps-help { margin:8px 0 0; }
 .lbl { font-size:.88em; color:#888; flex:0 0 auto; }
 .stale { color:#888; font-size:.8em; }
 
@@ -56,6 +66,10 @@ details.log > summary:hover { color:#555; }
 .warnbox { display:flex; gap:12px; align-items:flex-start; background:#fff8e6; border:1px solid #e8c36a;
            border-left:4px solid #c98a00; padding:10px 14px; margin:0 0 10px; color:#5a3d00; font-size:.9em; line-height:1.45; }
 .warnbox b { color:#8a5a00; }
+.warnbox a { color:inherit; }
+/* The one next step of a section: unlock, or switch programming mode on. */
+#ota button.act { background:#449841; border-color:#449841; color:#fff; }
+.acc-lock { font-weight:600; }
 .warnbox svg { flex:0 0 20px; margin-top:1px; }
 /* Tag on a control the target lacks: the reason, right where the control is. */
 .na { display:inline-block; font-size:.74em; color:#8a5a00; background:#fff3d6; border:1px solid #e8c36a;
@@ -75,6 +89,12 @@ details.log > summary:hover { color:#555; }
 .steps .fm-tab .st { font-size:.8em; color:#888; font-weight:400; }
 .steps .fm-tab.active .st { color:#555; }
 @media (max-width:620px){ .steps .fm-tab .st { display:none; } }
+/* "?" at the end of the tab strip: opens the note on what to do in the active step. */
+.steps .step-q { margin-left:auto; align-self:center; display:inline-flex; width:19px; height:19px; border-radius:50%; background:#888;
+                 color:#fff; font-size:.75em; font-weight:700; align-items:center; justify-content:center; text-decoration:none; }
+.steps .step-q[aria-expanded='true'] { background:#449841; }
+.step-help { margin:0; padding:9px 12px; font-size:.88em; line-height:1.5; color:#444; background:#f7f7f7;
+             border:1px solid #e6e6e6; border-top:none; }
 
 .reg { border:1px solid #e6e6e6; margin-bottom:20px; }
 .reg.pane { border-top:none; margin-top:0; }
@@ -130,6 +150,7 @@ details.ga > summary { cursor:pointer; font-size:.88em; color:#555; padding:4px 
 .balance.bad { border-left-color:#c62828; }
 /* Throughput, window regulation and gaps in one picture -- the numbers the console prints. */
 .chart { width:100%; height:150px; display:block; border:1px solid #eee; background:#fafafa; margin-bottom:6px; }
+.blocks { display:block; width:100%; height:16px; margin-top:8px; }
 
 button.busy { position:relative; color:transparent !important; pointer-events:none; }
 button.busy::after { content:"\2026"; position:absolute; inset:0; display:flex;

@@ -3,8 +3,23 @@
 
 ## ec/v0.3.0-beta.1: 2026-10-11
 
-The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-10
+The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-11
 below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
+
+
+## 2026-10-11 -- the knxOTA page explains itself to the person doing the update
+
+* The page opens with a short paragraph on what knxOTA does. A "?" at the step bar shows what to do in the active step, and two more explain the capabilities of the target and the two transfer methods
+* **safe is the default method.** fast has to be chosen, and its help says that it uses the whole bus, can delay other telegrams and gains about a tenth
+* The duration in the preview is a forecast from measured rates, per method and per baud rate of this device's bus chip: at 38400 safe 400-440 B/s and fast 450-480 B/s, at 19200 safe 325-350 B/s and fast 350-370 B/s. `/knxota/status` reports the baud rate for it. Before, the preview used 400 B/s for everything
+* The access section names the next step: a locked target shows "Gesperrt" in amber with the one green button that helps -- unlock with the password, or switch programming mode on. Before, it said in red that the target takes no writes. The password field shows only while the target is locked, the logout only while it is unlocked
+* The help for the console capability names the command, `ftc <address> con` in this device's console, and how to leave again
+* While a transfer runs the page says so, instead of "Nicht möglich: Es läuft bereits eine Übertragung."
+* An empty file list shows a notice that the firmware file is uploaded in the file manager first, with a link to it
+* The transfer chart marks where the target confirmed data (a tick at the top edge), a repeated range in orange and a checksum error as a dashed red line. In safe it no longer draws a window line and scale, which that method does not have
+* A block map under the chart shows how far the transfer is: one cell per block while they fit, a share of the file per pixel for a large file, with repeated ranges in orange and checksum errors in red
+* A target that does not report gzip shows a "?" instead of a cross. Only ESP32 reports it; an RP2040 or RP2350 unpacks in its bootloader, and the page cannot read the chip
+* Step titles, job types and status texts are worded for an operator in a neutral form, and the page calls itself "this device" instead of "interface". The progress bar, the block map and the count of confirmations reach their final value when a transfer ends
 
 
 ## 2026-10-10 -- the device info reads the bus voltage of every device
