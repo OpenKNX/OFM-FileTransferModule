@@ -436,14 +436,14 @@ static void renderUiDemo()
     // (c) the PA shown every way: plain · chip · with role, tunnel-pool vs own.
     t.tableRow({c.dim("PA (role)"), c.dim("plain"), c.dim("chip"), c.dim("note")}, {14, 10, 12, 0});
     t.tableRow({c.txt("tunnel pool"), c.txt(ftc::Tpl::pa(0x500A)), t.chip(ftc::Tpl::pa(0x500A), 'g'), c.dim("connection address (this session)")}, {14, 10, 12, 0});
-    t.tableRow({c.txt("own device"), c.txt(ftc::Tpl::pa(0x1105)), t.chip(ftc::Tpl::pa(0x1105), 'c'), c.dim("programmed by ETS · self-programmable")}, {14, 10, 12, 0});
+    t.tableRow({c.txt("own device"), c.txt(ftc::Tpl::pa(0x1105)), t.chip(ftc::Tpl::pa(0x1105), 'c'), c.dim("programmed · self-programmable")}, {14, 10, 12, 0});
     // (d) prog-mode ON blinking inline (animated on a tty) — same indicator, driven.
     if (tty)
     {
         for (int k = 0; k < 14; ++k)
         {
             std::printf("\r  %s %s  %s\x1b[K", c.dim("Prog mode").c_str(), t.progMode(true, (k % 2) == 0).c_str(),
-                        c.dim("← device in programming mode (button held / ETS)").c_str());
+                        c.dim("← device in programming mode").c_str());
             std::fflush(stdout);
             std::this_thread::sleep_for(std::chrono::milliseconds(220));
         }
@@ -540,7 +540,7 @@ static void renderUiDemo()
     // «busmon» — raw LPDU + interpretation, ETS ACK colour (GREEN = NOT acknowledged). Standard AND extended
     // frames; wide / extended frames keep ALL bytes — the hex WRAPS with a hanging indent (resize-safe), and
     // only the explicit compact mode clips with an ellipsis. Frames arrive animated on a tty.
-    t.section("«busmon» · busmonitor  — STD + EXT frames · ETS ACK colour · full-byte wrap");
+    t.section("«busmon» · busmonitor  — STD + EXT frames · ACK colour · full-byte wrap");
     struct Bm
     {
         const char* type;
@@ -570,7 +570,7 @@ static void renderUiDemo()
         showFrame(b);
         if (tty) std::this_thread::sleep_for(std::chrono::milliseconds(280));
     }
-    t.note("ETS colour: green = NOT acknowledged; grey/white = acknowledged · extended frames keep ALL bytes (wrapped)");
+    t.note("colour: green = NOT acknowledged; grey/white = acknowledged · extended frames keep ALL bytes (wrapped)");
     std::printf("  %s %s\n", c.dim("compact mode →").c_str(), t.clip(c.txt(bms[4].raw), ftc::Tpl::cols() - 22).c_str());
 
     renderUiDemoExtras(t); // «panel-box», discover/pa short+long, keybar, crumb, stepper, settings, KOs, errors, queue, bus-anim, bar/graph styles
@@ -786,7 +786,7 @@ static void renderUiDemoExtras(ftc::Tpl& t)
     t.section("«error» · errorBlock()  — error + warning");
     g_ui.errorBlock(false, "connect refused — E_NO_MORE_CONNECTIONS",
                     {"all 16 tunnels busy on 11.11.0.5", "the interface allows 16 concurrent tunnels"},
-                    "retry shortly, or free a tunnel (close an ETS session)");
+                    "retry shortly, or free a tunnel (close another client)");
     g_ui.errorBlock(true, "APDU re-adjusted to 55 B",
                     {"device announced 254 B but answered short"}, "informational — the transfer continues");
 
@@ -1412,8 +1412,8 @@ static void examples()
          "2 · das alte Gerät leeren, bevor es die Anlage verlässt"},
         {"oknx -i 11.11.0.126 setpa 1.1.42", "3 · new device into programming mode, same address",
          "3 · neues Gerät in den Programmiermodus, dieselbe Adresse"},
-        {"(ETS)", "4 · the application has to come from ETS — oknx cannot write it",
-         "4 · die Applikation muss aus ETS kommen — oknx kann sie nicht schreiben"},
+        {"(download)", "4 · program the application into the device — oknx cannot write it",
+         "4 · die Applikation ins Gerät programmieren — oknx kann sie nicht schreiben"},
     };
     static const Ex gWhy[] = {
         {"oknx -i 11.11.0.126 ga import GA-Export.xml", "once per interface: names + datapoint types from your project",
@@ -1613,10 +1613,10 @@ static void usage()
     U.section(L.tr("GROUP ADDRESSES", "GRUPPENADRESSEN"), L.tr("(--ip, no <pa>)", "(--ip, kein <pa>)"));
     U.cmdRow("ga read <x/y/z>", L.tr("read a group address (GroupValue_Read)", "Gruppenadresse lesen (GroupValue_Read)"));
     U.cmdRow("ga write <x/y/z> <v>", L.tr("write it: 0-63 plain, or hex octets", "schreiben: 0-63 blank, oder Hex-Oktette"));
-    U.cmdRow("ga import <export>", L.tr("learn an ETS group address export: names + datapoint types",
-                                       "ETS-Gruppenadressexport einlesen: Namen + Datenpunkttypen"));
-    U.cmdRow("", L.tr("XML or CSV, all four ETS layouts; CSV only WITH header lines. Kept per interface",
-                      "XML oder CSV, alle vier ETS-Formate; CSV nur MIT Kopfzeilen. Je Interface abgelegt"));
+    U.cmdRow("ga import <export>", L.tr("learn a group address export of the KNX project: names + datapoint types",
+                                       "Gruppenadressexport des KNX-Projekts einlesen: Namen + Datenpunkttypen"));
+    U.cmdRow("", L.tr("XML or CSV, all four layouts; CSV only WITH header lines. Kept per interface",
+                      "XML oder CSV, alle vier Formate; CSV nur MIT Kopfzeilen. Je Interface abgelegt"));
     U.cmdRow("ga table", L.tr("which interface has which table", "welches Interface hat welche Tabelle"));
     U.cmdRow("ga table move <from> <to>", L.tr("re-point a table after the interface changed address",
                                               "Tabelle umhängen, wenn das Interface eine neue Adresse hat"));
@@ -1629,7 +1629,7 @@ static void usage()
     U.cmdRow("gm <x/y/z>:<DPT>", L.tr("give the datapoint type for this run, without importing",
                                      "den Datenpunkttyp für diesen Lauf angeben, ohne Import"));
     U.cmdRow("ga monitor <x/y/z>", L.tr("alias for gm <x/y/z>", "Kurzform für gm <x/y/z>"));
-    U.cmdRow("busmon | bm", L.tr("live bus monitor — raw LPDU, ETS ACK colour", "Live-Busmonitor — Roh-LPDU, ETS-ACK-Farbe"));
+    U.cmdRow("busmon | bm", L.tr("live bus monitor — raw LPDU, ACK colour", "Live-Busmonitor — Roh-LPDU, ACK-Farbe"));
     U.cmdRow("gm|bm compare <ipB> [--grace ms] [--raw]", L.tr("A/B busmon fidelity diff (reassembles fragments; --raw = per-piece; --multi = two-stream)",
                                                               "A/B-Busmon-Treuevergleich (setzt Fragmente zusammen; --raw = Einzelstücke; --multi = Zweistrom)"));
     U.cmdRow("  compare readability", L.tr("keys f/c/m/t · flags --only-diff --collapse --no-markers --skew",
@@ -1699,8 +1699,8 @@ static void usage()
                       "verweigert, wenn nicht genau eines antwortet, und liest die neue Adresse zur Kontrolle zurück"));
     U.cmdRow("<pa> unload yes", L.tr("ERASE its configuration: address + association table and application go to UNLOADED",
                                      "Konfiguration LÖSCHEN: Adress- + Assoziationstabelle und Applikation auf UNLOADED"));
-    U.cmdRow("", L.tr("only an ETS download brings it back; asks again on a terminal",
-                      "nur ein ETS-Download holt sie zurück; fragt am Terminal zusätzlich nach"));
+    U.cmdRow("", L.tr("only programming the device again brings it back; asks again on a terminal",
+                      "nur eine neue Programmierung holt sie zurück; fragt am Terminal zusätzlich nach"));
     U.cmdRow("<pa> runstate [start|stop]",
              L.tr("read or control the application: 0 halted · 1 running · 3 terminated (03_05_01 4.24)",
                   "Applikation lesen oder steuern: 0 angehalten · 1 läuft · 3 beendet (03_05_01 4.24)"));
@@ -2038,8 +2038,8 @@ static const char* prioDangerText(const std::string& name)
     if (name == "urgent")
         return g_i18n.tr("Prio URGENT — preempts ALARMS. Dangerous and NOT spec-conformant for file transfer.",
                          "Prio URGENT — verdrängt ALARME. Gefährlich und NICHT spec-konform für Dateitransfer.");
-    return g_i18n.tr("Prio SYSTEM — network-management layer (ETS-reserved). Abusive.",
-                     "Prio SYSTEM — Netzwerk-Management-Ebene (ETS-reserviert). Missbräuchlich.");
+    return g_i18n.tr("Prio SYSTEM — network-management layer (reserved). Abusive.",
+                     "Prio SYSTEM — Netzwerk-Management-Ebene (reserviert). Missbräuchlich.");
 }
 
 /**
@@ -4499,10 +4499,10 @@ static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, 
             g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("this device is password protected",
                                                     "dieses Gerät ist passwortgeschützt"), {});
             if (!quiet)
-                g_tpl.note(L.tr("that is the password from this device's ETS \"access protection\" parameter — "
-                                "not your ETS password and not a KNX Secure key",
-                                "das ist das Passwort aus dem ETS-Parameter \"Zugriffsschutz\" dieses Geräts — "
-                                "nicht dein ETS-Passwort und kein KNX-Secure-Schlüssel"));
+                g_tpl.note(L.tr("that is the password from this device's \"access protection\" parameter — "
+                                "not your project password and not a KNX Secure key",
+                                "das ist das Passwort aus dem Parameter \"Zugriffsschutz\" dieses Geräts — "
+                                "nicht dein Projektpasswort und kein KNX-Secure-Schlüssel"));
             std::string pw;
             if (!ftc::readSecret(g_term, c, L.tr("password", "Passwort"), pw)) break;
             const SignInResult si = signIn(pa, pw.c_str());
@@ -4594,8 +4594,8 @@ static ftc::AccessState resolveAccessInteractively(uint16_t pa, unsigned waitS, 
                 continue;
             }
             g_ui.errorBlock(false, L.tr("the button did not free it", "die Taste hat die Sperre nicht gelöst"),
-                            {L.tr("then it is the access protection set in ETS",
-                                  "dann ist es der Zugriffsschutz aus der ETS"),
+                            {L.tr("then it is the access protection from the device's parameters",
+                                  "dann ist es der Zugriffsschutz aus den Parametern des Geräts"),
                              L.tr("the parameter is called \"access protection\" in the OpenKNX application",
                                   "der Parameter heißt \"Zugriffsschutz\" in der OpenKNX-Applikation")},
                             L.tr("set it to Always or Programming mode and download the application once",
@@ -5144,8 +5144,8 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                            {5, gaW, 12, 9, 0});
             }
             t.legend({{L.tr("C", "K"), L.tr("Comm", "Kommunikation")}, {L.tr("R", "L"), L.tr("Read", "Lesen")}, {L.tr("W", "S"), L.tr("Write", "Schreiben")}, {L.tr("T", "Ü"), L.tr("Transmit", "Übertragen")}, {L.tr("U", "A"), L.tr("Update", "Aktualisieren")}});
-            t.note(L.tr("SIZE = object size read from the device; the semantic DPT is not stored on the device (ETS shows it from the product DB)",
-                        "GRÖSSE = am Gerät gelesene Objektgröße; der semantische DPT liegt nicht am Gerät (ETS zeigt ihn aus der Produkt-DB)"));
+            t.note(L.tr("SIZE = object size read from the device; the semantic DPT is not stored on the device (it comes from the product database)",
+                        "GRÖSSE = am Gerät gelesene Objektgröße; der semantische DPT liegt nicht am Gerät (er kommt aus der Produktdatenbank)"));
             break;
         }
         case K_Df:
@@ -7006,8 +7006,8 @@ int main(int argc, char** argv)
         {
             if (pos.size() < 3)
             {
-                g_ui.errorBlock(false, L.tr("ga import needs an ETS group address export",
-                                            "ga import braucht einen ETS-Gruppenadressexport"),
+                g_ui.errorBlock(false, L.tr("ga import needs a group address export of the KNX project",
+                                            "ga import braucht einen Gruppenadressexport des KNX-Projekts"),
                                 {L.tr("XML or CSV; CSV only WITH header lines",
                                       "XML oder CSV; CSV nur MIT Kopfzeilen")},
                                 "oknx -i <ip> ga import GA-Export.xml");
@@ -7501,8 +7501,8 @@ int main(int argc, char** argv)
                           q, nm, sp, ip.c_str(), (unsigned)port, why);
             g_ui.errorBlock(false, L.tr("KNX IP Secure required", "KNX IP Secure erforderlich"),
                             {line, L.tr("oknx does not support KNX IP Secure.", "oknx unterstützt kein KNX IP Secure.")},
-                            L.tr("use a non-secure interface, or disable Secure Tunnelling in ETS.",
-                                 "nutze ein nicht-sicheres Interface, oder deaktiviere Secure Tunnelling in ETS."));
+                            L.tr("use a non-secure interface, or disable Secure Tunnelling on the interface.",
+                                 "nutze ein nicht-sicheres Interface, oder deaktiviere Secure Tunnelling am Interface."));
         }
         else if (cst > 0)
         {
@@ -7990,9 +7990,9 @@ int main(int argc, char** argv)
                              {L.tr("this device is not accepting writes right now",
                                    "dieses Gerät nimmt gerade keine Schreibzugriffe an")});
                 g_tpl.note(L.tr("press the programming button — if that frees it, that was the reason;"
-                                " if not, file transfer is switched off in the ETS application",
+                                " if not, file transfer is switched off in the device's parameters",
                                 "Programmiertaste drücken — löst das die Sperre, war es die Taste;"
-                                " wenn nicht, ist der Dateitransfer in der ETS-Applikation abgeschaltet"));
+                                " wenn nicht, ist der Dateitransfer in den Parametern des Geräts abgeschaltet"));
                 break;
             case ftc::Access::LockedOff:
                 g_tpl.status(ftc::Tpl::Stat::Err, L.tr("access", "Zugriff"),
@@ -8302,14 +8302,14 @@ int main(int argc, char** argv)
                           "  ->  " + ftc::appIdText(knxotaFw.id.openKnxId, knxotaFw.id.appNumber) +
                           L.tr(" in the file", " in der Datei")});
             for (const char* line : {
-                     L.tr("This happens when a release changes so much that it becomes a new ETS application.",
-                          "Das kommt vor, wenn ein Release so viel ändert, dass daraus eine neue ETS-Applikation wird."),
+                     L.tr("This happens when a release changes so much that it becomes a new application.",
+                          "Das kommt vor, wenn ein Release so viel ändert, dass daraus eine neue Applikation wird."),
                      L.tr("The transfer itself works. Afterwards the device is unprogrammed on 15.15.255 and",
                           "Die Übertragung selbst funktioniert. Danach ist das Gerät unprogrammiert auf 15.15.255 und"),
-                     L.tr("has to be programmed again in ETS -- parameters, group addresses AND the address.",
-                          "muss in der ETS neu programmiert werden -- Parameter, Gruppenadressen UND die Adresse."),
-                     L.tr("Have the new ETS application to hand before you start.",
-                          "Halte die neue ETS-Applikation bereit, bevor du startest.")})
+                     L.tr("has to be programmed again -- parameters, group addresses AND the address.",
+                          "muss neu programmiert werden -- Parameter, Gruppenadressen UND die Adresse."),
+                     L.tr("Have the new application (knxprod) to hand before you start.",
+                          "Halte die neue Applikation (knxprod) bereit, bevor du startest.")})
                 std::fprintf(stderr, "    %s\n", c.dim(line).c_str());
             std::fprintf(stderr, "\n");
             if (!g_term.isTty())
@@ -8324,8 +8324,8 @@ int main(int argc, char** argv)
                 return 1;
             }
             if (!ftc::confirm(g_term, c, L,
-                              L.tr("Install it and program the device again in ETS afterwards?",
-                                   "Einspielen und das Gerät danach in der ETS neu programmieren?"), false))
+                              L.tr("Install it and program the device again afterwards?",
+                                   "Einspielen und das Gerät danach neu programmieren?"), false))
             {
                 std::fprintf(stderr, "  %s\n", c.dim(L.tr("cancelled -- nothing was changed",
                                                           "abgebrochen -- es wurde nichts verändert")).c_str());
@@ -8378,8 +8378,8 @@ int main(int argc, char** argv)
         if ((verdict == ftc::Verdict::Downgrade || verdict == ftc::Verdict::Unknown) && !knxotaForce)
         {
             const std::string what = (verdict == ftc::Verdict::Downgrade)
-                ? L.tr("The device is newer than this file. After a downgrade you have to re-program it in ETS.",
-                       "Das Gerät ist neuer als diese Datei. Nach einem Downgrade musst du es in der ETS neu programmieren.")
+                ? L.tr("The device is newer than this file. After a downgrade you have to program it again.",
+                       "Das Gerät ist neuer als diese Datei. Nach einem Downgrade musst du es neu programmieren.")
                 : L.tr("The versions cannot be compared, so knxOTA cannot tell whether this file fits.",
                        "Die Versionen sind nicht vergleichbar, knxOTA kann also nicht sagen, ob diese Datei passt.");
             std::fprintf(stderr, "  %s %s\n", c.amber(g_term.glyph("⚠", "!")).c_str(), c.amber(what).c_str());
@@ -8443,8 +8443,8 @@ int main(int argc, char** argv)
                           "Die alte Firmware läuft weiter, bis die neue vollständig übertragen und die"),
                      L.tr("checksum is good. If anything fails, the device starts again with the old one.",
                           "Prüfsumme in Ordnung ist. Schlägt etwas fehl, startet das Gerät wieder mit der alten."),
-                     L.tr("Your ETS parameters, group addresses and the address are kept.",
-                          "Deine ETS-Parameter, Gruppenadressen und die Adresse bleiben erhalten."),
+                     L.tr("Your parameters, group addresses and the address are kept.",
+                          "Deine Parameter, Gruppenadressen und die Adresse bleiben erhalten."),
                      L.tr("The rest of your installation keeps working normally.",
                           "Der Rest deiner Anlage läuft normal weiter."),
                      L.tr("You may cancel at any time — the next run continues where it stopped.",
@@ -8787,8 +8787,8 @@ int main(int argc, char** argv)
                              std::string(L.tr("done — ", "fertig — ")) + paText +
                                  L.tr(" is now running ", " läuft jetzt mit ") + ftc::devVersionText(nv),
                              {std::string(L.tr("was ", "vorher ")) + ftc::devVersionText(dv)});
-                g_tpl.note(L.tr("your ETS parameters and group addresses are unchanged",
-                                "deine ETS-Parameter und Gruppenadressen sind unverändert"));
+                g_tpl.note(L.tr("your parameters and group addresses are unchanged",
+                                "deine Parameter und Gruppenadressen sind unverändert"));
             }
             else if (back)
                 g_tpl.status(ftc::Tpl::Stat::Warn,
@@ -8853,8 +8853,8 @@ int main(int argc, char** argv)
                                        "diese Firmware übernimmt die physikalische Adresse nicht, sie kam unprogrammiert zurück"),
                                   L.tr("the version there is the one just transferred -- nothing else can report it",
                                        "die Version dort ist die soeben übertragene -- nichts anderes kann sie melden"),
-                                  L.tr("program it with ETS to give it its address and parameters back",
-                                       "mit der ETS programmieren, damit es Adresse und Parameter zurückbekommt")});
+                                  L.tr("program it again to give it its address and parameters back",
+                                       "neu programmieren, damit es Adresse und Parameter zurückbekommt")});
                     socketCleanup();
                     return 0;
                 }
@@ -9329,8 +9329,8 @@ int main(int argc, char** argv)
                                         "entladen löscht die Konfiguration dieses Geräts"),
                             {L.tr("address table, association table and application program go to UNLOADED",
                                   "Adresstabelle, Assoziationstabelle und Applikationsprogramm gehen auf UNLOADED"),
-                             L.tr("only an ETS download brings it back - oknx cannot",
-                                  "nur ein ETS-Download holt das zurück - oknx kann es nicht")},
+                             L.tr("only programming the device again brings it back - oknx cannot",
+                                  "nur eine neue Programmierung holt das zurück - oknx kann es nicht")},
                             std::string("oknx -i <ip> ") + pos[0] + " unload yes");
             g_knxTunnel.disconnect();
             socketCleanup();
@@ -9341,8 +9341,8 @@ int main(int argc, char** argv)
         if (g_term.isTty() && !quiet)
         {
             g_tpl.status(ftc::Tpl::Stat::Warn, pos[0] + " " + L.tr("will be unloaded", "wird entladen"),
-                         {L.tr("configuration erased, only an ETS download brings it back",
-                               "Konfiguration gelöscht, nur ein ETS-Download holt sie zurück")});
+                         {L.tr("configuration erased, only programming the device again brings it back",
+                               "Konfiguration gelöscht, nur eine neue Programmierung holt sie zurück")});
             if (!ftc::confirm(g_term, g_theme, L, L.tr("really unload this device?", "dieses Gerät wirklich entladen?")))
             {
                 g_knxTunnel.disconnect();
@@ -10068,8 +10068,8 @@ int main(int argc, char** argv)
                                   "das Gerät antwortet, aber nicht auf das Öffnen der Konsole - noch einmal versuchen")
                 : needLogin ? L.tr("the console is password protected - log in first",
                                    "die Konsole ist passwortgeschützt - erst anmelden")
-                : locked ? L.tr("the console is locked - programming mode, or ETS access is off",
-                                "die Konsole ist gesperrt - Programmiermodus, oder der ETS-Zugriff ist aus")
+                : locked ? L.tr("the console is locked - programming mode, or access is switched off in the device's parameters",
+                                "die Konsole ist gesperrt - Programmiermodus, oder der Zugriff ist in den Parametern des Geräts abgeschaltet")
                 : inUse ? L.tr("the console is in use by another client - try again later",
                                "die Konsole wird von einem anderen Client benutzt - später noch einmal")
                 : local ? L.tr("the probe could not be sent - no tunnel to the interface, or the send queue is full",

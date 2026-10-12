@@ -706,8 +706,8 @@ class ProgScan
                                         : _i.tr("devices in programming mode found", "Geräte im Programmiermodus gefunden")),
                   {});
         if (hits.size() > 1)
-            _p.note(_i.tr("ETS expects EXACTLY ONE device in programming mode during addressing",
-                          "ETS erwartet GENAU EIN Gerät im Programmiermodus während der Adressierung"));
+            _p.note(_i.tr("addressing expects EXACTLY ONE device in programming mode",
+                          "die Adressierung erwartet GENAU EIN Gerät im Programmiermodus"));
     }
 
     /**********************************************************************

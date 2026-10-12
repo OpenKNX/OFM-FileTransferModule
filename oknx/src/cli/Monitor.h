@@ -161,7 +161,7 @@ class Monitor
         if (!_quiet)
         {
             const char* what = mode == Mode::Bus
-                                   ? _i.tr("bus monitor · raw LPDU + ETS ACK colour", "Busmonitor · Roh-LPDU + ETS-ACK-Farbe")
+                                   ? _i.tr("bus monitor · raw LPDU + ACK colour", "Busmonitor · Roh-LPDU + ACK-Farbe")
                                    : _i.tr("group monitor · decoded telegrams", "Gruppenmonitor · dekodierte Telegramme");
             _p.section(std::string(mode == Mode::Bus ? "busmon · " : "groupmon · ") + what, -1);
             _p.status(Tpl::Stat::Ok, _i.tr("tunnel up", "Tunnel offen"),

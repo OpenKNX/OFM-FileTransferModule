@@ -134,15 +134,15 @@ inline std::vector<std::string> verdictExplain(const I18n& L, Verdict v)
             return {L.tr("The device already runs exactly this. Installing it again changes nothing.",
                          "Genau das läuft bereits auf dem Gerät. Erneutes Einspielen ändert nichts.")};
         case Verdict::Downgrade:
-            return {L.tr("Older than what the device runs. Program it again in ETS afterwards.",
-                         "Älter als das, was auf dem Gerät läuft. Danach in der ETS neu programmieren.")};
+            return {L.tr("Older than what the device runs. Program the device again afterwards.",
+                         "Älter als das, was auf dem Gerät läuft. Danach das Gerät neu programmieren.")};
         case Verdict::DifferentApplication:
-            return {L.tr("Same product, but a new ETS application.",
-                         "Gleiches Produkt, aber eine neue ETS-Applikation."),
+            return {L.tr("Same product, but a new application.",
+                         "Gleiches Produkt, aber eine neue Applikation."),
                     L.tr("The device comes back unprogrammed on 15.15.255: parameters, group",
                          "Das Gerät kommt unprogrammiert auf 15.15.255 zurück: Parameter,"),
-                    L.tr("addresses and the physical address all have to be set again in ETS.",
-                         "Gruppenadressen und die physikalische Adresse müssen in der ETS neu vergeben werden.")};
+                    L.tr("addresses and the physical address all have to be set again.",
+                         "Gruppenadressen und die physikalische Adresse müssen neu vergeben werden.")};
         case Verdict::DifferentDevice:
             return {L.tr("This firmware belongs to a different product and will not be installed.",
                          "Diese Firmware gehört zu einem anderen Produkt und wird nicht eingespielt.")};
