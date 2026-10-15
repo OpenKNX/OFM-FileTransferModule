@@ -71,12 +71,26 @@ rename this variable was named FTC_LANG; that name is not read any more.
 
 | | |
 |---|---|
-| `ga read <x/y/z>` · `ga write <x/y/z> <value>` | A_GroupValue_Read / _Write; six bits or less ride in the compact form |
+| `ga read <x/y/z> …` | A_GroupValue_Read for a list (space or comma), a range `x/y/a-b`, or `x/*` · `x/y/*` · `*` over the imported table; one table of the answers, decoded when the type is known |
+| `ga read … --every <int>` · `--count N` · `--seconds N` | read again every 10s / 1m / 2m; a log by default, `--live` keeps one table updated in place and marks a changed value with `*` |
+| `ga write <x/y/z> <value>` | A_GroupValue_Write; six bits or less ride in the compact form |
+| `ga write <a>=<v> <b>=<v> …` · `ga write <a> <b> … = <v>` | several addresses, each with its own value or one value for all; untyped octets as `0x0C,0x1A` or `0C 1A`; a typed value is one token (`1`, `21.5` with a decimal point), a text may have spaces. Without a type, `21 5` is two octets: give the type for a number |
 | `ga import <GA-Export.xml>` | store addresses, names and datapoint types of an ETS export, per interface |
 | `ga table` · `ga table rm <name>` | list the stored tables · remove one (both work without `--ip`) |
 | `ga table move <from> <to>` | re-point a stored table at another interface |
 | `ga monitor <x/y/z>` | the group monitor narrowed to one address |
 | `gm <x/y/z>` · `gm <a>,<b>` · `gm <x/y/z>:<DPT>` | the same filters on the monitor, optionally with an explicit datapoint type |
+
+Several addresses go out one at a time, each after the L_Data.con of the one before; the interface
+acknowledges a tunnel request before its frame is on TP, so a list sent on the tunnel ACK alone piles up in
+its transmit queue. Answers are collected for 1.5 s after the last read, so one cycle takes at least 1.5 s; a
+cycle that takes longer than `--every` is reported once, and the next one starts right away. An address
+without an answer shows why: no answer, a negative L_Data.con, or no L_Data.con within 3 s. The exit code is
+0 only when every telegram was confirmed, with `--every` in every cycle; Ctrl+C ends with 130 after listing
+what a write already sent, and a cycle in which nothing could be sent ends `--every` with 1. `-q` keeps the `ga` / `gaval` lines, one
+block per address, and `--every` adds a `gacycle <n> <unix ms>` line at the start of every cycle. Put `*` in
+quotes (`'1/4/*'`): zsh refuses an unquoted one, and bash replaces a bare `*` with the file names of the
+current directory.
 
 **Driving one device** — what ETS does besides transferring files. Everything here WRITES to a foreign
 device; on a productive line use it per device and deliberately.

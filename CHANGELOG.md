@@ -1,6 +1,16 @@
 # Changes
 
 
+## 2026-10-15 -- oknx reads and writes several group addresses at once
+
+* `oknx -i <ip> ga read` takes a list (space or comma), a range `x/y/a-b`, and `x/*`, `x/y/*`, `*` over the imported table, and prints one table: address, name, sender, value. Measured on the test line: 100 addresses in 5.2 s
+* `ga read … --every <int>` reads again and again; `--count N` or `--seconds N` ends it. The output is a log with a time stamp per cycle; `--live` keeps one table updated in place and marks a changed value with `*`, and falls back to the log while the table is taller than the window. One cycle takes at least 1.5 s, the answer window; a cycle that takes longer than the interval is reported once, and the cycles then follow back to back. A cycle in which no telegram could be sent ends the run with exit code 1, also when the tunnel would have come back a cycle later
+* `ga write <a>=<v> <b>=<v> …` writes each address its own value, `ga write <a> <b> … = <v>` one value to all, and the old form takes a comma list of addresses; every value is checked before the first telegram goes out. Ranges and `*` are for read only. Untyped octets go as `0x0C,0x1A` or `0C 1A`; a comma list without 0x on every octet and an empty octet are refused, so `21,5` never goes out as 21 05; `21 5` without a type is still two octets, as before. A typed value is one token, a text may have spaces: `21,5` or `21 5` on a number type is refused, before `21 5` wrote 21, and a text keeps all its words, before only the first one was sent
+* Each telegram goes out after the L_Data.con of the one before, at most 3 s. Before, `ga` queued the telegram and waited a fixed 1.5 s (read) or 0.4 s (write). An address without an answer shows why: no answer, a negative L_Data.con, or none within 3 s. The exit code is 0 only when every telegram was confirmed, with `--every` in every cycle. Ctrl+C or a terminate signal ends with 130; a write lists what it already sent first
+* `ga read` shows the decoded value when the imported table or `<x/y/z>:<DPT>` gives the type, and counts only answers to the asked addresses; before, it showed the octets and took any GroupValue_Response in its window. A `:<DPT>` without a number, or with main type 0, is now an error instead of being ignored. An address with trailing characters (`1/4/5x`) is refused; before, it was read as 1/4/5
+* `-q` keeps the `ga` / `gaval` line format. The address column is the canonical `x/y/z` instead of the typed token, and the last field of a `ga write` line is always 0. A read that was sent but not confirmed now ends with exit code 1, before 0
+
+
 ## ec/v0.3.0-beta.1: 2026-10-11
 
 The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-11
