@@ -5382,6 +5382,9 @@ void FileTransferClient::loopDeviceInfo()
             if (_memPending)
             {
                 _memPending = false;
+                // Anchor before the duplicate window, as FtcGaPtr: only the answer to the outstanding address moves
+                // the cursor, so a late answer for another chunk cannot count bytes that were never written.
+                if (_memAddr != (uint16_t)(_gaRef + _gaGot)) return;
                 if (ftcDropDup()) return;
                 if (_memLen == 0) return;
                 _gaGot = (uint16_t)(_gaGot + _memLen);
@@ -5392,6 +5395,7 @@ void FileTransferClient::loopDeviceInfo()
                     if ((uint16_t)(_gaExpect - _gaGot) < step) step = (uint8_t)(_gaExpect - _gaGot);
                     _ftcSince = millis();
                     SecurityControl sec{false, None};
+                    _ftcRespT = 0; // chained read: the next answer is a NEW one, not a duplicate of the last
                     knx.bau().ftcSendMemoryRead(_ftcTarget, sec, step, (uint16_t)(_gaRef + _gaGot));
                     return;
                 }
