@@ -5873,7 +5873,14 @@ void FileTransferClient::loopDeviceInfo()
                                                                                               : (_devIdxGrp >= 0 ? _devIdxGrp : _devIdxApp));
                 if (_propObj != idx || _propPid != FTC_PID_TABLE_REFERENCE)
                     return; // stale/duplicate answer for another read -> keep waiting
-                if (_propLen >= 2)
+                // A reference of 0 is an unloaded table, not a table at 0000h (FtcGaPtr drops 00h the same way).
+                if (_propLen >= 2 && (_propData[_propLen - 2] | _propData[_propLen - 1]) == 0 &&
+                    (_propLen < 4 || (_propData[_propLen - 4] | _propData[_propLen - 3]) == 0))
+                {
+                    _gaWhich++;
+                    ftcGaAdvance();
+                }
+                else if (_propLen >= 2)
                 {
                     // 4-byte PDT_UNSIGNED_LONG; the memory address is the low word (big-endian).
                     _gaRef = (uint16_t)((_propData[_propLen - 2] << 8) | _propData[_propLen - 1]);
