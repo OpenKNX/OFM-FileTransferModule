@@ -1,6 +1,19 @@
 # Changes
 
 
+## ec/v0.3.0-beta.1: 2026-10-15
+
+The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-15
+below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
+
+
+## 2026-10-15 -- the client counts only the answer it asked for
+
+* Fix: the BCU1/BCU2 identity read counts a memory answer only when it answers the address that was read. A late answer for another chunk moved the cursor, so the identity could be decoded from octets that were never written
+* Fix: a table whose `PID_TABLE_REFERENCE` is 0 is skipped as unloaded (03_05_01 4.2.7 p.31) instead of reading its header from address 0000h
+* Fix (test suite): F-N-4 waits for the remote console session to end before it measures, and its title says it measures the client device
+
+
 ## 2026-10-15 -- oknx reads and writes several group addresses at once
 
 * `oknx -i <ip> ga read` takes a list (space or comma), a range `x/y/a-b`, and `x/*`, `x/y/*`, `*` over the imported table, and prints one table: address, name, sender, value. Measured on the test line: 100 addresses in 5.2 s
@@ -9,12 +22,6 @@
 * Each telegram goes out after the L_Data.con of the one before, at most 3 s. Before, `ga` queued the telegram and waited a fixed 1.5 s (read) or 0.4 s (write). An address without an answer shows why: no answer, a negative L_Data.con, or none within 3 s. The exit code is 0 only when every telegram was confirmed, with `--every` in every cycle. Ctrl+C or a terminate signal ends with 130; a write lists what it already sent first
 * `ga read` shows the decoded value when the imported table or `<x/y/z>:<DPT>` gives the type, and counts only answers to the asked addresses; before, it showed the octets and took any GroupValue_Response in its window. A `:<DPT>` without a number, or with main type 0, is now an error instead of being ignored. An address with trailing characters (`1/4/5x`) is refused; before, it was read as 1/4/5
 * `-q` keeps the `ga` / `gaval` line format. The address column is the canonical `x/y/z` instead of the typed token, and the last field of a `ga write` line is always 0. A read that was sent but not confirmed now ends with exit code 1, before 0
-
-
-## ec/v0.3.0-beta.1: 2026-10-11
-
-The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-11
-below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
 
 
 ## 2026-10-11 -- the knxOTA page explains itself to the person doing the update
