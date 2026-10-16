@@ -114,7 +114,7 @@ device; on a productive line use it per device and deliberately.
 | `<pa> progmode [on\|off\|blink]` · `<pa> led …` | write PID_PROGMODE (54); `led` is the older spelling |
 | `<pa> restart` · `<pa> masterreset <code> yes` | A_Restart; a basic restart is answered by nothing |
 | `setpa <x.y.z>` | give the one device in programming mode a new individual address |
-| `<pa> unload yes` | set the address, association and application objects to LS_UNLOAD |
+| `<pa> unload yes` | unload every loadable object the device has, found by object type: address, association and group object table, application programs, a router's filter table |
 | `<pa> runstate` | the load states and the run state, read only |
 
 **KNX properties** — the interface objects of a device, independent of the file transfer. Which objects and

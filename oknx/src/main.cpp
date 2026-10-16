@@ -10156,8 +10156,8 @@ int main(int argc, char** argv)
         {
             g_ui.errorBlock(false, L.tr("unload erases this device's configuration",
                                         "entladen löscht die Konfiguration dieses Geräts"),
-                            {L.tr("address table, association table and application program go to UNLOADED",
-                                  "Adresstabelle, Assoziationstabelle und Applikationsprogramm gehen auf UNLOADED"),
+                            {L.tr("its tables and application programs go to UNLOADED (a router: its filter table too)",
+                                  "seine Tabellen und Applikationsprogramme gehen auf UNLOADED (ein Router: auch die Filtertabelle)"),
                              L.tr("only programming the device again brings it back - oknx cannot",
                                   "nur eine neue Programmierung holt das zurück - oknx kann es nicht")},
                             std::string("oknx -i <ip> ") + pos[0] + " unload yes");
@@ -10181,62 +10181,96 @@ int main(int argc, char** argv)
         }
         static constexpr uint8_t PID_LOAD_STATE_CONTROL = 5;
         static constexpr uint8_t LE_UNLOAD = 4;
-        struct Obj { uint8_t idx; const char* en; const char* de; };
-        static const Obj OBJS[] = {{1, "address table", "Adresstabelle"},
-                                   {2, "association table", "Assoziationstabelle"},
-                                   {3, "application program", "Applikationsprogramm"}};
-        SecurityControl sec{false, None};
-        int done = 0;
-        for (const Obj& o : OBJS)
+        // Every loadable object, found by type (PID_OBJECT_TYPE) and not by position: a 07B0 device has the
+        // group object table at 3 and the application at 4, a router the Router Object (filter table) at 1.
+        struct Obj { uint16_t type; const char* en; const char* de; };
+        static const Obj LOADABLE[] = {{1, "address table", "Adresstabelle"},
+                                       {2, "association table", "Assoziationstabelle"},
+                                       {9, "group object table", "Gruppenobjekttabelle"},
+                                       {3, "application program", "Applikationsprogramm"},
+                                       {4, "application program 2", "Applikationsprogramm 2"},
+                                       {6, "filter table (router)", "Filtertabelle (Router)"}};
+        struct Found { uint8_t idx; const Obj* obj; int state; };
+        std::vector<Found> found;
+        static int s_val;
+        static uint8_t s_valIdx, s_valPid;
+        static uint16_t s_valPa;
+        s_valPa = tgt;
+        g_knxTunnel.setPropertyCallback([](uint16_t sa, uint8_t oi, uint8_t pid, const uint8_t* d, uint8_t n) {
+            if (sa != s_valPa || oi != s_valIdx || pid != s_valPid) return;
+            s_val = pid == 1 ? (n >= 2 ? ((d[0] << 8) | d[1]) : -2) : (n >= 1 ? d[0] : -2);
+        });
+        // One property read, asked twice before a lost answer counts: -1 no answer, -2 no such object.
+        auto readProp = [&](uint8_t idx, uint8_t pid) -> int {
+            s_val = -1; // entered after Ctrl-C: no stale value from the previous read
+            for (int tryNo = 0; tryNo < 2 && !g_abort; tryNo++)
+            {
+                s_val = -1;
+                s_valIdx = idx;
+                s_valPid = pid;
+                g_knxTunnel.sendPropertyValueRead(tgt, idx, pid, 1, 1);
+                for (uint64_t t0 = nowMs(); nowMs() - t0 < 1200 && s_val == -1;) g_knxTunnel.pump();
+                if (s_val != -1) break;
+            }
+            return s_val;
+        };
+        for (uint8_t idx = 1; idx < 16 && !g_abort; idx++)
         {
-            uint8_t v = LE_UNLOAD;
-            if (!g_knxTunnel.sendPropertyValueWrite(tgt, o.idx, PID_LOAD_STATE_CONTROL, 1, 1, &v, 1)) continue;
-            for (uint64_t t0 = nowMs(); nowMs() - t0 < 500;) g_knxTunnel.pump();
-            done++;
+            const int type = readProp(idx, 1);
+            if (type < 0) break; // no answer or no such object: the object list has ended
+            for (const Obj& o : LOADABLE)
+                if (o.type == type) found.push_back({idx, &o, -1});
         }
-        (void)sec;
-        // Read the state back: LS_UNLOADED (0) is the proof, not the fact that a write left the socket.
-        static int s_ls[3];
-        static size_t s_lsIx;
-        static uint8_t s_lsObj;
-        static uint16_t s_lsPa;
-        s_lsPa = tgt;
-        s_lsIx = 0;
-        for (size_t i = 0; i < 3; i++) s_ls[i] = -1;
-        for (size_t i = 0; i < 3; i++)
+        for (const Found& f : found)
         {
-            s_lsIx = i;
-            s_lsObj = OBJS[i].idx;
-            // Filter on the object index: a previous table's late answer carries the same PID and would
-            // otherwise be stored as THIS table's state, reporting the two tables swapped.
-            g_knxTunnel.setPropertyCallback([](uint16_t sa, uint8_t oi, uint8_t pid, const uint8_t* d, uint8_t n) {
-                if (sa == s_lsPa && oi == s_lsObj && pid == PID_LOAD_STATE_CONTROL && n >= 1) s_ls[s_lsIx] = d[0];
-            });
-            g_knxTunnel.sendPropertyValueRead(tgt, OBJS[i].idx, PID_LOAD_STATE_CONTROL, 1, 1);
-            for (uint64_t t0 = nowMs(); nowMs() - t0 < 1200 && s_ls[i] < 0;) g_knxTunnel.pump();
+            if (g_abort) break;
+            uint8_t v = LE_UNLOAD;
+            if (!g_knxTunnel.sendPropertyValueWrite(tgt, f.idx, PID_LOAD_STATE_CONTROL, 1, 1, &v, 1)) continue;
+            for (uint64_t t0 = nowMs(); nowMs() - t0 < 500;) g_knxTunnel.pump();
+        }
+        // Read the state back: LS_UNLOADED (0) is the proof. LS_UNLOADING (4) is read again for up to 30 s
+        // (03_05_02 p.142).
+        int unloaded = 0;
+        for (Found& f : found)
+        {
+            if (g_abort) break;
+            const uint64_t until = nowMs() + 30000;
+            for (;;)
+            {
+                f.state = readProp(f.idx, PID_LOAD_STATE_CONTROL);
+                if (f.state != 4 || nowMs() >= until || g_abort) break;
+                for (uint64_t t0 = nowMs(); nowMs() - t0 < 500;) g_knxTunnel.pump();
+            }
+            if (f.state == 0) unloaded++;
         }
         g_knxTunnel.setPropertyCallback(nullptr);
-        int unloaded = 0;
-        for (size_t i = 0; i < 3; i++)
-            if (s_ls[i] == 0) unloaded++;
+        const bool ok = !found.empty() && unloaded == (int)found.size();
         if (quiet)
-            std::printf("unload\t%s\t%d\t%d\t%d\n", pos[0].c_str(), s_ls[0], s_ls[1], s_ls[2]);
+        {
+            // state: 0 unloaded, -1 no answer, -2 refused, -3 not checked (stopped), else the load state read back
+            for (const Found& f : found)
+                std::printf("unloadobj\t%s\t%u\t%u\t%d\n", pos[0].c_str(), (unsigned)f.idx, (unsigned)f.obj->type,
+                            g_abort && f.state == -1 ? -3 : f.state);
+            std::printf("unload\t%s\t%u\t%d\n", pos[0].c_str(), (unsigned)found.size(), unloaded);
+        }
         else
         {
-            for (size_t i = 0; i < 3; i++)
-                std::printf("    %-24s %s\n", L.tr(OBJS[i].en, OBJS[i].de),
-                            s_ls[i] == 0 ? L.tr("unloaded", "entladen")
-                                         : s_ls[i] < 0 ? L.tr("no answer", "keine Antwort")
-                                                       : L.tr("still loaded", "noch geladen"));
-            g_tpl.status(unloaded == 3 ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Err,
-                         pos[0] + " " + (unloaded == 3 ? L.tr("unloaded", "entladen")
-                                                       : L.tr("not fully unloaded", "nicht vollständig entladen")),
+            for (const Found& f : found)
+                std::printf("    %-26s %s\n", L.tr(f.obj->en, f.obj->de),
+                            f.state == 0  ? L.tr("unloaded", "entladen")
+                            : f.state < 0 ? (g_abort ? L.tr("not checked (stopped)", "nicht geprüft (Abbruch)")
+                                                     : L.tr("no answer", "keine Antwort"))
+                                          : L.tr("still loaded", "noch geladen"));
+            g_tpl.status(ok ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Err,
+                         pos[0] + " " + (ok ? L.tr("unloaded", "entladen")
+                                         : g_abort ? L.tr("stopped - not all checked", "gestoppt - nicht alles geprüft")
+                                         : found.empty() ? L.tr("no load control found", "keine Ladesteuerung gefunden")
+                                                         : L.tr("not fully unloaded", "nicht vollständig entladen")),
                          {});
         }
-        (void)done;
         g_knxTunnel.disconnect();
         socketCleanup();
-        return unloaded == 3 ? 0 : 1;
+        return g_abort ? 130 : (ok ? 0 : 1); // after Ctrl-C the lines above still show what was unloaded
     }
 
     // A_Restart is a KNX service, not an FTC command: a foreign device has no FTC server to ask for
