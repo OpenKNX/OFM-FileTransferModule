@@ -5346,14 +5346,14 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
             }
             if (quiet)
             {
-                // One key, one tab, one value -- and the same facts the table shows, so a script does not
-                // have to re-derive them: who owns which block, which hit is a tunnel slot, and the counts.
+                // Every line starts with its record type and each type has a fixed field count, so `cut -f1`
+                // always yields the type: ipdev 5, tunnel 4, device 11, counters 2.
                 for (const auto& o : owners)
                 {
-                    std::printf("ipdev\t%s\t%s\t%s", o.ia ? paToStr(o.ia).c_str() : "?", o.ip.c_str(), o.name.c_str());
-                    if (o.refused) std::printf("\trefused");
+                    std::printf("ipdev\t%s\t%s\t%s\t", o.ia ? paToStr(o.ia).c_str() : "?", o.ip.c_str(), o.name.c_str());
+                    if (o.refused) std::printf("refused");
                     else
-                        for (uint16_t ta : o.tun) std::printf("\t%s", paToStr(ta).c_str());
+                        for (size_t i = 0; i < o.tun.size(); i++) std::printf("%s%s", i ? "," : "", paToStr(o.tun[i]).c_str());
                     std::printf("\n");
                 }
                 unsigned qTun = 0, qDev = 0, qAck = 0, qOkx = 0;
@@ -5366,7 +5366,7 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     if (own && scanMask(e, &det) != 0) own = nullptr;
                     if (own)
                     {
-                        std::printf("%s\ttunnel\t%s\t%d\n", e.name, paToStr(own->ia).c_str(), slot);
+                        std::printf("tunnel\t%s\t%s\t%d\n", e.name, paToStr(own->ia).c_str(), slot);
                         qTun++;
                         continue;
                     }
@@ -5375,11 +5375,11 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
                     const ftc::DetailRow dr = dit != det.end() ? dit->second : ftc::DetailRow{};
                     // Same fields the table shows, in fixed positions: a caller must not have to run a
                     // second pass to learn what this scan already read.
-                    // Field 10 is the load state as a NUMBER. Every other field here is raw or an
+                    // Field 11 is the load state as a NUMBER. Every other field here is raw or an
                     // untranslated name; a translated word would make the stream depend on the locale.
                     char ls[8] = {0};
                     if (dr.appState != 0xFF) std::snprintf(ls, sizeof(ls), "%u", (unsigned)dr.appState);
-                    std::printf("%s\t0x%04X\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", e.name, (unsigned)m,
+                    std::printf("device\t%s\t0x%04X\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", e.name, (unsigned)m,
                                 ftc::knxMaskName(m), e.isOpenKnx ? 1 : 0, ftc::orderText(dr.order).c_str(),
                                 dr.bcuApp.c_str(), dr.version.c_str(), dr.ftm.c_str(), dr.serial.c_str(), ls);
                     if (m == 0) qAck++; else qDev++;
