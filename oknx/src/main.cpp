@@ -9592,7 +9592,10 @@ int main(int argc, char** argv)
         auto conText = [&](uint8_t st) -> std::string {
             switch (st)
             {
-                case CON_NEG: return L.tr("not confirmed (negative L_Data.con)", "nicht bestätigt (L_Data.con negativ)");
+                // A negative L_Data.con: no acknowledge on TP after the repetitions, or the transmitter dropped it.
+                case CON_NEG:
+                    return L.tr("not confirmed: nobody on the TP line acknowledged it, or the interface did not send it",
+                                "nicht bestätigt: auf der TP-Linie hat niemand quittiert, oder das Interface hat es nicht gesendet");
                 case CON_LOST: return L.tr("no confirmation from the interface in 3 s", "keine Bestätigung vom Interface in 3 s");
                 case NOT_SENT: return L.tr("could not be sent", "konnte nicht gesendet werden");
                 case CON_STOPPED: return L.tr("sent, confirmation not awaited (stopped)", "gesendet, Bestätigung nicht abgewartet (Abbruch)");
