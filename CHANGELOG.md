@@ -1,6 +1,18 @@
 # Changes
 
 
+## 2026-10-16 -- setpa checks the address first, `scan -q` has a fixed record form
+
+* Fix: `setpa` follows NM_IndividualAddress_Write (03_05_02 2.3 p.13-15): it stops when another device already answers on the new address, writes only when the address changes, confirms over a transport connection and restarts the device, which ends its programming mode. A device without connections is still confirmed by the broadcast read-back, without a restart
+* Change: every line of `scan -q` starts with its record type and has a fixed field count: `ipdev` 5 (the tunnel addresses comma-separated in one field), `tunnel` 4, `device` 11, the counters 2. Device and tunnel lines used to start with the address
+* Fix: `alle` in the knxOTA picker shows the devices of the last search again instead of searching the line once more
+* Fix: `bm <x/y/z>` says that its group address filter hides point-to-point and broadcast frames
+* Fix: the group monitor keeps its address column narrow when no group address table is imported
+* Fix: the group report closes the scan session with one T_Disconnect; it could send two
+* Fix: a lost answer to the table reference read is asked once more; on System 7 a second loss reads the group objects at the fixed base, as a refusal does
+* Fix: the identity readers of the scan pass only address characters to the shell command
+
+
 ## 2026-10-16 -- oknx asks an object that answers a command
 
 * `oknx -i <ip> ga ask <x/y/z> <value>` writes like `ga write` and then collects the GroupValue_Write and GroupValue_Response telegrams that come back on the same address. A `ga read` does not see an answer that comes as a write, as the OpenKNX diagnose object sends it. Measured over 11.11.0.31: `ga ask 31/0/1:16.001 uptime` answered 49 ms after the confirmation of its telegram, `mem` with two telegrams 48 ms apart, an unknown command with none. The diagnose object of that device has no read flag, so `ga read 31/0/1` gets no answer
