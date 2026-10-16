@@ -5434,6 +5434,21 @@ static bool ftcRenderStructured(const std::vector<std::string>& pos, bool quiet,
 /**
  * @brief The oknx entry point: init, parse args, dispatch the command, run its loop, and shut down cleanly.
  */
+/** @brief Long options the commands read from their own words (ga, scan, ftc transfers), not the host parser. */
+static bool commandOptionTakesValue(const std::string& a)
+{
+    const std::string k = a.substr(0, a.find('='));
+    return k == "--every" || k == "--count" || k == "--wait" || k == "--limit" || k == "--mode" || k == "--pkg" ||
+           k == "--window";
+}
+
+static bool commandLongOption(const std::string& a)
+{
+    const std::string k = a.substr(0, a.find('='));
+    return commandOptionTakesValue(a) || k == "--live" || k == "--no-details" || k == "--pack" || k == "--keep" ||
+           k == "--no-resume" || k == "--apply" || k == "--no-apply" || k == "--progress";
+}
+
 int main(int argc, char** argv)
 {
     g_selfPath = (argc > 0 && argv[0]) ? argv[0] : "oknx"; // re-invoked for parallel-scan children
@@ -5499,6 +5514,7 @@ int main(int argc, char** argv)
     uint16_t knxotaResumePa = 0;   // ...including the target, so the device search is skipped too
     std::string installDirArg;    // --dir <path>: explicit install/uninstall directory (overrides the default)
     std::vector<std::string> pos; // positional tokens -> the `oknx ...` command tail
+    std::vector<std::string> early; // command options given before the command, appended to pos
 
     for (int i = 1; i < argc; ++i)
     {
@@ -5674,6 +5690,17 @@ int main(int argc, char** argv)
         // reports an unknown one. Before any command (`oknx --bogus`) there is no owner -> reported here.
         else if (!pos.empty() && a.size() > 2 && a[0] == '-' && a[1] == '-')
             pos.push_back(a);
+        // A command's own long option before the command (`oknx --no-details -i ... scan`): kept with the value
+        // that follows it and handed to the command after its words, as if written at the end. Unknown ones are
+        // reported below.
+        else if (pos.empty() && commandLongOption(a))
+        {
+            early.push_back(a);
+            // The next token is the value unless it is an option; "-5" is a (bad) value, so the command names it.
+            if (a.find('=') == std::string::npos && commandOptionTakesValue(a) && i + 1 < argc &&
+                (argv[i + 1][0] != '-' || isdigit((unsigned char)argv[i + 1][1])))
+                early.push_back(argv[++i]);
+        }
         else if (!a.empty() && a[0] == '-' && !(a.size() > 1 && (isdigit((unsigned char)a[1]))))
         {
             std::fprintf(stderr, "unknown option: %s\n", a.c_str());
@@ -5683,6 +5710,13 @@ int main(int argc, char** argv)
         else
             pos.push_back(a);
     }
+    if (pos.empty() && !early.empty())
+    {
+        std::fprintf(stderr, "option %s needs a command\n", early[0].c_str());
+        socketCleanup();
+        return 1;
+    }
+    pos.insert(pos.end(), early.begin(), early.end());
 
     // --ws-path: only `con` without a <pa> and without -D uses it; `help` still prints the usage.
     const bool wsCon = pos.size() == 1 && (pos[0] == "con" || pos[0] == "console");
