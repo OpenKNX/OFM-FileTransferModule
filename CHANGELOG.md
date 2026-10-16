@@ -11,6 +11,8 @@
 * Fix: the group report closes the scan session with one T_Disconnect; it could send two
 * Fix: a lost answer to the table reference read is asked once more; on System 7 a second loss reads the group objects at the fixed base, as a refusal does
 * Fix: the identity readers of the scan pass only address characters to the shell command
+* Fix: a command's long options (`--no-details`, `--every`, `--wait`, `--mode` ...) are accepted before the command too, as if written at the end; an option without a command says so
+* Fix: `unload` finds the loadable objects by their object type and unloads every one the device has: address, association and group object table, both application programs and a router's filter table. The fixed indices 1/2/3 hit the group object table instead of the application on a System B device, and the filter table instead of the address table on a router. `-q` prints one `unloadobj` line per object and an `unload` summary
 
 
 ## 2026-10-16 -- oknx asks an object that answers a command
