@@ -4333,14 +4333,11 @@ void FileTransferClient::ftcGaReportStart()
     // a point-to-point connection - blocking ETS and any other master - and that connection dies after
     // ~6 s without traffic anyway (03_03_04), while this state sends nothing. The old code disconnected
     // immediately because it enqueued the whole report in one pass; splitting it must not cost that.
-    if (_gaConnected)
+    // Both flags name the one scan session; one T_Disconnect closes it.
+    if (_gaConnected || _devCoConn)
     {
         knx.bau().ftcScanDisconnect();
         _gaConnected = false;
-    }
-    if (_devCoConn)
-    {
-        knx.bau().ftcScanDisconnect();
         _devCoConn = false;
     }
     ftcOut(CONSOLE_HEADLINE_COLOR, "Group communication %u.%u.%u", FTC_PA_ARGS(_ftcTarget));
