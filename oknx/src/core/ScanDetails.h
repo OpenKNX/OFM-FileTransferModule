@@ -198,6 +198,18 @@ class DetailPool
     {
         DetailRow r;
         reached = false;
+        // The command line goes through the shell: only address characters may reach it. Today the IP is
+        // checked by KnxIpTunnel::connect and the PA is printed from numbers; this does not rely on either.
+        auto addrOnly = [](const std::string& s) {
+            for (char ch : s)
+                if (!((ch >= '0' && ch <= '9') || ch == '.' || ch == ':')) return false;
+            return !s.empty();
+        };
+        if (!addrOnly(_ip) || !addrOnly(pa))
+        {
+            reached = true; // never valid: the worker gives it its one retry, then records it as silent
+            return r;
+        }
         std::string cmd = "\"" + _self + "\" -i " + _ip + " --port " + std::to_string(_port) + " -q " + pa + " info";
 #ifdef _WIN32
         cmd += " 2>NUL";
@@ -242,7 +254,7 @@ class DetailPool
         std::string pa;
         int tries = 0;
     };
-    static constexpr int MAX_TRIES = 3; // only ever spent on "no tunnel was free", never on a silent device
+    static constexpr int MAX_TRIES = 3; // a silent device gets one retry, "no tunnel was free" up to this bound
 
     std::string _self, _ip;
     uint16_t _port;
