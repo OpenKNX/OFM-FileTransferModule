@@ -9101,9 +9101,9 @@ int main(int argc, char** argv)
         }
     }
 
-    // `oknx -i <ip> setpa <x.y.z>` - the ETS "programme the individual address" procedure. It addresses
-    // nobody: the device is picked by being in PROGRAMMING MODE, so the whole exchange is broadcast.
-    // 03_05_02: read who is in programming mode, refuse unless there is exactly one, write, read back.
+    // `oknx -i <ip> setpa <x.y.z>` - NM_IndividualAddress_Write (03_05_02 2.3 p.13-15): check that no other
+    // device holds the address, find exactly one device in programming mode, write, confirm over a
+    // connection and restart it, which also ends its programming mode.
     if (!pos.empty() && pos[0] == "setpa")
     {
         ftc::I18n& L = g_i18n;
@@ -9137,7 +9137,43 @@ int main(int argc, char** argv)
             g_knxTunnel.sendIndividualAddressRead();
             for (uint64_t t0 = nowMs(); nowMs() - t0 < ms;) g_knxTunnel.pump();
         };
+        // DeviceDescriptor_Read inside a T_Connect to `pa`: 1 = answered, 2 = refused with T_Disconnect, 0 = nobody.
+        // Both 1 and 2 mean a device holds the address (03_05_02 2.3 p.14). The session stays open for the caller.
+        static volatile bool s_ddSeen = false;
+        static uint16_t s_ddPa = 0;
+        auto coAsk = [&](uint16_t pa) -> int {
+            s_ddPa = pa;
+            s_ddSeen = false;
+            const FtcDdCb prev = g_knxTunnel.deviceDescriptorCallback();
+            g_knxTunnel.setDeviceDescriptorCallback([](uint16_t p, uint8_t, const uint8_t*) {
+                if (p == s_ddPa) s_ddSeen = true;
+            });
+            int r = 0;
+            if (g_knxTunnel.scanConnect(pa))
+            {
+                for (uint64_t t0 = nowMs(); nowMs() - t0 < 100;) g_knxTunnel.pump();
+                g_knxTunnel.sendDeviceDescriptorRead(pa);
+                for (uint64_t t0 = nowMs(); nowMs() - t0 < 2000 && !s_ddSeen && g_knxTunnel.scanConnectedTo(pa);)
+                    g_knxTunnel.pump();
+                r = s_ddSeen ? 1 : (g_knxTunnel.scanConnectedTo(pa) ? 0 : 2);
+            }
+            g_knxTunnel.setDeviceDescriptorCallback(prev);
+            return r;
+        };
+        const bool occupied = coAsk(want) != 0;
+        g_knxTunnel.scanDisconnect();
         probe(2500);
+        if (s_inProg.size() == 1 && occupied && s_inProg[0] != want)
+        {
+            g_knxTunnel.setBroadcastCallback(nullptr);
+            g_ui.errorBlock(false, L.tr("the address is already in use", "die Adresse ist schon vergeben"),
+                            {L.tr("another device answered on ", "ein anderes Gerät antwortete auf ") + pos[1],
+                             L.tr("nothing was sent", "es wurde nichts gesendet")},
+                            "oknx -i <ip> " + pos[1] + " info");
+            g_knxTunnel.disconnect();
+            socketCleanup();
+            return 2;
+        }
         if (s_inProg.size() != 1)
         {
             g_knxTunnel.setBroadcastCallback(nullptr);
@@ -9159,18 +9195,42 @@ int main(int argc, char** argv)
             return 2;
         }
         const uint16_t had = s_inProg[0];
-        g_knxTunnel.sendIndividualAddressWrite(want);
-        for (uint64_t t0 = nowMs(); nowMs() - t0 < 600;) g_knxTunnel.pump();
-        probe(2500); // read back: the same device now has to answer with the new address
+        if (had != want)
+        {
+            g_knxTunnel.sendIndividualAddressWrite(want);
+            for (uint64_t t0 = nowMs(); nowMs() - t0 < 600;) g_knxTunnel.pump();
+        }
+        // Confirm over a connection, then restart: that ends programming mode (03_05_02 2.3 step 4 p.15).
+        const bool confirmed = coAsk(want) == 1;
+        bool restartSent = false;
+        if (confirmed)
+        {
+            // Until the read is T_ACKed the restart would reuse its sequence number and be dropped as a duplicate.
+            for (uint64_t t0 = nowMs(); nowMs() - t0 < 500 && !g_knxTunnel.scanReadAcked();) g_knxTunnel.pump();
+            if (g_knxTunnel.scanReadAcked())
+            {
+                g_knxTunnel.sendRestart(want, false, 0, 0);
+                restartSent = true;
+                for (uint64_t t0 = nowMs(); nowMs() - t0 < 300;) g_knxTunnel.pump();
+            }
+        }
+        g_knxTunnel.scanDisconnect();
+        bool took = confirmed;
+        if (!took)
+        {
+            probe(2500); // a device without connections: the broadcast read-back still shows the new address
+            took = s_inProg.size() == 1 && s_inProg[0] == want;
+        }
         g_knxTunnel.setBroadcastCallback(nullptr);
-        const bool took = s_inProg.size() == 1 && s_inProg[0] == want;
         if (quiet)
             std::printf("setpa\t%s\t%s\t%d\n", ftc::Tpl::pa(had).c_str(), pos[1].c_str(), took ? 1 : 0);
         else if (took)
             g_tpl.status(ftc::Tpl::Stat::Ok,
                          ftc::Tpl::pa(had) + "  ->  " + pos[1],
-                         {L.tr("confirmed by reading it back; switch programming mode off now",
-                               "durch Rücklesen bestätigt; jetzt den Programmiermodus ausschalten")});
+                         {restartSent ? L.tr("confirmed; restart sent, it ends programming mode",
+                                             "bestätigt; Neustart gesendet, er beendet den Programmiermodus")
+                                    : L.tr("confirmed; switch programming mode off now",
+                                           "bestätigt; jetzt den Programmiermodus ausschalten")});
         else
             g_tpl.status(ftc::Tpl::Stat::Err, L.tr("the address was not taken", "die Adresse wurde nicht übernommen"),
                          {L.tr("the read-back did not show it", "das Rücklesen zeigt sie nicht")});
