@@ -7240,7 +7240,14 @@ int main(int argc, char** argv)
     {
         ftc::Monitor mon(g_term, g_theme, g_tpl, g_i18n);
         mon.target(ip, port);
-        if (monOneGa) mon.setGroupFilter(monGas);
+        if (monOneGa)
+        {
+            mon.setGroupFilter(monGas);
+            // The busmonitor shows the whole line otherwise; say what the address filter leaves out.
+            if (isBus && !quiet)
+                g_tpl.note(g_i18n.tr("group address filter: point-to-point and broadcast frames are not shown",
+                                     "Gruppenadress-Filter: Punkt-zu-Punkt- und Broadcast-Rahmen werden nicht gezeigt"));
+        }
         // The imported table of THIS interface, plus anything given inline. Missing table = raw octets.
         static ftc::GaTable monTab;
         monTab.load(ip);
