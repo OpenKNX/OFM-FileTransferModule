@@ -4046,6 +4046,7 @@ void FileTransferClient::ftcGaAdvance()
         }
         if (idx < 0) continue; // this table object was not discovered on the device
         _propPending = false;
+        _gaRetry = 0;
         _ftcSince = millis();
         SecurityControl sec{false, None};
         // Connection-oriented: the walk opened a T_Connect first, so this read routes over it (ETS path).
@@ -5863,6 +5864,7 @@ void FileTransferClient::loopDeviceInfo()
         case FtcGaRef:
         {
             // PID_TABLE_REFERENCE answer -> the current table's memory base; then start the A_Memory_Read walk.
+            bool missing = false;
             if (_propPending)
             {
                 _propPending = false;
@@ -5905,10 +5907,24 @@ void FileTransferClient::loopDeviceInfo()
                     knx.bau().ftcSendMemoryRead(_ftcTarget, sec, _gaStep, _gaRef); // CO over the open T_Connect
                     _ftcState = FtcGaMem;
                 }
-                else if (_gaWhich == 2 && ftcGaDescWide())
+                else
+                    missing = true; // the device says "no such property"
+            }
+            else if (millis() - _ftcSince > FTC_TIMEOUT)
+            {
+                // A lost answer gets the same read once more, then counts as a refusal.
+                if (_gaRetry == 0)
                 {
-                    ftcGaArmSys7Grot(); // the device says "no such property" -> the BIM M112 fixed base
+                    ftcGaAdvance(); // same table again: _gaWhich is unchanged
+                    _gaRetry = 1;
+                    return;
                 }
+                missing = true;
+            }
+            if (missing)
+            {
+                if (_gaWhich == 2 && ftcGaDescWide())
+                    ftcGaArmSys7Grot(); // the BIM M112 fixed base
                 else
                 {
                     // A table whose pointer cannot be read is MISSING from the result, not absent from the
@@ -5918,12 +5934,6 @@ void FileTransferClient::loopDeviceInfo()
                     _gaWhich++; // no usable reference -> skip this table
                     ftcGaAdvance();
                 }
-            }
-            else if (millis() - _ftcSince > FTC_TIMEOUT)
-            {
-                _gaTruncated = true; // same: skipped, not absent
-                _gaWhich++;          // no answer -> skip this table
-                ftcGaAdvance();
             }
             return;
         }

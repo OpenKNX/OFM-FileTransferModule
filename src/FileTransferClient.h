@@ -1035,7 +1035,7 @@ class FileTransferClient : public OpenKNX::Module
     uint8_t _gaCarryN = 0;
     bool _gaHdrDone = false;
     uint8_t _gaStep = 0;                              // octets the chunk in flight asked for, so it can be repeated
-    uint8_t _gaRetry = 0;                             // repeats spent on it; bounded by FTC_GA_RETRY
+    uint8_t _gaRetry = 0;                             // repeats spent on it; FTC_GA_RETRY for chunks, 1 for the table reference
 
     FtcFsInfo _fsInfo;
     FtcDeviceInfo _deviceInfo;
