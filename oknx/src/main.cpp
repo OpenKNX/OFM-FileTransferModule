@@ -7739,6 +7739,9 @@ int main(int argc, char** argv)
 
         // The assistant offered to search: do it now that the tunnel is up. The scan runs on the line the
         // interface itself sits on and asks only OpenKNX devices, so the list stays short and relevant.
+        std::vector<FtcEntry> lastHits;
+        std::unordered_map<std::string, ftc::DetailRow> lastDet;
+        bool showAllAgain = false;
         while (paText.empty() && knxotaScan)
         {
             // The interface's own line is the one it can reach without a coupler, so it is the default —
@@ -7776,71 +7779,83 @@ int main(int argc, char** argv)
                 }
             }
             knxotaLine = line; // searching again stays on this line instead of reverting to the default
-            g_tpl.section(std::string(L.tr("Searching line ", "Suche auf Linie ")) + line);
-            // No duration promise: it depends on the line, the bus load and how many devices answer.
-            // The counter below reports the truth as it happens, which is worth more than an estimate.
-            g_tpl.status(ftc::Tpl::Stat::Info, L.tr("asking every address on this line",
-                                                    "frage jede Adresse auf dieser Linie"),
-                         {L.tr("the counter below shows how far it is", "der Zähler unten zeigt den Fortschritt"),
-                          L.tr("ctrl-C stops", "Strg-C bricht ab")});
-            unsigned sa = 0, sl = 0;
-            std::sscanf(line, "%u.%u", &sa, &sl);
-            const uint16_t lineBase = (uint16_t)((sa << 12) | (sl << 8));
             std::vector<std::pair<std::string, bool>> pick;
             size_t nOther = 0; // answered, but nothing knxOTA can update -- hidden unless `alle` is typed
             std::vector<FtcEntry> hits;
-            const bool ackFeed = armScanAckFeed(lineBase);
-            if (!ackFeed)
-                g_tpl.note(L.tr("this interface does not report acknowledgements — the search will miss "
-                                "devices that never answer",
-                                "dieses Interface meldet keine Quittungen — die Suche übersieht Geräte, "
-                                "die nie antworten"));
-            // Only an OpenKNX device can be updated from here, so only those are asked who they are —
-            // and they are asked while the sweep still runs, over their own tunnels.
-            std::unique_ptr<ftc::DetailPool> dpool;
-            if (!g_ip.empty())
-                dpool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
-                                                g_workers > 0 ? g_workers : FTC_DETAIL_WORKERS));
-            g_ftcSuppress = true;
-            // Without the pool the sweep would run its own identity probe over the one shared tunnel; with
-            // it that is the same question asked twice, and the two starve each other.
-            openknxFileTransferClient.processCommand(std::string("ftc scan ") + line + (dpool ? "" : " openknx"), false);
-            ftcPumpStructured(hits, true, g_term.isTty() && !quiet, false, nullptr);
-            // Read identities only once the sweep is done -- the same rule as the scan: our children must
-            // not put traffic on the bus whose acknowledges the sweep is measuring.
-            if (dpool)
-                for (const auto& e : hits)
-                    if (KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB)
-                        dpool->submit(e.name);
-            g_ftcSuppress = false;
-            if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
-
             std::unordered_map<std::string, ftc::DetailRow> det;
-            if (dpool)
+            if (showAllAgain)
             {
-                const uint64_t t0 = nowMs();
-                uint64_t drawn = 0;
-                while (dpool->outstanding() > 0 && !g_abort)
+                // `alle` only widens the filter: the rows of the last search, not a new sweep of the line.
+                hits = lastHits;
+                det = lastDet;
+                showAllAgain = false;
+            }
+            else
+            {
+                g_tpl.section(std::string(L.tr("Searching line ", "Suche auf Linie ")) + line);
+                // No duration promise: it depends on the line, the bus load and how many devices answer.
+                // The counter below reports the truth as it happens, which is worth more than an estimate.
+                g_tpl.status(ftc::Tpl::Stat::Info, L.tr("asking every address on this line",
+                                                        "frage jede Adresse auf dieser Linie"),
+                             {L.tr("the counter below shows how far it is", "der Zähler unten zeigt den Fortschritt"),
+                              L.tr("ctrl-C stops", "Strg-C bricht ab")});
+                unsigned sa = 0, sl = 0;
+                std::sscanf(line, "%u.%u", &sa, &sl);
+                const uint16_t lineBase = (uint16_t)((sa << 12) | (sl << 8));
+                const bool ackFeed = armScanAckFeed(lineBase);
+                if (!ackFeed)
+                    g_tpl.note(L.tr("this interface does not report acknowledgements — the search will miss "
+                                    "devices that never answer",
+                                    "dieses Interface meldet keine Quittungen — die Suche übersieht Geräte, "
+                                    "die nie antworten"));
+                // Only an OpenKNX device can be updated from here, so only those are asked who they are —
+                // and they are asked while the sweep still runs, over their own tunnels.
+                std::unique_ptr<ftc::DetailPool> dpool;
+                if (!g_ip.empty())
+                    dpool.reset(new ftc::DetailPool(g_selfPath, g_ip, g_port,
+                                                    g_workers > 0 ? g_workers : FTC_DETAIL_WORKERS));
+                g_ftcSuppress = true;
+                // Without the pool the sweep would run its own identity probe over the one shared tunnel; with
+                // it that is the same question asked twice, and the two starve each other.
+                openknxFileTransferClient.processCommand(std::string("ftc scan ") + line + (dpool ? "" : " openknx"), false);
+                ftcPumpStructured(hits, true, g_term.isTty() && !quiet, false, nullptr);
+                // Read identities only once the sweep is done -- the same rule as the scan: our children must
+                // not put traffic on the bus whose acknowledges the sweep is measuring.
+                if (dpool)
+                    for (const auto& e : hits)
+                        if (KnxDeviceMap::family((uint16_t)e.crc) == KnxDeviceMap::Family::SystemB)
+                            dpool->submit(e.name);
+                g_ftcSuppress = false;
+                if (ackFeed) g_knxTunnel.setConfirmCallback(nullptr);
+
+                if (dpool)
                 {
-                    const uint64_t now = nowMs();
-                    if (g_term.isTty() && !quiet && now - drawn > 60)
+                    const uint64_t t0 = nowMs();
+                    uint64_t drawn = 0;
+                    while (dpool->outstanding() > 0 && !g_abort)
                     {
-                        drawn = now;
-                        const size_t done = dpool->answered(), left = dpool->outstanding();
-                        const unsigned el = (unsigned)((now - t0) / 1000);
-                        char cnt[32], clk[16];
-                        std::snprintf(cnt, sizeof(cnt), "%u/%u", (unsigned)done, (unsigned)(done + left));
-                        std::snprintf(clk, sizeof(clk), "%u:%02u", el / 60, el % 60);
-                        liveLine(std::string("  ") + c.green(liveSpinner(now)) + " " +
-                                 c.cyan(L.tr("reading OpenKNX devices", "lese OpenKNX-Geräte")) + "   " +
-                                 c.bold(cnt) + "   " + c.dim(clk));
+                        const uint64_t now = nowMs();
+                        if (g_term.isTty() && !quiet && now - drawn > 60)
+                        {
+                            drawn = now;
+                            const size_t done = dpool->answered(), left = dpool->outstanding();
+                            const unsigned el = (unsigned)((now - t0) / 1000);
+                            char cnt[32], clk[16];
+                            std::snprintf(cnt, sizeof(cnt), "%u/%u", (unsigned)done, (unsigned)(done + left));
+                            std::snprintf(clk, sizeof(clk), "%u:%02u", el / 60, el % 60);
+                            liveLine(std::string("  ") + c.green(liveSpinner(now)) + " " +
+                                     c.cyan(L.tr("reading OpenKNX devices", "lese OpenKNX-Geräte")) + "   " +
+                                     c.bold(cnt) + "   " + c.dim(clk));
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    if (g_abort) dpool->abort();
+                    dpool->wait();
+                    det = dpool->rows();
+                    if (g_term.isTty() && !quiet) std::fprintf(stderr, "\r\x1b[K");
                 }
-                if (g_abort) dpool->abort();
-                dpool->wait();
-                det = dpool->rows();
-                if (g_term.isTty() && !quiet) std::fprintf(stderr, "\r\x1b[K");
+                lastHits = hits;
+                lastDet = det;
             }
             for (const auto& e : hits)
             {
@@ -7917,7 +7932,7 @@ int main(int argc, char** argv)
             while (!t2.empty() && (t2.back() == '\n' || t2.back() == '\r' || t2.back() == ' ')) t2.pop_back();
             unsigned qa = 0, ql = 0, qd = 0;
             if (t2 == "q" || t2 == "Q") { socketCleanup(); return 130; }
-            if (t2 == "alle" || t2 == "all") { showAllPick = true; knxotaScanAsk = false; continue; }
+            if (t2 == "alle" || t2 == "all") { showAllPick = true; knxotaScanAsk = false; showAllAgain = true; continue; }
             if (std::sscanf(t2.c_str(), "%u.%u.%u", &qa, &ql, &qd) == 3) paText = t2; // a typed address always wins
             else if (t2 == "L" || t2 == "l")
             {
