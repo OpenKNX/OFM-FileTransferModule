@@ -1,6 +1,14 @@
 # Changes
 
 
+## 2026-10-16 -- oknx asks an object that answers a command
+
+* `oknx -i <ip> ga ask <x/y/z> <value>` writes like `ga write` and then collects the GroupValue_Write and GroupValue_Response telegrams that come back on the same address. A `ga read` does not see an answer that comes as a write, as the OpenKNX diagnose object sends it. Measured over 11.11.0.31: `ga ask 31/0/1:16.001 uptime` answered 49 ms after the confirmation of its telegram, `mem` with two telegrams 48 ms apart, an unknown command with none. The diagnose object of that device has no read flag, so `ga read 31/0/1` gets no answer
+* Collecting ends 300 ms after the last answer once every address that went out has one, at the latest `--wait <ms>` (default 1500, 100 to 60000) after the last telegram. Each answer shows how long after the L_Data.con of its telegram it came, or after the send when no confirmation came. Answers are matched by address only, so a GroupValue_Write that another device sends on the address in that time counts too
+* The write forms of `ga write`, and `--every`, `--count`, `--seconds`, `--live` and `-q` of `ga read`, work the same; `-q` prints `ga\task\t…` lines. One ask names each address once. With `--every` a cycle takes at least 1.5 s, a shorter interval is raised to that. The exit code says whether the telegrams were confirmed, not whether an answer came; a stopped ask lists what it sent first
+* The type an answer is decoded with stays with its address, also when several `<x/y/z>:<DPT>=<v>` are given
+
+
 ## ec/v0.3.0-beta.1: 2026-10-15
 
 The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-15

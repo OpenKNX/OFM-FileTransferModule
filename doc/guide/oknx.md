@@ -75,6 +75,7 @@ rename this variable was named FTC_LANG; that name is not read any more.
 | `ga read … --every <int>` · `--count N` · `--seconds N` | read again every 10s / 1m / 2m; a log by default, `--live` keeps one table updated in place and marks a changed value with `*` |
 | `ga write <x/y/z> <value>` | A_GroupValue_Write; six bits or less ride in the compact form |
 | `ga write <a>=<v> <b>=<v> …` · `ga write <a> <b> … = <v>` | several addresses, each with its own value or one value for all; untyped octets as `0x0C,0x1A` or `0C 1A`; a typed value is one token (`1`, `21.5` with a decimal point), a text may have spaces. Without a type, `21 5` is two octets: give the type for a number |
+| `ga ask <x/y/z> <value>` · `--wait <ms>` | write, then collect the GroupValue_Write and _Response telegrams that come back on the address; same write forms, same `--every` / `--count` / `--live` as read |
 | `ga import <GA-Export.xml>` | store addresses, names and datapoint types of an ETS export, per interface |
 | `ga table` · `ga table rm <name>` | list the stored tables · remove one (both work without `--ip`) |
 | `ga table move <from> <to>` | re-point a stored table at another interface |
@@ -91,6 +92,19 @@ what a write already sent, and a cycle in which nothing could be sent ends `--ev
 block per address, and `--every` adds a `gacycle <n> <unix ms>` line at the start of every cycle. Put `*` in
 quotes (`'1/4/*'`): zsh refuses an unquoted one, and bash replaces a bare `*` with the file names of the
 current directory.
+
+`ga ask` is for an object that answers a command with a telegram of its own on the same address. The OpenKNX
+diagnose object is one: write `uptime` and it answers with one GroupValue_Write, `mem` gives two (`CUR …`,
+`MIN …`), and a command it does not know gives none. A `ga read` does not see these answers, they are not
+GroupValue_Responses. The diagnose object is DPT 16.001, so without an imported table give the type:
+`ga ask 31/0/1:16.001 uptime`. Collecting ends 300 ms after the last answer once every address that went
+out has one, at the latest `--wait` (default 1500 ms) after the last telegram. Each answer shows how long
+after the L_Data.con of its telegram it came, or after the send when no confirmation came. One ask names
+each address once, because the answers are matched by address only: a GroupValue_Write that another device
+sends on the address in that time counts as an answer too. The diagnose object answers on its sending
+address, the first one linked to it; asking another of its addresses gets no answer. With `--every` an ask
+cycle takes at least 1.5 s as a read cycle does, a shorter interval is raised to that. The exit code says
+whether the telegrams were confirmed, not whether an answer came. A stopped ask lists what it sent first.
 
 **Driving one device** — what ETS does besides transferring files. Everything here WRITES to a foreign
 device; on a productive line use it per device and deliberately.

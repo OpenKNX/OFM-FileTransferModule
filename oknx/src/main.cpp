@@ -1447,6 +1447,12 @@ static void examples()
          "mehrere Adressen, ein Wert für alle"},
         {"oknx -i 11.11.0.126 ga write 0/7/0:9.001 21.5", "a value of a type the table does not know",
          "ein Wert eines Typs, den die Tabelle nicht kennt"},
+        {"oknx -i 11.11.0.126 ga ask 31/0/1:16.001 uptime", "the diagnose object: write a command, show the answer",
+         "das Diagnoseobjekt: Kommando schreiben, Antwort zeigen"},
+        {"oknx -i 11.11.0.126 ga ask 31/0/1:16.001 mem", "a command with two answers: CUR and MIN",
+         "ein Kommando mit zwei Antworten: CUR und MIN"},
+        {"oknx -i 11.11.0.126 ga ask 31/0/1:16.001 uptime --every 1m --live",
+         "ask again every minute, one table", "jede Minute neu fragen, eine Tabelle"},
     };
     static const Ex gDev[] = {
         {"oknx -i 11.11.0.126 5.0.3 ping", "is it there, and how fast", "ist es da, und wie schnell"},
@@ -1652,6 +1658,16 @@ static void usage()
     U.cmdRow("ga write <a>=<v> <b>=<v> …", L.tr("several addresses, each its own value (hex octets: 0x0C,0x1A)",
                                                "mehrere Adressen, jede mit eigenem Wert (Hex-Oktette: 0x0C,0x1A)"));
     U.cmdRow("ga write <a> <b> … = <v>", L.tr("several addresses, one value for all", "mehrere Adressen, ein Wert für alle"));
+    U.cmdRow("ga ask <x/y/z> <v>", L.tr("write, then collect what comes back on the address (Write or Response)",
+                                       "schreiben, dann einsammeln, was auf der Adresse zurückkommt (Write oder Response)"));
+    U.cmdRow("", L.tr("for an object that answers a command, like the OpenKNX diagnose object: uptime, mem",
+                      "für ein Objekt, das auf ein Kommando antwortet, wie das OpenKNX-Diagnoseobjekt: uptime, mem"));
+    U.cmdRow("", L.tr("ends 300 ms after every address has answered, at the latest after --wait <ms> (1500)",
+                      "endet 300 ms, nachdem jede Adresse geantwortet hat, spätestens nach --wait <ms> (1500)"));
+    U.cmdRow("", L.tr("+N ms = after the confirmation of its telegram, else after the send; any Write on the address counts",
+                      "+N ms = nach der Bestätigung seines Telegramms, sonst nach dem Senden; jedes Write auf der Adresse zählt"));
+    U.cmdRow("", L.tr("the same write forms; --every, --count, --live as with read",
+                      "dieselben Schreibformen; --every, --count, --live wie bei read"));
     U.cmdRow("ga import <export>", L.tr("learn a group address export of the KNX project: names + datapoint types",
                                        "Gruppenadressexport des KNX-Projekts einlesen: Namen + Datenpunkttypen"));
     U.cmdRow("", L.tr("XML or CSV, all four layouts; CSV only WITH header lines. Kept per interface",
@@ -9178,22 +9194,26 @@ int main(int argc, char** argv)
             socketCleanup();
             return 2;
         };
-        if (op != "read" && op != "write")
-            return fail(L.tr("ga needs read or write and a group address",
-                             "ga braucht read oder write und eine Gruppenadresse"),
+        if (op != "read" && op != "write" && op != "ask")
+            return fail(L.tr("ga needs read, write or ask and a group address",
+                             "ga braucht read, write oder ask und eine Gruppenadresse"),
                         {L.tr("nothing was sent", "es wurde nichts gesendet")},
-                        "oknx -i <ip> ga read 1/4/5   ·   oknx -i <ip> ga write 1/4/5 1");
+                        "oknx -i <ip> ga read 1/4/5   ·   ga write 1/4/5 1   ·   ga ask 31/0/1:16.001 uptime");
         const bool isWrite = op == "write";
+        // `ask` writes like `write` and collects like `read`: a device that answers with a telegram of its own
+        // on the same address (the OpenKNX diagnose object answers a command with a GroupValue_Write).
+        const bool isAsk = op == "ask";
 
         uint32_t everyMs = 0;
         int cycles = 0;
         bool live = false;
+        uint32_t waitMs = 0; // ask: the longest wait for answers after the last telegram (0 = default)
         std::vector<std::string> args;
         for (size_t i = 2; i < pos.size(); i++)
         {
-            if ((pos[i] == "--every" || pos[i] == "--count") && i + 1 >= pos.size())
+            if ((pos[i] == "--every" || pos[i] == "--count" || pos[i] == "--wait") && i + 1 >= pos.size())
                 return fail(pos[i] + " " + L.tr("needs a value", "braucht einen Wert"),
-                            {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--every 10s --count 6");
+                            {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--every 10s --count 6 · --wait 3000");
             if (pos[i] == "--every")
             {
                 everyMs = ftc::Watch::parseInterval(pos[++i]);
@@ -9208,17 +9228,31 @@ int main(int argc, char** argv)
                     return fail(L.tr("--count needs a number above 0", "--count braucht eine Zahl über 0"),
                                 {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--every 10s --count 6");
             }
+            else if (pos[i] == "--wait")
+            {
+                char* end = nullptr;
+                const long v = std::strtol(pos[++i].c_str(), &end, 10);
+                if (end == nullptr || *end != 0 || v < 100 || v > 60000)
+                    return fail(L.tr("--wait needs milliseconds, 100 to 60000", "--wait braucht Millisekunden, 100 bis 60000"),
+                                {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--wait 3000");
+                waitMs = (uint32_t)v;
+            }
             else if (pos[i] == "--live")
                 live = true;
             else if (pos[i].size() > 2 && pos[i][0] == '-' && pos[i][1] == '-')
                 return fail(L.tr("unknown option", "unbekannte Option") + std::string(": ") + pos[i],
-                            {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--every <interval> · --count <n> · --live");
+                            {L.tr("nothing was sent", "es wurde nichts gesendet")},
+                            "--every <interval> · --count <n> · --live · --wait <ms>");
             else
                 args.push_back(pos[i]);
         }
         if (isWrite && (everyMs != 0 || cycles != 0 || live))
-            return fail(L.tr("--every, --count and --live are for read only", "--every, --count und --live gibt es nur für read"),
+            return fail(L.tr("--every, --count and --live are for read and ask", "--every, --count und --live gibt es für read und ask"),
                         {L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> ga read '1/4/*' --every 10s");
+        if (!isAsk && waitMs != 0)
+            return fail(L.tr("--wait is for ask only", "--wait gibt es nur für ask"),
+                        {L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> ga ask 31/0/1:16.001 uptime --wait 3000");
+        if (waitMs == 0) waitMs = 1500;
         if (everyMs == 0 && (cycles != 0 || live))
             return fail(L.tr("--count and --live need --every", "--count und --live brauchen --every"),
                         {L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> ga read '1/4/*' --every 10s --live");
@@ -9331,8 +9365,9 @@ int main(int argc, char** argv)
                 if (!tok.empty() && !expand(tok, multi, out)) return false;
             return true;
         };
-        const char* selHint = isWrite ? "oknx -i <ip> ga write 1/4/5=1 1/4/6=0   ·   ga write 1/4/5 1/4/6 = 1"
-                                      : "oknx -i <ip> ga read 1/4/5 1/4/6   ·   ga read 1/4/0-20   ·   ga read '1/4/*'";
+        const char* selHint = isAsk ? "oknx -i <ip> ga ask 31/0/1:16.001 uptime   ·   ga ask 31/0/1:16.001=uptime 31/0/2:16.001=uptime"
+                              : isWrite ? "oknx -i <ip> ga write 1/4/5=1 1/4/6=0   ·   ga write 1/4/5 1/4/6 = 1"
+                                        : "oknx -i <ip> ga read 1/4/5 1/4/6   ·   ga read 1/4/0-20   ·   ga read '1/4/*'";
 
         // 03_03_07 3.1.3 p.16-17: the A_GroupValue_Write form follows the DATAPOINT's length, not the
         // size of the number - six bits or less rides in the APCI octet. With a known type the stack's
@@ -9342,10 +9377,11 @@ int main(int argc, char** argv)
             uint16_t ga = 0;
             std::string shown; // the value as typed, for the write report
             uint8_t small = 0, plen = 0, payload[14] = {0};
+            uint16_t dMain = 0, dSub = 0; // the type the answers are decoded with (0 = unknown)
         };
         auto encode = [&](Req& r, const std::vector<std::string>& vals) -> int {
             if (vals.empty() || vals[0].empty())
-                return fail(L.tr("write needs a value", "write braucht einen Wert"),
+                return fail(op + " " + L.tr("needs a value", "braucht einen Wert"),
                             {L.tr("with an imported type: the value itself (21.5, 1, 80)",
                                   "mit importiertem Typ: der Wert selbst (21.5, 1, 80)"),
                              L.tr("without one: 0-63 plain, or hex octets", "ohne Typ: 0-63 blank, oder Hex-Oktette")},
@@ -9353,6 +9389,8 @@ int main(int argc, char** argv)
             for (size_t i = 0; i < vals.size(); i++) r.shown += (i ? " " : "") + vals[i];
             const ftc::GaInfo* gi = infoOf(r.ga);
             uint16_t dMain = gi != nullptr ? gi->main : 0, dSub = gi != nullptr ? gi->sub : 0;
+            r.dMain = dMain;
+            r.dSub = dSub;
             if (dMain != 0)
             {
                 // Sub-byte datapoints (1 bit, 2 bit, 4 bit) are the compact form; everything else is
@@ -9433,8 +9471,8 @@ int main(int argc, char** argv)
                     return fail(L.tr("a plain value must be 0-63 without a known type",
                                      "eine blanke Zahl muss ohne bekannten Typ 0-63 sein"),
                                 {ftc::GaTable::gaStr(r.ga) + "  " + r.shown,
-                                 L.tr("import the project, or give the type: ga write 0/7/0:9.001 21.5",
-                                      "Projekt importieren, oder Typ angeben: ga write 0/7/0:9.001 21.5")},
+                                 L.tr("import the project, or give the type: a number 0/7/0:9.001 21.5, a text 31/0/1:16.001 uptime",
+                                      "Projekt importieren, oder Typ angeben: Zahl 0/7/0:9.001 21.5, Text 31/0/1:16.001 uptime")},
                                 "oknx -i <ip> ga import GA-Export.xml");
                 r.small = (uint8_t)v;
                 return 0;
@@ -9456,7 +9494,7 @@ int main(int argc, char** argv)
         // list of addresses allowed), `<ga> <ga> … = <v…>` (one value for all), `<ga>=<v>[,<v>…] …` (one each).
         // A write names its addresses one by one; ranges and `*` stay with read.
         std::vector<Req> reqs;
-        if (!isWrite)
+        if (op == "read")
         {
             std::vector<uint16_t> gas;
             for (const std::string& a : args)
@@ -9468,6 +9506,7 @@ int main(int argc, char** argv)
                 {
                     Req r;
                     r.ga = g;
+                    if (const ftc::GaInfo* gi = infoOf(g)) { r.dMain = gi->main; r.dSub = gi->sub; }
                     reqs.push_back(r);
                 }
         }
@@ -9494,7 +9533,7 @@ int main(int argc, char** argv)
                 for (size_t i = 0; i < nGa; i++) items.push_back({args[i], vals});
             }
             if (items.empty())
-                return fail(L.tr("ga needs read or write and a group address", "ga braucht read oder write und eine Gruppenadresse"),
+                return fail(L.tr("ga needs read, write or ask and a group address", "ga braucht read, write oder ask und eine Gruppenadresse"),
                             {L.tr("nothing was sent", "es wurde nichts gesendet")}, selHint);
             for (const auto& it : items)
             {
@@ -9508,12 +9547,19 @@ int main(int argc, char** argv)
                     r.ga = g;
                     const int rc = encode(r, it.second);
                     if (rc != 0) return rc;
+                    // Answers are matched by address only, so one ask names each address once.
+                    if (isAsk)
+                        for (const Req& o : reqs)
+                            if (o.ga == g)
+                                return fail(L.tr("ask names each address once", "ask nennt jede Adresse nur einmal"),
+                                            {ftc::GaTable::gaStr(g), L.tr("nothing was sent", "es wurde nichts gesendet")},
+                                            selHint);
                     reqs.push_back(r);
                 }
             }
         }
         if (reqs.empty())
-            return fail(L.tr("ga needs read or write and a group address", "ga braucht read oder write und eine Gruppenadresse"),
+            return fail(L.tr("ga needs read, write or ask and a group address", "ga braucht read, write oder ask und eine Gruppenadresse"),
                         {L.tr("nothing was sent", "es wurde nichts gesendet")}, selHint);
 
         // One telegram at a time, the next after the L_Data.con of the one before: the interface acknowledges
@@ -9523,16 +9569,18 @@ int main(int argc, char** argv)
         static volatile bool s_conSeen = false;
         static bool s_conOk = false;
         static uint16_t s_conGa = 0;
+        static uint64_t s_conAt = 0; // nowMs() of the confirmation: the telegram was on the bus
         const FtcConCb prevCon = g_knxTunnel.confirmCallback();
         g_knxTunnel.setConfirmCallback([](uint16_t da, bool ok) {
             if (da != s_conGa) return;
             s_conOk = ok;
+            s_conAt = nowMs();
             s_conSeen = true;
         });
         auto sendOne = [&](const Req& r) -> uint8_t {
             s_conGa = r.ga;
             s_conSeen = false;
-            if (!g_knxTunnel.sendGroupValue(r.ga, isWrite, r.small, r.payload, r.plen)) return NOT_SENT;
+            if (!g_knxTunnel.sendGroupValue(r.ga, isWrite || isAsk, r.small, r.payload, r.plen)) return NOT_SENT;
             for (const uint64_t t0 = nowMs(); !s_conSeen && !g_abort && nowMs() - t0 < 3000;)
             {
                 g_knxTunnel.pump();
@@ -9635,16 +9683,24 @@ int main(int argc, char** argv)
             uint16_t src, ga;
             uint8_t small;
             std::vector<uint8_t> d;
+            uint64_t t; // nowMs() when it arrived
         };
         static std::vector<Hit> s_hits;
         static std::set<uint16_t> s_want;
+        static bool s_takeWrite = false; // ask: a GroupValue_Write on the address is an answer too
+        static uint16_t s_ownPa = 0;
         s_hits.clear();
         s_want.clear();
+        s_takeWrite = isAsk;
+        s_ownPa = g_knxTunnel.assignedPA();
         for (const Req& r : reqs) s_want.insert(r.ga);
         g_knxTunnel.setGroupCallback([](uint16_t src, uint16_t g, uint16_t apci, const uint8_t* d, uint8_t n) {
-            if ((apci & 0x03C0) != APCI_GROUPVALUE_RESP) return; // GroupValue_Response only
-            if (s_want.count(g) == 0) return;                     // an answer to an address that was not asked
-            s_hits.push_back({src, g, (uint8_t)(apci & 0x3F), std::vector<uint8_t>(d, d + n)});
+            constexpr uint16_t APCI_GV_WRITE = 0x0080; // A_GroupValue_Write (03_03_07 Table 1)
+            const uint16_t svc = apci & 0x03C0;
+            if (svc != APCI_GROUPVALUE_RESP && !(s_takeWrite && svc == APCI_GV_WRITE)) return;
+            if (s_want.count(g) == 0) return;          // an answer to an address that was not asked
+            if (s_takeWrite && src == s_ownPa) return; // our own command, should the server pass it back
+            s_hits.push_back({src, g, (uint8_t)(apci & 0x3F), std::vector<uint8_t>(d, d + n), nowMs()});
         });
         auto hexOf = [](const Hit& h) -> std::string {
             char b[8];
@@ -9661,10 +9717,9 @@ int main(int argc, char** argv)
             }
             return s;
         };
-        auto valueOf = [&](const Hit& h) -> std::string {
-            const ftc::GaInfo* gi = infoOf(h.ga);
-            std::string v = gi != nullptr ? ftc::GaTable::decode(gi->main, gi->sub, h.d.data(), (uint8_t)h.d.size(), h.small)
-                                          : std::string();
+        auto valueOf = [&](const Hit& h, const Req& r) -> std::string {
+            std::string v = r.dMain != 0 ? ftc::GaTable::decode(r.dMain, r.dSub, h.d.data(), (uint8_t)h.d.size(), h.small)
+                                         : std::string();
             if (v.empty()) return hexOf(h);
             if (verbose) v += "   [" + hexOf(h) + "]";
             return v;
@@ -9683,30 +9738,54 @@ int main(int argc, char** argv)
         };
 
         // A read has no single addressee, so there is no timeout to fail on - collect for a fixed window
-        // after the last one went out.
+        // after the last one went out. An ask stops 300 ms after the last answer once every address that
+        // went out has one (a command can answer in several telegrams), at the latest --wait after the last.
         std::vector<uint8_t> st(reqs.size(), NOT_SENT);
+        std::vector<uint64_t> sentAt(reqs.size(), 0);
         size_t sentN = 0, okN = 0; // of the last cycle
         auto cycle = [&]() {
             s_hits.clear();
+            s_ownPa = g_knxTunnel.assignedPA(); // a reconnect can hand out another tunnel address
             sentN = okN = 0;
             for (size_t i = 0; i < reqs.size(); i++)
             {
+                sentAt[i] = nowMs();
                 st[i] = g_abort ? SKIPPED : sendOne(reqs[i]);
+                if (st[i] == CON_OK || st[i] == CON_NEG) sentAt[i] = s_conAt; // "+N ms" from the telegram on the bus
                 sentN += st[i] != NOT_SENT && st[i] != SKIPPED;
                 okN += st[i] == CON_OK;
             }
-            for (const uint64_t t0 = nowMs(); !g_abort && nowMs() - t0 < 1500;)
+            const uint64_t t0 = nowMs();
+            for (;;)
             {
+                if (g_abort || nowMs() - t0 >= (isAsk ? waitMs : 1500u)) break;
+                if (isAsk)
+                {
+                    bool all = true;
+                    size_t expected = 0;
+                    uint64_t lastHit = 0;
+                    for (size_t i = 0; i < reqs.size() && all; i++)
+                    {
+                        if (st[i] == NOT_SENT || st[i] == SKIPPED) continue; // never handed out: no answer to wait for
+                        expected++;
+                        bool got = false;
+                        for (const Hit& h : s_hits)
+                            if (h.ga == reqs[i].ga) { got = true; lastHit = h.t > lastHit ? h.t : lastHit; }
+                        all = got;
+                    }
+                    if (expected == 0 || (all && nowMs() - lastHit >= 300)) break;
+                }
                 g_knxTunnel.pump();
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+            if (!g_abort) g_knxTunnel.pump(); // what arrived during the last sleep still belongs to this cycle
         };
         auto printQuiet = [&]() {
             for (size_t i = 0; i < reqs.size(); i++)
             {
                 size_t n = 0;
                 for (const Hit& h : s_hits) n += h.ga == reqs[i].ga;
-                std::printf("ga\tread\t%s\t%d\t%zu\n", ftc::GaTable::gaStr(reqs[i].ga).c_str(),
+                std::printf("ga\t%s\t%s\t%d\t%zu\n", op.c_str(), ftc::GaTable::gaStr(reqs[i].ga).c_str(),
                             st[i] != NOT_SENT && st[i] != SKIPPED ? 1 : 0, n);
                 for (const Hit& h : s_hits)
                     if (h.ga == reqs[i].ga)
@@ -9718,7 +9797,7 @@ int main(int argc, char** argv)
         // One line per answer, or one line per address without one. @p cut limits a line to the terminal.
         auto rows = [&](bool cut) -> std::vector<std::string> {
             std::vector<std::string> out;
-            const size_t fixed = 2 + 10 + (anyName ? NAME_W + 2 : 0) + 10;
+            const size_t fixed = 2 + 10 + (anyName ? NAME_W + 2 : 0) + 10 + (isAsk ? 10 : 0);
             const size_t room = cut && (size_t)termw > fixed + 8 ? (size_t)termw - 1 - fixed : 200;
             for (size_t i = 0; i < reqs.size(); i++)
             {
@@ -9727,15 +9806,23 @@ int main(int argc, char** argv)
                     if (h.ga == reqs[i].ga)
                     {
                         any = true;
-                        std::string v = valueOf(h);
+                        std::string v = valueOf(h, reqs[i]);
                         if (glyphs(g_term.foldAscii(v)) > room) v = fit(v, room);
-                        out.push_back(head(h.ga) + C.dim(fit(ftc::Tpl::pa(h.src), 10)) + C.bold(v));
+                        std::string after;
+                        if (isAsk)
+                        {
+                            const uint64_t dt = h.t >= sentAt[i] ? h.t - sentAt[i] : 0;
+                            after = C.dim(fit("+" + std::to_string((unsigned long long)dt) + " ms", 10));
+                        }
+                        out.push_back(head(h.ga) + C.dim(fit(ftc::Tpl::pa(h.src), 10)) + after + C.bold(v));
                     }
                 if (!any)
                 {
-                    std::string why = st[i] == CON_OK ? L.tr("no answer", "keine Antwort") : conText(st[i]);
+                    std::string why = st[i] != CON_OK ? conText(st[i])
+                                      : g_abort ? L.tr("no answer before the stop", "keine Antwort bis zum Abbruch")
+                                                : L.tr("no answer", "keine Antwort");
                     if (glyphs(g_term.foldAscii(why)) > room) why = fit(why, room);
-                    out.push_back(head(reqs[i].ga) + C.dim(fit("—", 10)) + C.amber(why));
+                    out.push_back(head(reqs[i].ga) + C.dim(fit("—", 10)) + (isAsk ? fit("", 10) : std::string()) + C.amber(why));
                 }
             }
             return out;
@@ -9744,7 +9831,8 @@ int main(int argc, char** argv)
         if (everyMs == 0)
         {
             cycle();
-            if (g_abort)
+            // A stopped read prints nothing; a stopped ask lists its rows first, its commands are on the bus.
+            if (g_abort && !isAsk)
             {
                 aborted();
                 return finish(130);
@@ -9754,6 +9842,14 @@ int main(int argc, char** argv)
             {
                 const std::string g = ftc::GaTable::gaStr(reqs[0].ga);
                 if (st[0] == NOT_SENT || st[0] == SKIPPED) g_tpl.status(ftc::Tpl::Stat::Err, conText(st[0]), {});
+                else if (s_hits.empty() && isAsk)
+                    g_tpl.status(ftc::Tpl::Stat::Warn,
+                                 g + " " + (g_abort ? std::string(L.tr("no answer before the stop", "keine Antwort bis zum Abbruch"))
+                                                    : L.tr("no answer in", "keine Antwort in") + std::string(" ") +
+                                                          std::to_string(waitMs) + " ms"),
+                                 {st[0] == CON_OK ? L.tr("nothing came on this address after the telegram",
+                                                         "nach dem Telegramm kam auf dieser Adresse nichts")
+                                                  : conText(st[0])});
                 else if (s_hits.empty())
                     g_tpl.status(ftc::Tpl::Stat::Warn, g + " " + L.tr("no answer in 1.5 s", "keine Antwort in 1,5 s"),
                                  {st[0] == CON_OK ? L.tr("no device on this address has the read flag set",
@@ -9778,12 +9874,26 @@ int main(int argc, char** argv)
                              {});
                 for (const std::string& r : rows(false)) std::printf("%s\n", r.c_str());
             }
+            if (g_abort)
+            {
+                aborted();
+                return finish(130);
+            }
             return finish(okN == reqs.size() ? 0 : 1);
         }
 
         // --every: the same read again and again. A cycle that takes longer than the interval starts the next
         // one right away, so the interval is a lower bound, never a reason to send faster.
         live = live && g_term.isTty() && !quiet;
+        // An ask cycle ends early once the answers are in, so it gets the 1.5 s floor a read cycle has by its window.
+        if (isAsk && everyMs < 1500)
+        {
+            if (quiet) std::fprintf(stderr, "ask: --every raised to 1500 ms\n");
+            else
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("--every raised to 1.5 s", "--every auf 1,5 s angehoben"),
+                             {L.tr("one cycle takes at least 1.5 s", "ein Durchlauf dauert mindestens 1,5 s")});
+            everyMs = 1500;
+        }
         const uint64_t tEnd = monSeconds > 0 ? nowMs() + (uint64_t)monSeconds * 1000u : 0;
         int drawn = 0; // screen rows of the last redrawn table, 0 = nothing to move over
         bool slowSaid = false, tallSaid = false, allOk = true;
@@ -9806,8 +9916,8 @@ int main(int argc, char** argv)
                                                   std::chrono::system_clock::now().time_since_epoch()).count();
             const std::string started = clock(); // the cycle is stamped with its start, not its end
             cycle();
-            if (g_abort) break;
-            if (sentN == 0)
+            if (g_abort && !isAsk) break;
+            if (sentN == 0 && !g_abort)
             {
                 // Not one telegram went out (the tunnel is gone): stop instead of reporting empty cycles forever.
                 if (quiet) std::fprintf(stderr, "no telegram could be sent\n");
@@ -9877,11 +9987,13 @@ int main(int argc, char** argv)
                     tallSaid = true;
                     drawn = 0;
                 }
+                if (g_abort) drawn = 0; // the stopped cycle goes below the last complete table
                 if (redraw && drawn > 0) std::printf("\x1b[%dA\x1b[J", drawn);
                 for (const std::string& r : out) std::printf("%s\n", r.c_str());
                 drawn = redraw ? screen : 0;
                 std::fflush(stdout);
             }
+            if (g_abort) break; // an ask has listed the cycle it was stopped in
             const uint64_t took = nowMs() - t0;
             if ((cycles != 0 && n >= cycles) || (tEnd != 0 && nowMs() >= tEnd)) break; // last cycle: nothing follows
             if (took >= everyMs)
