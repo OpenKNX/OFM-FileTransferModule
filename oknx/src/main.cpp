@@ -7258,10 +7258,12 @@ int main(int argc, char** argv)
                 if (gi == nullptr || gi->main == 0) return "";
                 return ftc::GaTable::decode(gi->main, gi->sub, d, n, small);
             },
-            [](uint16_t ga) -> std::string {
-                const ftc::GaInfo* gi = monTab.find(ga);
-                return gi != nullptr ? gi->name : std::string();
-            });
+            // No imported table, no names: an empty name lookup keeps the address column narrow.
+            monTab.size() == 0 ? ftc::Monitor::GaName()
+                               : ftc::Monitor::GaName([](uint16_t ga) -> std::string {
+                                     const ftc::GaInfo* gi = monTab.find(ga);
+                                     return gi != nullptr ? gi->name : std::string();
+                                 }));
         const int rc = mon.run(isBus ? ftc::Monitor::Mode::Bus : ftc::Monitor::Mode::Group,
                                quiet, verbose, monFrames, monSeconds, &g_abort);
         socketCleanup();
