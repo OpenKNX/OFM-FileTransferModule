@@ -41,7 +41,19 @@ struct ProgHit
     std::string viaIp;       ///< the interface/router IP the LOCAL scan reached it through (locate only)
     bool haveDesc = false;   ///< a device descriptor (mask version) was read back
     uint16_t descriptor = 0; ///< the KNX mask version (== device class), via A_DeviceDescriptor_Read
+    unsigned orig = 0;       ///< answers from this address that were not Layer-2 repetitions
+    unsigned rep = 0;        ///< answers marked as a Layer-2 repetition (cEMI Ctrl1 bit 5 clear)
+    /** @brief Devices behind this address: each answers once, so a second original is a second device. */
+    unsigned devices() const { return orig != 0 ? orig : 1; }
 };
+
+/** @brief Devices in a hit list, counted per answer telegram and not per address. */
+inline size_t progDevices(const std::vector<ProgHit>& hits)
+{
+    size_t n = 0;
+    for (const auto& h : hits) n += h.devices();
+    return n;
+}
 
 /**
  * @brief Broadcast an A_IndividualAddress_Read over a self-owned KNXnet/IP tunnel and collect the responders.
@@ -178,7 +190,8 @@ class ProgScan
             else
             {
                 for (const auto& h : cur)
-                    std::printf("%s\t%s\n", Tpl::pa(h.ia).c_str(), lineStr(h.ia).c_str());
+                    for (unsigned k = 0; k < h.devices(); ++k) // one line per device, also for a shared address
+                        std::printf("%s\t%s\n", Tpl::pa(h.ia).c_str(), lineStr(h.ia).c_str());
                 std::fflush(stdout);
             }
         }
@@ -201,7 +214,7 @@ class ProgScan
         const bool on = (blink % 2) == 0;
         const std::string dot = on ? c.amber(tm.glyph("◉", "*")) : c.dim(tm.glyph("○", "o"));
         std::printf("  %s  %s%s%s\n", dot.c_str(), c.dim(_i.tr("searching … ", "suche … ")).c_str(),
-                    c.green(std::to_string(cur.size())).c_str(),
+                    c.green(std::to_string(progDevices(cur))).c_str(),
                     c.dim(_i.tr(" in programming mode", " im Programmiermodus")).c_str());
         int lines = 1;
         if (cur.empty())
@@ -220,7 +233,7 @@ class ProgScan
             }
             else
                 cls = c.dim(_i.tr("in programming mode (no descriptor)", "im Programmiermodus (kein Deskriptor)"));
-            _p.tableRow({_p.statusDot('g'), c.bold(Tpl::pa(h.ia)), c.cyan(lineStr(h.ia)), cls}, {2, 10, 8, 0});
+            _p.tableRow({_p.statusDot('g'), c.bold(Tpl::pa(h.ia)), c.cyan(lineStr(h.ia)), cls + sameAddrTag(h)}, {2, 10, 8, 0});
             ++lines;
         }
         std::fflush(stdout);
@@ -250,9 +263,9 @@ class ProgScan
                 break;
             }
             if ((int)((detail::nowMs() - startMs) / 1000) >= seconds) break;
-            if (maxFrames > 0 && (int)out.size() >= maxFrames) break;
+            if (maxFrames > 0 && (int)progDevices(out) >= maxFrames) break;
             if (!pump(out)) break;                                                 // server tore the tunnel down
-            if (onTick) onTick((int)(detail::nowMs() - startMs), (int)out.size()); // live blink line (run() only)
+            if (onTick) onTick((int)(detail::nowMs() - startMs), (int)progDevices(out)); // live blink line (run() only)
         }
         if (!aborted) identify(out, abort); // read each responder's descriptor (mask/class) before leaving
         if (outAborted) *outAborted = aborted;
@@ -595,6 +608,7 @@ class ProgScan
         const uint8_t* d = cemi + off;
         const int n = len - off;
 
+        const bool repeated = (d[0] & 0x20) == 0; // Ctrl1 bit 5 clear = a Layer-2 repetition
         const uint8_t ctrl2 = d[1];
         const uint16_t src = (uint16_t)((d[2] << 8) | d[3]);
         const uint16_t dst = (uint16_t)((d[4] << 8) | d[5]);
@@ -608,7 +622,7 @@ class ProgScan
         // A_IndividualAddress_Response: broadcast-addressed -> a device in programming mode announced its IA.
         if ((ctrl2 & 0x80) && dst == 0x0000 && apci == APCI_IA_RESPONSE)
         {
-            addHit(src, out);
+            addHit(src, repeated, out);
             return;
         }
 
@@ -624,17 +638,43 @@ class ProgScan
     }
 
     /**
-     * @brief Record a distinct responder IA (dedupe; bounded list). Tagged with the interface IP for `locate`.
+     * @brief Record one answer per responder IA (bounded list). Tagged with the interface IP for `locate`.
+     * @details Two devices with the same address answer twice; only a Layer-2 repetition is the same device again.
      */
-    void addHit(uint16_t ia, std::vector<ProgHit>& out)
+    void addHit(uint16_t ia, bool repeated, std::vector<ProgHit>& out)
     {
-        for (const auto& h : out)
-            if (h.ia == ia) return;    // de-dupe (a device may answer more than once)
+        for (auto& h : out)
+            if (h.ia == ia)
+            {
+                (repeated ? h.rep : h.orig)++;
+                return;
+            }
         if (out.size() >= 256) return; // hard bound (never in practice; ETS expects one)
         ProgHit h;
         h.ia = ia;
         h.viaIp = _ip;
+        (repeated ? h.rep : h.orig)++;
         out.push_back(h);
+    }
+
+    /** @brief "  ×N" after an address that N devices answered from, else empty. */
+    std::string sameAddrTag(const ProgHit& h) const
+    {
+        if (h.devices() < 2) return std::string();
+        return std::string("  ") + _c.amber(_c.term().glyph("×", "x") + std::to_string(h.devices())) +
+               (h.haveDesc ? _c.dim(_i.tr("  (mask of the first answer)", "  (Maske der ersten Antwort)")) : std::string());
+    }
+
+    /** @brief The note for an address several devices share: only their serial numbers tell them apart. */
+    void sameAddrNote(const std::vector<ProgHit>& hits)
+    {
+        for (const auto& h : hits)
+            if (h.devices() > 1)
+            {
+                _p.note(std::to_string(h.devices()) + _i.tr(" devices answer with ", " Geräte antworten mit ") + Tpl::pa(h.ia) +
+                        _i.tr(" — only their serial numbers tell them apart: oknx setpa <new> lists them",
+                              " — nur ihre Seriennummern unterscheiden sie: oknx setpa <neu> listet sie auf"));
+            }
     }
 
     /**********************************************************************
@@ -669,7 +709,8 @@ class ProgScan
             {
                 char m[8] = "-";
                 if (h.haveDesc) std::snprintf(m, sizeof(m), "0x%04X", h.descriptor);
-                std::printf("%s\t%s\t%s\n", Tpl::pa(h.ia).c_str(), lineStr(h.ia).c_str(), m);
+                for (unsigned k = 0; k < h.devices(); ++k) // one line per device; the mask is the first answer's
+                    std::printf("%s\t%s\t%s\n", Tpl::pa(h.ia).c_str(), lineStr(h.ia).c_str(), k == 0 ? m : "-");
             }
             std::fflush(stdout);
             return;
@@ -698,14 +739,16 @@ class ProgScan
             }
             else
                 cls = c.dim(_i.tr("in programming mode (no descriptor)", "im Programmiermodus (kein Deskriptor)"));
-            _p.tableRow({_p.statusDot('g'), c.bold(Tpl::pa(h.ia)), c.cyan(lineStr(h.ia)), cls}, {2, 10, 8, 0});
+            _p.tableRow({_p.statusDot('g'), c.bold(Tpl::pa(h.ia)), c.cyan(lineStr(h.ia)), cls + sameAddrTag(h)}, {2, 10, 8, 0});
         }
+        const size_t devs = progDevices(hits);
         _p.status(Tpl::Stat::Ok,
-                  std::to_string(hits.size()) + " " +
-                      (hits.size() == 1 ? _i.tr("device in programming mode found", "Gerät im Programmiermodus gefunden")
-                                        : _i.tr("devices in programming mode found", "Geräte im Programmiermodus gefunden")),
+                  std::to_string(devs) + " " +
+                      (devs == 1 ? _i.tr("device in programming mode found", "Gerät im Programmiermodus gefunden")
+                                 : _i.tr("devices in programming mode found", "Geräte im Programmiermodus gefunden")),
                   {});
-        if (hits.size() > 1)
+        sameAddrNote(hits);
+        if (devs > 1)
             _p.note(_i.tr("addressing expects EXACTLY ONE device in programming mode",
                           "die Adressierung erwartet GENAU EIN Gerät im Programmiermodus"));
     }

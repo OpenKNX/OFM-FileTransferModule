@@ -5878,16 +5878,19 @@ int main(int argc, char** argv)
             }
             for (const auto& h : hits)
             {
-                total++;
+                total += (int)h.devices(); // two devices with the same address are two answers
                 const std::string pa = ftc::Tpl::pa(h.ia);
                 char ln[8];
                 std::snprintf(ln, sizeof(ln), "%u.%u", (h.ia >> 12) & 0x0F, (h.ia >> 8) & 0x0F);
                 if (quiet)
-                    std::printf("%s\t%s\t%s\n", pa.c_str(), ln, f.ip.c_str());
+                    for (unsigned k = 0; k < h.devices(); ++k) // one line per device
+                        std::printf("%s\t%s\t%s\n", pa.c_str(), ln, f.ip.c_str());
                 else
                     g_tpl.tableRow({g_tpl.statusDot('g'), c.bold(pa), c.cyan(ln),
                                     c.dim(std::string(L.tr("line ", "Linie ")) + ln + L.tr(" · via ", " · über ")) +
-                                        c.txt(f.ip)},
+                                        c.txt(f.ip) +
+                                        (h.devices() > 1 ? "  " + c.amber(g_term.glyph("×", "x") + std::to_string(h.devices()))
+                                                         : std::string())},
                                    {2, 10, 8, 0});
             }
             if (aborted) break;

@@ -1,10 +1,11 @@
 # Changes
 
 
-## 2026-10-19 -- login takes the password from the environment
+## 2026-10-19 -- login takes the password from the environment, ps counts every device
 
 * `oknx <pa> login` without a password on the line takes it from `OKNX_FTC_PW_<a>_<l>_<d>` (for 5.0.3: `OKNX_FTC_PW_5_0_3`), so a script signs in without the password in its command line; the result names the variable, never the value. Without it a terminal still asks, a script gets exit code 2 with the name of the variable
 * Hardening: `Invoke-FtmHardening.ps1` without `-TargetPassword` takes it from the same variable for `-Target`, the one the suite runner sets for its other stages; the login line names where the password came from
+* Fix: `oknx ps` counted the devices in programming mode per address, so two devices that both had 15.15.255 showed as one and the "exactly one" note stayed away; it now counts every answer except a Layer-2 repetition, marks a shared address with `×N` and says that only the serial numbers tell those devices apart. Under `-q` each device gets its own line, the mask only on the first; `ps locate` and `ps --seconds 0` count the same way
 
 
 ## 2026-10-18 -- compare checks both sides at a gap and writes its capture on request

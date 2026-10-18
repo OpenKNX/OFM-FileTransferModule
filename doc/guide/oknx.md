@@ -55,7 +55,7 @@ rename this variable was named FTC_LANG; that name is not read any more.
 | `groupmon` / `gm` · `busmon` / `bm` | live group monitor (decoded) · live bus monitor (raw LPDU, ETS acknowledge colour) |
 | `gm\|bm compare <ipB>` | A/B fidelity comparison of two monitors — [busmon-compare.md](../reference/busmon-compare.md) |
 | `gm\|bm --frames N` / `--seconds N` | stop after N — scriptable |
-| `progscan` / `ps [global\|locate]` · `ps --seconds 0` | find devices in programming mode; `--seconds 0` watches continuously |
+| `progscan` / `ps [global\|locate]` · `ps --seconds 0` | find devices in programming mode; `--seconds 0` watches continuously. Every answer counts, so two devices with the same address show as `×2` and as two lines under `-q` (the mask only on the first, it comes from the first answer); a Layer-2 repetition does not count again. `ps locate` scans through every interface it finds, so a device on a line that several of them reach is listed once per interface |
 | `con` / `console` | the interface's **own** console over its web console (WebSocket, no tunnel) |
 | `con … --ws-path <path>` | take this path instead of probing for it — `/openknx/ws`, or `/console` on older firmware; `/console` means bare text, every other path `key:payload` |
 | `scan <a.l \| a b> [ets] [deep N]` | find devices on a line or area |
