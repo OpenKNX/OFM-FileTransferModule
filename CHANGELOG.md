@@ -7,6 +7,7 @@
 * `oknx gm|bm compare … --xml <file>` (or `--xml=<file>`) writes the annotated capture to that file when the run ends, after the drain and also without a terminal; the `<compare>` element carries `stop` and `drainMs` (0 when no drain ran). A file that cannot be written completely turns exit code 0 into 1; every other exit code stays. `--xml` with any other command, or without a file, is refused
 * Fix: a telegram received in the drain after the stop that was handled before its partner from inside the window was dropped, so the partner counted as `onlyA`/`onlyB` or count mismatch; the window copy is delivered late when busmon holds it for its acknowledge or a reassembly ends after the stop. Drain telegrams now wait until the teardown for a partner received within `--grace` of them
 * A drain telegram that finds no partner is kept in the capture as `diff="afterStop"`; it is still not counted. Measured over 21 runs: 16 of 18 such cases were both copies of one telegram after the stop, the other 2 a single copy
+* Fix: the time shown for a monitor telegram (in `gm`, `bm`, `compare` and their XML) took its seconds from the wall clock and its milliseconds from the monotonic clock, so the milliseconds did not belong to the second and a time could run backwards; both now come from the wall clock
 
 
 ## 2026-10-18 -- compare counts a telegram as lost only when the other side could see it

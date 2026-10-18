@@ -1454,8 +1454,12 @@ class Monitor
      */
     static std::string timeStr()
     {
-        const uint64_t ms = detail::nowMs();
-        std::time_t tt = std::time(nullptr);
+        // Seconds and milliseconds from the same wall clock: mixing std::time() with the monotonic ms showed a
+        // millisecond part unrelated to the second, so times could run backwards across a second boundary.
+        const auto now = std::chrono::system_clock::now();
+        const uint64_t ms =
+            (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        std::time_t tt = (std::time_t)(ms / 1000); // truncated; to_time_t may round to the next second
         std::tm tmv{};
 #ifdef _WIN32
         localtime_s(&tmv, &tt);
