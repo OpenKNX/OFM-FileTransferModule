@@ -109,7 +109,7 @@ function Invoke-FtmSuiteResponse {
             # Saying "the probe did not reach the target" about that sent the reader looking
             # for a broken transfer instead of a missing password.
             if ($mk -match '0xA0' -or $mk -match '(?i)auth required') {
-                Set-FtmTestSkip "$t requires authentication for writes (0xA0) - pass -TargetPassword, or point -Target at a device without OPENKNX_FTC_SECURITY"
+                Set-FtmTestSkip "$t requires authentication for writes (0xA0) - pass -TargetPassword or set OKNX_FTC_PW_<area>_<line>_<device>, or point -Target at a device without OPENKNX_FTC_SECURITY"
             }
             if ($mk -match '0xA2') {
                 Set-FtmTestSkip "$t has writes disabled (0xA2) - nothing can be staged there"

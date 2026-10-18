@@ -4,6 +4,7 @@
 ## 2026-10-19 -- login takes the password from the environment
 
 * `oknx <pa> login` without a password on the line takes it from `OKNX_FTC_PW_<a>_<l>_<d>` (for 5.0.3: `OKNX_FTC_PW_5_0_3`), so a script signs in without the password in its command line; the result names the variable, never the value. Without it a terminal still asks, a script gets exit code 2 with the name of the variable
+* Hardening: `Invoke-FtmHardening.ps1` without `-TargetPassword` takes it from the same variable for `-Target`, the one the suite runner sets for its other stages; the login line names where the password came from
 
 
 ## 2026-10-18 -- compare checks both sides at a gap and writes its capture on request

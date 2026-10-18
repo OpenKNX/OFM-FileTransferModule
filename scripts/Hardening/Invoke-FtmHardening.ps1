@@ -32,8 +32,10 @@ FILEPATH: scripts/Hardening/Invoke-FtmHardening.ps1
     Serial port of the DRIVING device's console (the ftc client). Mandatory unless -SelfTest.
 
 .PARAMETER TargetPassword
-    Password for the FTC target when it is built with OPENKNX_FTC_SECURITY. Without it every
-    WRITE on that device is refused with 0xA0 and the cases that stage a file report SKIP.
+    Password for the FTC target when it is built with OPENKNX_FTC_SECURITY. Without it
+    OKNX_FTC_PW_<area>_<line>_<device> is read (e.g. OKNX_FTC_PW_5_0_3), which keeps it off the
+    command line. Without either every WRITE on that device is refused with 0xA0 and the cases
+    that stage a file report SKIP.
 .PARAMETER Target
     Individual address of the FTC target device, e.g. 5.0.3.
 
@@ -198,7 +200,12 @@ Write-Host "  Own address   : $(if ($ownPa) { $ownPa } else { 'unknown - F-S-8 w
 Write-Host "  Firmware      : $firmware"
 # A target built with OPENKNX_FTC_SECURITY refuses every WRITE with 0xA0 until a session
 # is opened, so any case that has to stage a file needs the password. Reads stay open, which
-# is why most of the suite runs without it.
+# is why most of the suite runs without it. Without -TargetPassword it comes from the environment.
+$pwSource = '-TargetPassword'
+if (-not $TargetPassword -and $Target -match '^(\d{1,2})\.(\d{1,2})\.(\d{1,3})$') {
+    $pwSource = 'OKNX_FTC_PW_{0}_{1}_{2}' -f [int]$Matches[1], [int]$Matches[2], [int]$Matches[3]
+    $TargetPassword = "$([Environment]::GetEnvironmentVariable($pwSource))"
+}
 if ($TargetPassword) {
     $login = Invoke-FtmConsoleCommand -Console $console -Command "ftc $Target login $TargetPassword" -TimeoutMs 20000
     if ($login -match '0xA1' -or $login -match '(?i)(failed|denied)') {
@@ -206,7 +213,7 @@ if ($TargetPassword) {
         Close-FtmConsole -Console $console
         exit 3
     }
-    Write-Host "  Target login  : accepted on $Target" -ForegroundColor Green
+    Write-Host "  Target login  : accepted on $Target (password from $pwSource)" -ForegroundColor Green
 }
 # ─── Pre-flight: establish the starting state instead of assuming it ────────────
 #
