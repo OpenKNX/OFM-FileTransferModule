@@ -1,6 +1,14 @@
 # Changes
 
 
+## 2026-10-18 -- compare checks both sides at a gap and writes its capture on request
+
+* Fix: a fragment without a partner (an incomplete reassembly or a lone acknowledge octet) close to a gap of its own side is `notComparable` too. When B joined in the middle of a telegram, its incomplete tail counted as `onlyB` and made a clean run DIVERGENT. A complete telegram there still counts, so a real loss on the other side stays visible. The class is shown as "(Verbindungslücke)" instead of "(Gegenseite getrennt)"
+* `oknx gm|bm compare … --xml <file>` (or `--xml=<file>`) writes the annotated capture to that file when the run ends, after the drain and also without a terminal; the `<compare>` element carries `stop` and `drainMs` (0 when no drain ran). A file that cannot be written completely turns exit code 0 into 1; every other exit code stays. `--xml` with any other command, or without a file, is refused
+* Fix: a telegram received in the drain after the stop that was handled before its partner from inside the window was dropped, so the partner counted as `onlyA`/`onlyB` or count mismatch; the window copy is delivered late when busmon holds it for its acknowledge or a reassembly ends after the stop. Drain telegrams now wait until the teardown for a partner received within `--grace` of them
+* A drain telegram that finds no partner is kept in the capture as `diff="afterStop"`; it is still not counted. Measured over 21 runs: 16 of 18 such cases were both copies of one telegram after the stop, the other 2 a single copy
+
+
 ## 2026-10-18 -- compare counts a telegram as lost only when the other side could see it
 
 * Fix: `oknx gm|bm compare` counted a telegram as `onlyA` while B was still connecting: A opens first, B after it, and a cyclic telegram in that time turned two identical monitors into DIVERGENT. A telegram without a partner now counts as `onlyA`/`onlyB` only when the other side was connected from `--grace` before to `--grace` after it; otherwise it is `notComparable`, shown dimmed with "(Gegenseite getrennt)" and kept out of the result. The same applies around a reconnect mid-run or with the `r` key, counted from when the drop is detected. A reassembled telegram now carries the receive time of its first piece, not the time it was completed

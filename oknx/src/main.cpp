@@ -1687,6 +1687,8 @@ static void usage()
     U.cmdRow("busmon | bm", L.tr("live bus monitor — raw LPDU, ACK colour", "Live-Busmonitor — Roh-LPDU, ACK-Farbe"));
     U.cmdRow("gm|bm compare <ipB> [--grace ms] [--raw]", L.tr("A/B busmon fidelity diff (reassembles fragments; --raw = per-piece; --multi = two-stream)",
                                                               "A/B-Busmon-Treuevergleich (setzt Fragmente zusammen; --raw = Einzelstücke; --multi = Zweistrom)"));
+    U.cmdRow("gm|bm compare <ipB> --xml <file>", L.tr("write every telegram with its class to an XML file when the run ends",
+                                                      "jedes Telegramm mit seiner Einordnung am Ende in eine XML-Datei schreiben"));
     U.cmdRow("  compare readability", L.tr("keys f/c/m/t · flags --only-diff --collapse --no-markers --skew",
                                           "Tasten f/c/m/t · Flags --only-diff --collapse --no-markers --skew"));
     U.cmdRow("gm|bm --frames N | --seconds N", L.tr("stop the monitor after N (scripted)", "Monitor nach N stoppen (skriptbar)"));
@@ -5494,6 +5496,7 @@ int main(int argc, char** argv)
     int monSeconds = 0;           // --seconds N: stop a monitor after N seconds (0 = unlimited)
     bool secondsSet = false;      // was --seconds given? (ps: tells default 3 s apart from an explicit --seconds 0 = loop)
     int cmpGrace = 750;           // --grace N: A/B compare match window in ms
+    std::string cmpXml;           // --xml <file>: compare writes its annotated capture there after the run
     bool cmpMulti = false;        // --multi: start the compare in diff-off "multi" mode
     bool cmpRaw = false;          // --raw: start the compare with normalize OFF (raw per-piece frames)
     bool cmpOnlyDiff = false;     // --only-diff: compare view starts filtered to divergences only
@@ -5627,6 +5630,17 @@ int main(int argc, char** argv)
             // only consume the next token if it's a number, so `--grace --multi` keeps the default (no flag-eating)
             if (i + 1 < argc && isdigit((unsigned char)argv[i + 1][0])) cmpGrace = std::atoi(argv[++i]);
         }
+        else if (a == "--xml" || a.rfind("--xml=", 0) == 0)
+        {
+            if (a.size() > 5) cmpXml = a.substr(6);
+            else if (i + 1 < argc && argv[i + 1][0] != '-') cmpXml = argv[++i];
+            if (cmpXml.empty())
+            {
+                std::fprintf(stderr, "--xml needs a file\n");
+                socketCleanup();
+                return 2;
+            }
+        }
         else if (a == "--multi")
             cmpMulti = true; // start the compare in diff-off "multi" mode
         else if (a == "--raw")
@@ -5723,6 +5737,12 @@ int main(int argc, char** argv)
         return 1;
     }
     pos.insert(pos.end(), early.begin(), early.end());
+    if (!cmpXml.empty() && !(pos.size() >= 2 && pos[1] == "compare"))
+    {
+        std::fprintf(stderr, "--xml is for gm|bm compare only\n");
+        socketCleanup();
+        return 2;
+    }
 
     // --ws-path: only `con` without a <pa> and without -D uses it; `help` still prints the usage.
     const bool wsCon = pos.size() == 1 && (pos[0] == "con" || pos[0] == "console");
@@ -7226,6 +7246,7 @@ int main(int argc, char** argv)
             return 2;
         }
         ftc::Compare cmp(g_term, g_theme, g_tpl, g_i18n);
+        if (!cmpXml.empty()) cmp.xmlOut(cmpXml);
         const int rc = cmp.run(isBus ? ftc::Monitor::Mode::Bus : ftc::Monitor::Mode::Group, ip, port, ipB, port,
                                quiet, verbose, monFrames, monSeconds, cmpGrace, !cmpMulti, !cmpRaw,
                                cmpOnlyDiff, cmpCollapse, cmpMarkers, cmpSkew, &g_abort);

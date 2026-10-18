@@ -51,10 +51,14 @@ class Compare
     Compare(Term& term, Theme& theme, Tpl& tpl, I18n& i18n) : _t(term), _c(theme), _p(tpl), _i(i18n),
                                                               _A(term, theme, tpl, i18n), _B(term, theme, tpl, i18n) {}
 
+    /** @brief Write the annotated capture to @p path when the run ends (after the drain), for offline analysis. */
+    void xmlOut(const std::string& path) { _xmlPath = path; }
+
     /**
      * @brief Run the compare/multi view until @p abort, @p maxFrames or @p maxSeconds (0 = unlimited).
-     * @return 0 identical · 2 divergent · 1 a tunnel could not be opened · 130 Ctrl+C.
+     * @return 0 identical · 2 divergent · 1 no tunnel, nothing compared or --xml not written · 130 Ctrl+C.
      */
+
     int run(Monitor::Mode mode, const std::string& ipA, uint16_t portA, const std::string& ipB, uint16_t portB,
             bool quiet, bool verbose, int maxFrames, int maxSeconds, int graceMs, bool diffOn, bool normalize,
             bool onlyDiff, bool collapse, bool markers, bool skew, const volatile std::sig_atomic_t* abort)
@@ -119,6 +123,7 @@ class Compare
         // The other side may still be delivering the partner of a frame from the last moments: keep both
         // tunnels open for one grace window. A frame captured after the stop only pairs, it is not counted.
         _stopMs = detail::nowMs();
+        _stopWall = Monitor::wallClock();
         if (_diffOn && !aborted) // Ctrl+C means leave now; a second one would kill the tunnels unclosed
         {
             _draining = true;
@@ -135,6 +140,12 @@ class Compare
         processInbox(tail);
         normFlushAll(tail); // flush any bytes still in the reassembly accumulators (tagged, never dropped)
         expireHolding(tail, detail::nowMs() + (uint64_t)_graceMs + 1);
+        for (int s = 0; s < 2; ++s)
+        {
+            for (const auto& f : _late[s])
+                annAfterStop(s, f);
+            _late[s].clear();
+        }
         collapseFlush(tail); // emit the final collapse run
         if (_render)
         {
@@ -143,7 +154,18 @@ class Compare
                 std::printf("%s\n", l.c_str());
         }
 
-        const int rc = finish(mode, aborted, userStop);
+        int rc = finish(mode, aborted, userStop);
+        if (!_xmlPath.empty())
+        {
+            const std::string w = saveXml(mode, _xmlPath);
+            if (w.empty())
+            {
+                std::fprintf(stderr, "compare: cannot write %s\n", _xmlPath.c_str());
+                if (rc == 0) rc = 1; // the capture was asked for and is missing
+            }
+            else if (!_quiet)
+                _p.status(Tpl::Stat::Ok, _i.tr("capture saved", "Aufzeichnung gespeichert"), {w});
+        }
         _A.closeTunnel();
         _B.closeTunnel();
         return rc;
@@ -178,16 +200,33 @@ class Compare
         }
     }
 
-    /** @brief Could @p side's peer have seen a frame captured at @p ms? It must have been up for the whole grace window. */
-    bool comparable(int side, uint64_t ms) const
+    /**
+     * @brief Is the unmatched frame @p f of @p side a real one-sided frame? The peer must have been up for the whole
+     *        grace window to see it. A fragment (an incomplete reassembly or a lone acknowledge) close to a gap of
+     *        @p side itself is not one either: that side joined or left in the middle of a telegram. A complete
+     *        telegram there still counts, so a frame the peer really missed is never hidden.
+     */
+    bool comparable(int side, const MonFrame& f) const
     {
-        const uint64_t g = (uint64_t)_graceMs;
-        for (const auto& gap : _gaps[side ^ 1])
+        const bool fragment = f.key.rfind("INC:", 0) == 0 || byteLen(f.raw) <= 1;
+        for (int s = 0; s < 2; ++s)
         {
-            const uint64_t to = gap.second != 0 ? gap.second : UINT64_MAX;
-            if (gap.first <= ms + g && (to == UINT64_MAX || to + g >= ms)) return false;
+            if (s == side && !fragment) continue;
+            if (inGap(s, f.ms)) return false;
         }
         return true;
+    }
+
+    /** @brief True when @p ms lies within the grace window of a time @p s was not connected. */
+    bool inGap(int s, uint64_t ms) const
+    {
+        const uint64_t g = (uint64_t)_graceMs;
+        for (const auto& gap : _gaps[s])
+        {
+            const uint64_t to = gap.second != 0 ? gap.second : UINT64_MAX;
+            if (gap.first <= ms + g && (to == UINT64_MAX || to + g >= ms)) return true;
+        }
+        return false;
     }
 
     /** @brief Note when a side goes down or comes back. */
@@ -276,6 +315,7 @@ class Compare
 
     std::vector<std::pair<int, MonFrame>> _inbox; // side (0/1) + frame, filled by the sinks
     std::deque<Held> _hold[2];                    // per-side unmatched frames awaiting a partner
+    std::deque<MonFrame> _late[2];                // per-side drain frames without a partner, until the teardown
     std::unordered_map<std::string, std::pair<uint32_t, uint32_t>> _keyCount; // key -> (A count, B count)
     std::vector<Ann> _ann;                        // annotated capture for XML
     bool _keyCntWarned = false, _holdWarned = false, _annWarned = false;
@@ -302,6 +342,8 @@ class Compare
     uint64_t _notCmp[2] = {0, 0}; // unmatched frames seen while the other side could not see them
     bool _draining = false;       // after the stop: frames still arrive, but only as partners
     uint64_t _stopMs = 0;         // end of the comparison window
+    std::string _stopWall;        // the same instant as wall-clock text, for the XML
+    std::string _xmlPath;         // --xml: write the annotated capture here after the run
 
     /** @brief Per-service divergence tally for the summary breakdown (sums to the counter totals). */
     struct Svc { uint64_t onlyA = 0, onlyB = 0, mismatch = 0, integ = 0, ack = 0, notrep = 0; };
@@ -422,7 +464,7 @@ class Compare
     }
 
     /** @brief Diff / display one (already whole) frame: count it, then match (compare) or stream it (multi).
-     *  @return false for a frame from after the stop that found no partner: it is dropped, not counted. */
+     *  @return false for a frame from after the stop that found no partner: it waits in _late, not counted. */
     bool handleFrame(int side, const MonFrame& f, std::vector<std::string>& out)
     {
         if (_draining && _diffOn && f.ms > _stopMs)
@@ -440,6 +482,13 @@ class Compare
                     classifyMatched(side, side == 0 ? f : partner, side == 0 ? partner : f, out);
                     return true;
                 }
+            // Kept until the teardown: a window copy delivered later (pending ACK, reassembly) still pairs with it.
+            if (_late[side].size() >= HOLD_MAX)
+            {
+                annAfterStop(side, _late[side].front());
+                _late[side].pop_front();
+            }
+            _late[side].push_back(f);
             return false;
         }
         (side == 0 ? _seenA : _seenB)++;
@@ -466,8 +515,35 @@ class Compare
                 return true;
             }
         }
+        for (auto it = _late[other].begin(); it != _late[other].end(); ++it)
+        {
+            // the other side's copy came after the stop but was handled first; within grace of each other only
+            const uint64_t dt = it->ms > f.ms ? it->ms - f.ms : f.ms - it->ms;
+            if (it->key == f.key && dt <= (uint64_t)_graceMs)
+            {
+                const MonFrame partner = *it;
+                _late[other].erase(it);
+                (other == 0 ? _seenA : _seenB)++;
+                _total++;
+                bumpKeyCount(other, partner.key);
+                if (partner.key.rfind("INC:", 0) == 0) _normIncomplete[other]++; // emitIncomplete did not count it
+                classifyMatched(side, side == 0 ? f : partner, side == 0 ? partner : f, out);
+                return true;
+            }
+        }
         holdPush(side, f);
         return true;
+    }
+
+    /** @brief Capture a drain frame that found no partner as diff="afterStop"; it is not counted. */
+    void annAfterStop(int side, const MonFrame& f)
+    {
+        if (_ann.size() >= ANN_MAX) return;
+        Ann a;
+        a.f = f;
+        a.seenBy = side == 0 ? "A" : "B";
+        a.diff = "afterStop";
+        _ann.push_back(a);
     }
 
     /**
@@ -794,7 +870,7 @@ class Compare
     /** @brief An unmatched, expired frame: mismatch if the other side ever saw this key, else only-X. */
     void classifyUnmatched(std::vector<std::string>& out, int side, const MonFrame& f)
     {
-        if (!comparable(side, f.ms)) // the other side was connecting or down: it could not have seen it
+        if (!comparable(side, f)) // a side was connecting or down: the frame cannot be compared
         {
             auto kc = _keyCount.find(f.key); // it must not make a later lone frame of the other side a count mismatch
             if (kc != _keyCount.end())
@@ -908,7 +984,7 @@ class Compare
     {
         const uint8_t reasm = hasB ? std::max(a.reasm, b.reasm) : a.reasm; // reassembly on EITHER side is notable
         std::string sfx = markerSuffix(a, edge, reasm) + (hasB ? skewSuffix(a, b) : std::string());
-        if (k == NotComparable) sfx += _c.dim(_i.tr(" (other side down)", " (Gegenseite getrennt)"));
+        if (k == NotComparable) sfx += _c.dim(_i.tr(" (connection gap)", " (Verbindungslücke)"));
         renderFrame(out, k, side, a, sfx);
         if (hasB && k != Common) out.push_back(metaDetailLine(k, a, b));
     }
@@ -1456,7 +1532,7 @@ class Compare
             {std::to_string(_ackMismatch), _i.tr("ack≠", "Quitt≠"), _ackMismatch ? 'r' : 'd'},
             {std::to_string(_notReported), _i.tr("n/r", "n.g."), _notReported ? 'o' : 'd'},
             {std::to_string(_lost[0] + _lost[1]), _i.tr("lost", "verlor."), (_lost[0] + _lost[1]) ? 'o' : 'd'},
-            {std::to_string(_notCmp[0] + _notCmp[1]), _i.tr("side down", "getrennt"), 'd'}};
+            {std::to_string(_notCmp[0] + _notCmp[1]), _i.tr("gap", "Lücke"), 'd'}};
         std::string s = "  ";
         for (size_t i = 0; i < cells.size(); ++i)
         {
@@ -1589,8 +1665,8 @@ class Compare
                                   "Lesbarkeit: f nur Abweichungen · c Gleiche bündeln · m Marker (Wiederh./zusammengesetzt/Rand) · t Zeitversatz"));
                     _p.note(_i.tr("fidelity classes: content only-A/B + count≠ · integ≠ (F/B/P) · ack≠ (ACK/NAK/BUSY) · n/r not-comparable · lost",
                                   "Treue-Klassen: Inhalt nur-A/B + Anzahl≠ · Integr≠ (F/B/P) · Quitt≠ (ACK/NAK/BUSY) · n.g. nicht vergleichbar · verloren"));
-                    _p.note(_i.tr("side down: seen while the other side was not connected - shown dimmed, not a difference",
-                                  "getrennt: gesehen, während die andere Seite nicht verbunden war - gedimmt, keine Abweichung"));
+                    _p.note(_i.tr("gap: no partner while the other side was not connected, or a fragment at its own side's gap - shown dimmed, not a difference",
+                                  "Lücke: ohne Partner, während die Gegenseite nicht verbunden war, oder ein Bruchstück an der eigenen Lücke - gedimmt, keine Abweichung"));
                     _footLines = 0;
                     break;
                 default: break;
@@ -1632,7 +1708,7 @@ class Compare
     /*********************************************************************
      *************************** XML EXPORT ******************************
      ********************************************************************/
-    std::string saveXml(Monitor::Mode mode)
+    std::string saveXml(Monitor::Mode mode, const std::string& forcePath = std::string())
     {
         const char* mstr = mode == Monitor::Mode::Bus ? "bm" : "gm";
         const char* kind = _diffOn ? "compare" : "multi";
@@ -1640,13 +1716,16 @@ class Compare
         const char* result = !_diffOn ? "MULTI" : nothingCompared() ? "INCOMPARABLE" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
         const std::string fname = std::string("oknx-") + mstr + "-" + kind + "_" + Monitor::safeIp(_ipA) + "_" +
                                   Monitor::safeIp(_ipB) + "_" + Monitor::stamp() + ".xml";
-        const std::string path = (std::filesystem::path(Monitor::exportDir()) / fname).string();
+        const std::string path =
+            forcePath.empty() ? (std::filesystem::path(Monitor::exportDir()) / fname).string() : forcePath;
         std::FILE* fp = std::fopen(path.c_str(), "wb");
         if (!fp) return "";
         std::fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         std::fprintf(fp, "<compare mode=\"%s\" kind=\"%s\" grace=\"%d\" normalize=\"%s\" result=\"%s\" divergences=\"%llu\"\n",
                      mstr, kind, _graceMs, (mode == Monitor::Mode::Bus && _normalize) ? "on" : "off", result,
                      (unsigned long long)div);
+        if (!_stopWall.empty())
+            std::fprintf(fp, "         stop=\"%s\" drainMs=\"%d\"\n", _stopWall.c_str(), _draining ? _graceMs : 0);
         std::fprintf(fp, "         ifaceA=\"%s\" paA=\"%s\" ifaceB=\"%s\" paB=\"%s\"\n",
                      Monitor::xmlEsc(_ipA).c_str(), Tpl::pa(_A.assignedPA()).c_str(),
                      Monitor::xmlEsc(_ipB).c_str(), Tpl::pa(_B.assignedPA()).c_str());
@@ -1678,7 +1757,8 @@ class Compare
             std::fprintf(fp, "%s\n", Monitor::telegramXml(a.f, extra).c_str());
         }
         std::fprintf(fp, "</compare>\n");
-        std::fclose(fp);
+        const bool bad = std::ferror(fp) != 0;
+        if (std::fclose(fp) != 0 || bad) return ""; // a full disk must not pass for a complete capture
         return path;
     }
 
@@ -1760,9 +1840,9 @@ class Compare
         if (_diffOn && div > 0) breakdown();
         if (_diffOn && _notCmp[0] + _notCmp[1] > 0)
             _p.status(Tpl::Stat::Info,
-                      std::to_string(_notCmp[0] + _notCmp[1]) + " " + _i.tr("seen with the other side down", "bei getrennter Gegenseite"),
-                      {_i.tr("the other side was not connected then; not counted as a difference",
-                             "die andere Seite war da nicht verbunden; zählt nicht als Abweichung")});
+                      std::to_string(_notCmp[0] + _notCmp[1]) + " " + _i.tr("at a connection gap", "an einer Verbindungslücke"),
+                      {_i.tr("a side was not connected close to them; not counted as a difference",
+                             "eine Seite war kurz davor oder danach nicht verbunden; zählt nicht als Abweichung")});
         reliabilityHint();
         if (aborted)
             _p.status(Tpl::Stat::Warn, _i.tr("Ctrl+C — disconnecting cleanly", "Ctrl+C — sauber abgemeldet"));

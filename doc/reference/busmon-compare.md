@@ -39,7 +39,8 @@ oknx -i 11.11.0.210 5.0.3 perf 30 fast
 ```
 
 Options: `--grace <ms>` (match window, default 750) · `--raw` (start with normalize OFF) ·
-`--multi` (two-stream, no diff) · `--seconds N` / `--frames N` (stop after N, scriptable) · `-q` (TSV, no TUI).
+`--multi` (two-stream, no diff) · `--seconds N` / `--frames N` (stop after N, scriptable) · `-q` (TSV, no TUI) ·
+`--xml <file>` (the annotated capture after the run, see §8).
 
 Live keys: **`v`** layout (mix/side/stack) · **`d`** compare↔multi · **`n`** normalize on/off ·
 **`f`** only-divergences · **`c`** collapse · **`m`** markers · **`t`** time-skew (see §7) ·
@@ -86,17 +87,21 @@ metadata is **not** `common`, it is its specific class):
 | `ackMismatch` | ACK-Abweichung | same telegram, different L2 acknowledge (A=ACK / B=NAK, etc.) | the two busmons disagree on the bus acknowledge |
 | `notReported` | nicht gemeldet | a metadata dimension is **not comparable** because one side does not emit it | honesty: unknown is never counted as agreement |
 | `lostA` / `lostB` | verloren A/B | a side's 0x03 status flagged **Lost** (it knows it dropped data) | a receiver admitting a loss |
-| `notComparableA` / `notComparableB` | Gegenseite getrennt A/B | seen while the **other** side was not connected (B still connecting at the start, a side reconnecting mid-run or after `r`), within `--grace` of that time; shown dimmed as "(Gegenseite getrennt)" | not a difference: counted apart, never in `onlyA/onlyB`, never in the result |
+| `notComparableA` / `notComparableB` | Verbindungslücke A/B | no partner, and within `--grace` of a moment when the other side was not connected (B still connecting at the start, a reconnect mid-run or after `r`), or a fragment close to a gap of its own side; shown dimmed as "(Verbindungslücke)" | not a difference: counted apart, never in `onlyA/onlyB`, never in the result |
 | `incompleteA` / `incompleteB` | unvollständig A/B | pieces that could **not** be reassembled into a whole telegram, surfaced **tagged** | usually a capture-window edge (see §5) — never merged, never equated |
 
 A telegram without a partner counts as `onlyA`/`onlyB` only when the other side was connected from `--grace`
 before to `--grace` after it. B connects after A, so the first moments of a run and every reconnect are
-excused this way; the result line carries the counts at its end. A drop counts from the moment it is
+excused this way. A fragment (an incomplete reassembly or a lone acknowledge octet) is also excused close to a gap
+of its **own** side, which joined or left in the middle of a telegram; a complete telegram there still counts, so a
+telegram the other side really missed is never hidden. With `--raw` a continuation piece is not a fragment in this
+sense, so a piece cut by a join still counts. The result line carries the counts at its end. A drop counts from the moment it is
 detected (a failed tick or keep-alive), so telegrams lost between the real drop and its detection stay
 `onlyA`/`onlyB`. A reassembled telegram carries the receive time of its first piece. In compare mode (not
 `--multi`, not after Ctrl+C) both tunnels stay open for one more `--grace` after the stop: a telegram received
-then only completes a pair with one from inside the window and is not counted on its own; a side that is down
-then is not reconnected.
+then only completes a pair with one from inside the window and is not counted on its own. It waits until the
+teardown, so a copy from inside the window that is delivered later (a busmon telegram held for its acknowledge, the
+last piece of a reassembly) still finds it when the two were received within `--grace` of each other. A side that is down then is not reconnected.
 
 **Reading rule of thumb:**
 - Only a few `onlyA/onlyB` and `incomplete*` at the window edges, everything else `common`, and
@@ -195,22 +200,28 @@ Two summary aids are shown automatically (not under `-q`):
 
 ---
 
-## 8. XML export (`l`)
+## 8. XML export (`l`, `--xml <file>`)
 
-`l` saves the whole run to `oknx-<mode>-<compare|multi>_<ipA>_<ipB>_<YYYYMMDD-HHMMSS>.xml` — ETS-telegram
-shape plus the compare annotation, for offline analysis:
+`l` saves the run so far to `oknx-<mode>-<compare|multi>_<ipA>_<ipB>_<YYYYMMDD-HHMMSS>.xml`; `--xml <file>` writes
+the whole run to that file when it ends, after the drain, also without a terminal. ETS-telegram shape plus the
+compare annotation, for offline analysis:
 
 ```xml
-<compare mode="bm" result="DIVERGENT" divergences="…" ifaceA="…" ifaceB="…" statusA="yes" ackA="yes" …>
+<compare mode="bm" result="DIVERGENT" divergences="…" stop="HH:MM:SS.mmm" drainMs="750|0" ifaceA="…" ifaceB="…" …>
   <counters common="…" onlyA="…" onlyB="…" integrityMismatch="…" ackMismatch="…" notReported="…"
             lostA="…" lostB="…" incompleteA="…" incompleteB="…" notComparableA="…" notComparableB="…"/>
   <telegram time="…" frameFormat="STD|EXT" source="…" destination="…" raw="…"
-            seenBy="AB|A|B" diff="common|onlyA|onlyB|integrityMismatch|ackMismatch|notReported|notComparable|incomplete"
+            seenBy="AB|A|B" diff="common|onlyA|onlyB|mismatch|integrityMismatch|ackMismatch|notReported|notComparable|afterStop|incomplete"
             statusA="F0B0P0" ackA="ACK" statusB="F0B0P0" ackB="ACK"/>
 </compare>
 ```
 
-The `<telegram>` shape stays ETS-readable; the `seenBy`/`diff`/`statusX`/`ackX` attributes are the compare
+`diff="afterStop"` is a telegram received in the drain after the stop that found no partner inside the window:
+usually both copies of a telegram that came after the stop (two entries, one per side), rarely one whose partner had
+already expired or never came. It is never counted, so a consumer counting telegrams must filter on `diff`: a pair is
+one entry (`seenBy="AB"`), every other frame one entry of its own, up to the capture capacity below. `drainMs` is 0
+when no drain ran (Ctrl+C, `--multi`). `--xml` overwrites an existing file; if the file cannot be written
+completely, compare says so on stderr and an exit code 0 becomes 1, every other exit code stays. The `<telegram>` shape stays ETS-readable; the `seenBy`/`diff`/`statusX`/`ackX` attributes are the compare
 overlay. The result/field names stay stable English tokens even under `--lang de` (machine interface).
 
 **Capture capacity:** the whole run is buffered in host RAM up to **100 000 frames** (≈ 30 MB) — enough for
