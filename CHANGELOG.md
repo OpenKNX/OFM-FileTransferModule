@@ -1,6 +1,13 @@
 # Changes
 
 
+## 2026-10-18 -- compare counts a telegram as lost only when the other side could see it
+
+* Fix: `oknx gm|bm compare` counted a telegram as `onlyA` while B was still connecting: A opens first, B after it, and a cyclic telegram in that time turned two identical monitors into DIVERGENT. A telegram without a partner now counts as `onlyA`/`onlyB` only when the other side was connected from `--grace` before to `--grace` after it; otherwise it is `notComparable`, shown dimmed with "(Gegenseite getrennt)" and kept out of the result. The same applies around a reconnect mid-run or with the `r` key, counted from when the drop is detected. A reassembled telegram now carries the receive time of its first piece, not the time it was completed
+* At the stop both tunnels stay open for one more `--grace` in compare mode (not with `--multi`, not after Ctrl+C), so the partner of a telegram from the last moments can still arrive; a telegram received after the stop only completes a pair and is not counted on its own
+* The result line keeps its fields and ends with `notComparableA=` and `notComparableB=`; the XML counters carry the same two. When nothing was compared, because B never connected or every telegram fell into a time a side was down, the result is `INCOMPARABLE` with exit code 1; before, every telegram of A counted as `onlyA`
+
+
 ## 2026-10-18 -- setpa waits for the button and assigns by serial number
 
 * `setpa <x.y.z>` waits until exactly one device is in programming mode, asking once a second as 03_05_02 2.3 p.14 asks, and says so: on a terminal until Ctrl+C or `--wait <time>`, in a script or with `-q` for `--wait <time>`, otherwise one look of 1 s (before: one look of 2.5 s). After a wait of more than 5 s the address is checked again before it is written

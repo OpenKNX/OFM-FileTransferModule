@@ -91,6 +91,7 @@ class Compare
         _connecting[1] = false;
         _retryAt[1] = detail::nowMs();
         _backoff[1] = 500;
+        _gaps[1].push_back({0, 0}); // B cannot see anything until its tunnel is up
 
         if (!_quiet) banner(mode);
 
@@ -112,30 +113,17 @@ class Compare
             if (maxSeconds > 0 && (int)((detail::nowMs() - start) / 1000) >= maxSeconds) break;
             if (maxFrames > 0 && _total >= (uint64_t)maxFrames) break;
 
-            serviceSide(0, mode, abort, start, maxSeconds);
-            serviceSide(1, mode, abort, start, maxSeconds);
+            step(mode, abort, start, maxSeconds);
+        }
 
-            std::vector<std::string> out;
-            processInbox(out);
-            normFlushStale(detail::nowMs(), out); // surface a lost reassembly tail after its burst ended
-            expireHolding(out, detail::nowMs());
-            collapseTick(out, detail::nowMs()); // flush a settled collapse run so it appears promptly
-
-            if (_render)
-            {
-                const uint64_t sinceDraw = detail::nowMs() - _lastDraw;
-                const bool due = !out.empty() || sinceDraw >= 500 ||
-                                 ((reasmPending(0) || reasmPending(1)) && sinceDraw >= 200);
-                if (due)
-                {
-                    footerClear();
-                    for (const auto& l : out)
-                        std::printf("%s\n", l.c_str());
-                    drawFooter(mode);
-                    _lastDraw = detail::nowMs();
-                    std::fflush(stdout);
-                }
-            }
+        // The other side may still be delivering the partner of a frame from the last moments: keep both
+        // tunnels open for one grace window. A frame captured after the stop only pairs, it is not counted.
+        _stopMs = detail::nowMs();
+        if (_diffOn && !aborted) // Ctrl+C means leave now; a second one would kill the tunnels unclosed
+        {
+            _draining = true;
+            while (detail::nowMs() - _stopMs < (uint64_t)_graceMs)
+                step(mode, nullptr, start, maxSeconds);
         }
 
         // Teardown: flush each side's still-pending busmon telegram INTO the inbox FIRST, then drain + grace it out,
@@ -162,6 +150,60 @@ class Compare
     }
 
   private:
+    /** @brief One pass of the capture loop: pump both sides, match, expire, draw. */
+    void step(Monitor::Mode mode, const volatile std::sig_atomic_t* abort, uint64_t start, int maxSeconds)
+    {
+        serviceSide(0, mode, abort, start, maxSeconds);
+        serviceSide(1, mode, abort, start, maxSeconds);
+
+        std::vector<std::string> out;
+        processInbox(out);
+        normFlushStale(detail::nowMs(), out); // surface a lost reassembly tail after its burst ended
+        expireHolding(out, detail::nowMs());
+        collapseTick(out, detail::nowMs()); // flush a settled collapse run so it appears promptly
+
+        if (_render)
+        {
+            const uint64_t sinceDraw = detail::nowMs() - _lastDraw;
+            const bool due = !out.empty() || sinceDraw >= 500 || ((reasmPending(0) || reasmPending(1)) && sinceDraw >= 200);
+            if (due)
+            {
+                footerClear();
+                for (const auto& l : out)
+                    std::printf("%s\n", l.c_str());
+                drawFooter(mode);
+                _lastDraw = detail::nowMs();
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    /** @brief Could @p side's peer have seen a frame captured at @p ms? It must have been up for the whole grace window. */
+    bool comparable(int side, uint64_t ms) const
+    {
+        const uint64_t g = (uint64_t)_graceMs;
+        for (const auto& gap : _gaps[side ^ 1])
+        {
+            const uint64_t to = gap.second != 0 ? gap.second : UINT64_MAX;
+            if (gap.first <= ms + g && (to == UINT64_MAX || to + g >= ms)) return false;
+        }
+        return true;
+    }
+
+    /** @brief Note when a side goes down or comes back. */
+    void gapOpen(int side)
+    {
+        if (!_gaps[side].empty() && _gaps[side].back().second == 0) return;
+        if (_gaps[side].size() >= GAPS_MAX) // a flapping tunnel: widen the last gap instead of growing the list
+            _gaps[side].back().second = 0;
+        else
+            _gaps[side].push_back({detail::nowMs(), 0});
+    }
+    void gapClose(int side)
+    {
+        if (!_gaps[side].empty() && _gaps[side].back().second == 0) _gaps[side].back().second = detail::nowMs();
+    }
+
     /*********************************************************************
      ******************************* STATE *******************************
      ********************************************************************/
@@ -177,6 +219,9 @@ class Compare
         std::vector<uint8_t> acc;    ///< bytes of the telegram currently being reassembled
         uint64_t lastMs = 0;         ///< last append time (stall detection)
         uint64_t startMs = 0;        ///< when the current accumulation began (live "reassembling…" placeholder)
+        uint64_t firstMs = 0;        ///< receive time of the first piece: the time the reassembled telegram carries
+        uint64_t pieceMs = 0;        ///< receive time of the latest piece (a leftover head starts there)
+        std::string firstTime, pieceTime; ///< the same two moments as wall-clock text, for the display
         bool haveSeq = false;        ///< a prior indication set an expected next sequence number
         uint8_t expSeq = 0;          ///< the sequence the next indication must carry to continue the chain
         // integrity / ack carried onto the reassembled whole (all-stat AND · F/B/P OR · completing piece's ack):
@@ -194,7 +239,8 @@ class Compare
         Mismatch,          ///< same content, different capture count (content multiset imbalance)
         IntegrityMismatch, ///< same content, sides disagree on the 0x03 F/B/P error flags
         AckMismatch,       ///< same content, sides disagree on the L2 acknowledge (ACK/NAK/BUSY/none)
-        NotReported        ///< same content, a metadata dimension is not comparable (a side did not report it)
+        NotReported,       ///< same content, a metadata dimension is not comparable (a side did not report it)
+        NotComparable      ///< seen on one side while the other side was not connected - neither common nor a loss
     };
 
     struct Held
@@ -249,6 +295,13 @@ class Compare
     uint64_t _startMs = 0;     // capture start (edge window + short-capture hint)
     bool _tearing = false;     // teardown flush in progress (its frames are late-edge)
     bool _reconnected = false; // a live tunnel dropped + reconnected mid-run (reliability hint)
+    // Per side, the times it was NOT connected: [from, to), to = 0 while still down. B starts down: it connects
+    // after A. A frame without a partner is a loss only if the other side was up from f.ms - grace to f.ms + grace.
+    static constexpr size_t GAPS_MAX = 4096;
+    std::vector<std::pair<uint64_t, uint64_t>> _gaps[2];
+    uint64_t _notCmp[2] = {0, 0}; // unmatched frames seen while the other side could not see them
+    bool _draining = false;       // after the stop: frames still arrive, but only as partners
+    uint64_t _stopMs = 0;         // end of the comparison window
 
     /** @brief Per-service divergence tally for the summary breakdown (sums to the counter totals). */
     struct Svc { uint64_t onlyA = 0, onlyB = 0, mismatch = 0, integ = 0, ack = 0, notrep = 0; };
@@ -291,6 +344,7 @@ class Compare
         if (_down[side])
         {
             if (abort && *abort) return;
+            if (_draining) return; // after the stop: a side that comes back now compares nothing
             std::string err;
             if (!_connecting[side]) // between attempts: honour the backoff, then FIRE a request and return
             {
@@ -308,6 +362,7 @@ class Compare
             if (r == 1)
             {
                 _down[side] = _connecting[side] = false;
+                gapClose(side);
                 _backoff[side] = 500;
                 if (_render)
                 {
@@ -327,6 +382,7 @@ class Compare
         if (!m.tick(mode))
         {
             _down[side] = true;
+            gapOpen(side);
             _connecting[side] = false;
             _retryAt[side] = detail::nowMs() + 500;
             _backoff[side] = 500;
@@ -365,16 +421,34 @@ class Compare
         _inbox.clear();
     }
 
-    /** @brief Diff / display one (already whole) frame: count it, then match (compare) or stream it (multi). */
-    void handleFrame(int side, const MonFrame& f, std::vector<std::string>& out)
+    /** @brief Diff / display one (already whole) frame: count it, then match (compare) or stream it (multi).
+     *  @return false for a frame from after the stop that found no partner: it is dropped, not counted. */
+    bool handleFrame(int side, const MonFrame& f, std::vector<std::string>& out)
     {
+        if (_draining && _diffOn && f.ms > _stopMs)
+        {
+            // Outside the window: it may only complete a pair with a frame from inside it.
+            const int other = side ^ 1;
+            for (auto it = _hold[other].begin(); it != _hold[other].end(); ++it)
+                if (it->f.key == f.key)
+                {
+                    (side == 0 ? _seenA : _seenB)++;
+                    _total++;
+                    bumpKeyCount(side, f.key);
+                    const MonFrame partner = it->f;
+                    _hold[other].erase(it);
+                    classifyMatched(side, side == 0 ? f : partner, side == 0 ? partner : f, out);
+                    return true;
+                }
+            return false;
+        }
         (side == 0 ? _seenA : _seenB)++;
         _total++;
 
         if (!_diffOn) // multi: no correlation, colour hints the source only
         {
             render(out, side == 0 ? OnlyA : OnlyB, side, f, /*multi=*/true);
-            return;
+            return true;
         }
 
         bumpKeyCount(side, f.key);
@@ -389,10 +463,11 @@ class Compare
                 const MonFrame& a = side == 0 ? f : partner;
                 const MonFrame& b = side == 0 ? partner : f;
                 classifyMatched(side, a, b, out);
-                return;
+                return true;
             }
         }
         holdPush(side, f);
+        return true;
     }
 
     /**
@@ -517,7 +592,14 @@ class Compare
     /** @brief Append a piece: accumulate its integrity (all-stat AND · F/B/P OR · this piece's ack) + bytes. */
     void accAppend(NormAcc& na, const MonFrame& f)
     {
-        if (na.acc.empty()) na.startMs = detail::nowMs(); // a fresh accumulation begins
+        if (na.acc.empty()) // a fresh accumulation begins
+        {
+            na.startMs = detail::nowMs();
+            na.firstMs = f.ms;
+            na.firstTime = f.time;
+        }
+        na.pieceMs = f.ms;
+        na.pieceTime = f.time;
         if (!na.accInit)
         {
             na.accInit = true;
@@ -555,6 +637,11 @@ class Compare
                 emitWhole(side, acc.data(), exp, na, out);
                 acc.erase(acc.begin(), acc.begin() + exp); // leftover may hold the head of the next telegram
                 if (acc.empty()) na.accInit = false;       // reset the integrity accumulator for the next telegram
+                else // the leftover head came with the latest piece
+                {
+                    na.firstMs = na.pieceMs;
+                    na.firstTime = na.pieceTime;
+                }
                 continue;
             }
             // FCS fails at the EXACT header length -> a real content/framing anomaly (never a packaging artifact,
@@ -614,6 +701,11 @@ class Compare
         w.hasAck = true;
         w.acked = (na.accAck == 1);
         w.reasm = na.accPieces > 255 ? 255 : (uint8_t)na.accPieces;
+        if (na.firstMs != 0) // received then, not when the last piece completed it
+        {
+            w.ms = na.firstMs;
+            if (!na.firstTime.empty()) w.time = na.firstTime;
+        }
         handleFrame(side, w, out);
     }
 
@@ -621,16 +713,15 @@ class Compare
     void emitIncomplete(int side, const std::vector<uint8_t>& bytes, std::vector<std::string>& out)
     {
         if (bytes.empty()) return;
-        _normIncomplete[side]++;
         MonFrame w;
         w.bus = true;
-        w.ms = detail::nowMs();
-        w.time = Monitor::wallClock();
+        w.ms = _norm[side].firstMs != 0 ? _norm[side].firstMs : detail::nowMs();
+        w.time = !_norm[side].firstTime.empty() ? _norm[side].firstTime : Monitor::wallClock();
         w.raw = bytesToHex(bytes.data(), (int)bytes.size());
         w.body = _i.tr("‹reassembly incomplete›", "‹Reassemblierung unvollständig›");
         w.key = "INC:" + w.raw; // matches an identical incomplete on the other side, never a real telegram
         w.hasAck = false;
-        handleFrame(side, w, out);
+        if (handleFrame(side, w, out)) _normIncomplete[side]++; // counted only where the frame itself is
     }
 
     /** @brief Header-derived total telegram length -- the shared spec helper (see Monitor.h). */
@@ -703,6 +794,18 @@ class Compare
     /** @brief An unmatched, expired frame: mismatch if the other side ever saw this key, else only-X. */
     void classifyUnmatched(std::vector<std::string>& out, int side, const MonFrame& f)
     {
+        if (!comparable(side, f.ms)) // the other side was connecting or down: it could not have seen it
+        {
+            auto kc = _keyCount.find(f.key); // it must not make a later lone frame of the other side a count mismatch
+            if (kc != _keyCount.end())
+            {
+                uint32_t& c = side == 0 ? kc->second.first : kc->second.second;
+                if (c > 0) c--;
+            }
+            _notCmp[side]++;
+            render(out, NotComparable, side, f, false);
+            return;
+        }
         uint32_t otherCnt = 0;
         auto it = _keyCount.find(f.key);
         if (it != _keyCount.end()) otherCnt = side == 0 ? it->second.second : it->second.first;
@@ -738,7 +841,8 @@ class Compare
                 _footLines = 0;
             }
         }
-        _hold[side].push_back({f, f.ms + (uint64_t)_graceMs});
+        // The window runs from when the frame is handled: a reassembled one carries its first piece's time.
+        _hold[side].push_back({f, std::max(f.ms, detail::nowMs()) + (uint64_t)_graceMs});
     }
 
     void bumpKeyCount(int side, const std::string& key)
@@ -795,7 +899,7 @@ class Compare
             collapseFeed(out, k, side, a, hasB, b, edge);
             return;
         }
-        if (_fltDiv && k == Common) return; // filter: show only non-common frames
+        if (_fltDiv && !isDiv(k)) return; // filter: show only divergences
         renderEvent(out, k, side, a, hasB, b, edge);
     }
 
@@ -803,7 +907,8 @@ class Compare
     void renderEvent(std::vector<std::string>& out, EvKind k, int side, const MonFrame& a, bool hasB, const MonFrame& b, bool edge)
     {
         const uint8_t reasm = hasB ? std::max(a.reasm, b.reasm) : a.reasm; // reassembly on EITHER side is notable
-        const std::string sfx = markerSuffix(a, edge, reasm) + (hasB ? skewSuffix(a, b) : std::string());
+        std::string sfx = markerSuffix(a, edge, reasm) + (hasB ? skewSuffix(a, b) : std::string());
+        if (k == NotComparable) sfx += _c.dim(_i.tr(" (other side down)", " (Gegenseite getrennt)"));
         renderFrame(out, k, side, a, sfx);
         if (hasB && k != Common) out.push_back(metaDetailLine(k, a, b));
     }
@@ -883,7 +988,7 @@ class Compare
      ****************** READABILITY: COLLAPSE RUNS **********************
      ********************************************************************/
     /** @brief Display-severity of a kind (for a collapsed run's colour): common < not-reported < divergence. */
-    static int severity(EvKind k) { return k == Common ? 0 : k == NotReported ? 1 : 2; }
+    static int severity(EvKind k) { return k == Common ? 0 : (k == NotReported || k == NotComparable) ? 1 : 2; }
 
     /** @brief Feed one event into the collapse accumulator; a different content key flushes the held run. */
     void collapseFeed(std::vector<std::string>& out, EvKind k, int side, const MonFrame& a, bool hasB, const MonFrame& b, bool edge)
@@ -932,7 +1037,7 @@ class Compare
     {
         if (!_crun.active) return;
         _crun.active = false;
-        if (_fltDiv && _crun.kind == Common) return;
+        if (_fltDiv && !isDiv(_crun.kind)) return;
         if (_crun.events <= 1)
         {
             renderEvent(out, _crun.kind, _crun.repSide, _crun.a, _crun.hasB, _crun.b, _crun.edge);
@@ -1051,8 +1156,8 @@ class Compare
         const std::string ph = _c.mut(_t.glyph("·", "."));
         const std::string cell = _p.clip(sideCell(k, f) + sfx, half);
         std::string L = ph, R = ph;
-        const bool aSide = bothSides(k) || (k == OnlyA) || (k == Mismatch && side == 0);
-        const bool bSide = bothSides(k) || (k == OnlyB) || (k == Mismatch && side == 1);
+        const bool aSide = bothSides(k) || (k == OnlyA) || ((k == Mismatch || k == NotComparable) && side == 0);
+        const bool bSide = bothSides(k) || (k == OnlyB) || ((k == Mismatch || k == NotComparable) && side == 1);
         if (aSide) L = cell;
         if (bSide) R = cell;
         const std::string sep = isDiv(k) ? _c.red(_t.glyph("│", "|")) : _c.dim(_t.glyph("│", "|"));
@@ -1111,7 +1216,7 @@ class Compare
     /*********************************************************************
      ****************************** COLOURS ******************************
      ********************************************************************/
-    static bool isDiv(EvKind k) { return k != Common; }
+    static bool isDiv(EvKind k) { return k != Common && k != NotComparable; }
     /** @brief Kinds where BOTH sides saw the content (content-matched pair) — metadata is what may differ. */
     static bool bothSides(EvKind k) { return k == Common || k == IntegrityMismatch || k == AckMismatch || k == NotReported; }
     /** @brief The line hue for a kind: content-diff/integrity/ack = red · not-reported = gold · common = dim. */
@@ -1124,7 +1229,7 @@ class Compare
     /** @brief Tint a whole line by kind: common dim · A green · B amber · not-reported gold · mismatch red. */
     std::string tint(EvKind k, const std::string& s)
     {
-        if (k == Common) return _c.dim(s);
+        if (k == Common || k == NotComparable) return _c.dim(s);
         return _p.paint(kindHue(k), s);
     }
 
@@ -1133,6 +1238,7 @@ class Compare
     {
         const std::string dot = _c.dim(_t.glyph("·", "."));
         if (k == Common) return _c.dim("A") + dot + _c.dim("B");
+        if (k == NotComparable) return (side == 0 ? _c.dim("A") : _c.mut(" ")) + dot + (side == 0 ? _c.mut(" ") : _c.dim("B"));
         if (bothSides(k)) // both saw the content; the metadata differs -> both letters in the kind hue
             return _p.paint(kindHue(k), "A") + dot + _p.paint(kindHue(k), "B");
         const bool a = (k == OnlyA) || (k == Mismatch && side == 0);
@@ -1142,6 +1248,7 @@ class Compare
     std::string laneTag(EvKind k, int side)
     {
         if (k == Common) return _c.dim("AB");
+        if (k == NotComparable) return _c.dim(side == 0 ? "A " : " B");
         if (bothSides(k)) return _p.paint(kindHue(k), "AB");
         const bool a = (k == OnlyA) || (k == Mismatch && side == 0);
         return a ? _c.green("A ") : _c.amber(" B");
@@ -1185,6 +1292,7 @@ class Compare
             {
                 case OnlyA: a.seenBy = "A"; a.diff = "onlyA"; break;
                 case OnlyB: a.seenBy = "B"; a.diff = "onlyB"; break;
+                case NotComparable: a.seenBy = side == 0 ? "A" : "B"; a.diff = "notComparable"; break;
                 default: // content count-mismatch
                     a.seenBy = side == 0 ? "A" : "B";
                     a.diff = "mismatch";
@@ -1285,7 +1393,8 @@ class Compare
     void drawFooter(Monitor::Mode mode)
     {
         const uint64_t div = divergences();
-        const std::string chip = _diffOn ? (div == 0 ? _c.chip(_i.tr("IDENTICAL", "Identisch"), 'g')
+        const std::string chip = _diffOn && nothingCompared() ? _c.chip(_i.tr("INCOMPARABLE", "ohne Vergleich"), 'o')
+                                 : _diffOn ? (div == 0 ? _c.chip(_i.tr("IDENTICAL", "Identisch"), 'g')
                                                       : _c.chip(std::string(_i.tr("DIVERGENT ", "Unterschiede ")) + _t.glyph("· ", "* ") + std::to_string(div), 'r'))
                                          : _c.chip(_i.tr("MULTI", "Mehrfach"), 'c');
         std::string segs = _c.dim(mode == Monitor::Mode::Bus ? "busmon" : "groupmon") + _c.dim("  ") +
@@ -1346,7 +1455,8 @@ class Compare
             {std::to_string(_integMismatch), _i.tr("integ≠", "Integr≠"), _integMismatch ? 'r' : 'd'},
             {std::to_string(_ackMismatch), _i.tr("ack≠", "Quitt≠"), _ackMismatch ? 'r' : 'd'},
             {std::to_string(_notReported), _i.tr("n/r", "n.g."), _notReported ? 'o' : 'd'},
-            {std::to_string(_lost[0] + _lost[1]), _i.tr("lost", "verlor."), (_lost[0] + _lost[1]) ? 'o' : 'd'}};
+            {std::to_string(_lost[0] + _lost[1]), _i.tr("lost", "verlor."), (_lost[0] + _lost[1]) ? 'o' : 'd'},
+            {std::to_string(_notCmp[0] + _notCmp[1]), _i.tr("side down", "getrennt"), 'd'}};
         std::string s = "  ";
         for (size_t i = 0; i < cells.size(); ++i)
         {
@@ -1479,6 +1589,8 @@ class Compare
                                   "Lesbarkeit: f nur Abweichungen · c Gleiche bündeln · m Marker (Wiederh./zusammengesetzt/Rand) · t Zeitversatz"));
                     _p.note(_i.tr("fidelity classes: content only-A/B + count≠ · integ≠ (F/B/P) · ack≠ (ACK/NAK/BUSY) · n/r not-comparable · lost",
                                   "Treue-Klassen: Inhalt nur-A/B + Anzahl≠ · Integr≠ (F/B/P) · Quitt≠ (ACK/NAK/BUSY) · n.g. nicht vergleichbar · verloren"));
+                    _p.note(_i.tr("side down: seen while the other side was not connected - shown dimmed, not a difference",
+                                  "getrennt: gesehen, während die andere Seite nicht verbunden war - gedimmt, keine Abweichung"));
                     _footLines = 0;
                     break;
                 default: break;
@@ -1497,6 +1609,7 @@ class Compare
         for (int s = 0; s < 2; ++s)
         {
             (s == 0 ? _A : _B).closeTunnel();
+            gapOpen(s);
             _down[s] = true;
             _connecting[s] = false;
             _retryAt[s] = detail::nowMs();
@@ -1524,7 +1637,7 @@ class Compare
         const char* mstr = mode == Monitor::Mode::Bus ? "bm" : "gm";
         const char* kind = _diffOn ? "compare" : "multi";
         const uint64_t div = divergences();
-        const char* result = !_diffOn ? "MULTI" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
+        const char* result = !_diffOn ? "MULTI" : nothingCompared() ? "INCOMPARABLE" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
         const std::string fname = std::string("oknx-") + mstr + "-" + kind + "_" + Monitor::safeIp(_ipA) + "_" +
                                   Monitor::safeIp(_ipB) + "_" + Monitor::stamp() + ".xml";
         const std::string path = (std::filesystem::path(Monitor::exportDir()) / fname).string();
@@ -1543,12 +1656,13 @@ class Compare
                      _ackSeen[0] ? "yes" : "no", _ackSeen[1] ? "yes" : "no");
         std::fprintf(fp, "  <counters aSeen=\"%llu\" bSeen=\"%llu\" common=\"%llu\" onlyA=\"%llu\" onlyB=\"%llu\" countMismatch=\"%llu\""
                          " integrityMismatch=\"%llu\" ackMismatch=\"%llu\" notReported=\"%llu\" lostA=\"%llu\" lostB=\"%llu\""
-                         " incompleteA=\"%llu\" incompleteB=\"%llu\"/>\n",
+                         " incompleteA=\"%llu\" incompleteB=\"%llu\" notComparableA=\"%llu\" notComparableB=\"%llu\"/>\n",
                      (unsigned long long)_seenA, (unsigned long long)_seenB, (unsigned long long)_common,
                      (unsigned long long)_onlyA, (unsigned long long)_onlyB, (unsigned long long)_mismatch,
                      (unsigned long long)_integMismatch, (unsigned long long)_ackMismatch, (unsigned long long)_notReported,
                      (unsigned long long)_lost[0], (unsigned long long)_lost[1],
-                     (unsigned long long)_normIncomplete[0], (unsigned long long)_normIncomplete[1]);
+                     (unsigned long long)_normIncomplete[0], (unsigned long long)_normIncomplete[1],
+                     (unsigned long long)_notCmp[0], (unsigned long long)_notCmp[1]);
         for (const auto& a : _ann)
         {
             std::string extra = std::string(" seenBy=\"") + a.seenBy + "\" diff=\"" + a.diff + "\"";
@@ -1593,16 +1707,25 @@ class Compare
                         : _i.tr("normalize OFF (n): raw per-piece frames", "Normalisieren AUS (n): rohe Einzelstücke"));
     }
 
+    /** @brief Nothing was compared: B never got its tunnel up, or every frame fell into a time a side was down. */
+    bool nothingCompared() const
+    {
+        if (_gaps[1].size() == 1 && _gaps[1].front().first == 0 && _gaps[1].front().second == 0) return true;
+        return _common == 0 && divergences() == 0 && _notCmp[0] + _notCmp[1] > 0;
+    }
+
     int finish(Monitor::Mode mode, bool aborted, bool userStop)
     {
         const uint64_t div = divergences();
+        const bool noB = _diffOn && nothingCompared();
         if (_quiet || !_render)
         {
             // scripted: one summary line to stdout, no chrome (all fidelity dimensions + per-side capability)
-            const char* result = !_diffOn ? "MULTI" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
+            const char* result = !_diffOn ? "MULTI" : noB ? "INCOMPARABLE" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
             std::printf("%s\tseenA=%llu\tseenB=%llu\tcommon=%llu\tonlyA=%llu\tonlyB=%llu\tcountMismatch=%llu"
                         "\tintegrityMismatch=%llu\tackMismatch=%llu\tnotReported=%llu\tlostA=%llu\tlostB=%llu"
-                        "\tstatusA=%s\tstatusB=%s\tackA=%s\tackB=%s\tnormalize=%s\tincompleteA=%llu\tincompleteB=%llu\n",
+                        "\tstatusA=%s\tstatusB=%s\tackA=%s\tackB=%s\tnormalize=%s\tincompleteA=%llu\tincompleteB=%llu"
+                        "\tnotComparableA=%llu\tnotComparableB=%llu\n",
                         result, (unsigned long long)_seenA, (unsigned long long)_seenB, (unsigned long long)_common,
                         (unsigned long long)_onlyA, (unsigned long long)_onlyB, (unsigned long long)_mismatch,
                         (unsigned long long)_integMismatch, (unsigned long long)_ackMismatch, (unsigned long long)_notReported,
@@ -1610,7 +1733,8 @@ class Compare
                         _statSeen[0] ? "yes" : "no", _statSeen[1] ? "yes" : "no",
                         _ackSeen[0] ? "yes" : "no", _ackSeen[1] ? "yes" : "no",
                         (mode == Monitor::Mode::Bus && _normalize) ? "on" : "off",
-                        (unsigned long long)_normIncomplete[0], (unsigned long long)_normIncomplete[1]);
+                        (unsigned long long)_normIncomplete[0], (unsigned long long)_normIncomplete[1],
+                        (unsigned long long)_notCmp[0], (unsigned long long)_notCmp[1]);
             std::fflush(stdout);
         }
         else
@@ -1618,6 +1742,7 @@ class Compare
             drawFinalResult(mode, aborted, userStop);
         }
         if (aborted) return 130;
+        if (noB) return 1; // nothing was compared, as when A cannot connect
         if (_diffOn && div > 0) return 2;
         return 0;
     }
@@ -1633,9 +1758,17 @@ class Compare
         drawFooter(mode);      // final counters + result + keybar snapshot (permanent — not erased)
         _footLines = 0;        // leave it on screen
         if (_diffOn && div > 0) breakdown();
+        if (_diffOn && _notCmp[0] + _notCmp[1] > 0)
+            _p.status(Tpl::Stat::Info,
+                      std::to_string(_notCmp[0] + _notCmp[1]) + " " + _i.tr("seen with the other side down", "bei getrennter Gegenseite"),
+                      {_i.tr("the other side was not connected then; not counted as a difference",
+                             "die andere Seite war da nicht verbunden; zählt nicht als Abweichung")});
         reliabilityHint();
         if (aborted)
             _p.status(Tpl::Stat::Warn, _i.tr("Ctrl+C — disconnecting cleanly", "Ctrl+C — sauber abgemeldet"));
+        else if (_diffOn && nothingCompared())
+            _p.status(Tpl::Stat::Err, _i.tr("nothing was compared", "nichts wurde verglichen"),
+                      {_i.tr("B was never connected, or never while traffic came", "B war nie verbunden, oder nie, während Verkehr kam"), _ipB});
         else if (_diffOn && div == 0)
             _p.status(Tpl::Stat::Ok, _i.tr("streams identical", "Ströme identisch"));
         else if (_diffOn)

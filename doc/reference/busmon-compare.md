@@ -57,11 +57,12 @@ The one-word result of the whole run:
 | `IDENTICAL` | Identisch | Both sides saw exactly the same — perfect fidelity in this window |
 | `DIVERGENT` | Unterschiede | There is **at least one** difference (see the counters) |
 | `MULTI` | Mehrfach | `--multi` mode — no diff was computed |
+| `INCOMPARABLE` | ohne Vergleich | nothing was compared: B never got its tunnel up, or every telegram fell into a time a side was not connected |
 
 **`DIVERGENT` is strict/binary — a *single* edge fragment already makes it `DIVERGENT`.** So the word alone
 does **not** mean "bad". Always read the **counters** to see *what* differs and whether it matters.
 
-Exit codes (for scripts/CI): `0` identical · `2` divergent · `1` tunnel open failed · `130` Ctrl+C.
+Exit codes (for scripts/CI): `0` identical · `2` divergent · `1` tunnel open failed or nothing compared · `130` Ctrl+C.
 
 ---
 
@@ -85,7 +86,17 @@ metadata is **not** `common`, it is its specific class):
 | `ackMismatch` | ACK-Abweichung | same telegram, different L2 acknowledge (A=ACK / B=NAK, etc.) | the two busmons disagree on the bus acknowledge |
 | `notReported` | nicht gemeldet | a metadata dimension is **not comparable** because one side does not emit it | honesty: unknown is never counted as agreement |
 | `lostA` / `lostB` | verloren A/B | a side's 0x03 status flagged **Lost** (it knows it dropped data) | a receiver admitting a loss |
+| `notComparableA` / `notComparableB` | Gegenseite getrennt A/B | seen while the **other** side was not connected (B still connecting at the start, a side reconnecting mid-run or after `r`), within `--grace` of that time; shown dimmed as "(Gegenseite getrennt)" | not a difference: counted apart, never in `onlyA/onlyB`, never in the result |
 | `incompleteA` / `incompleteB` | unvollständig A/B | pieces that could **not** be reassembled into a whole telegram, surfaced **tagged** | usually a capture-window edge (see §5) — never merged, never equated |
+
+A telegram without a partner counts as `onlyA`/`onlyB` only when the other side was connected from `--grace`
+before to `--grace` after it. B connects after A, so the first moments of a run and every reconnect are
+excused this way; the result line carries the counts at its end. A drop counts from the moment it is
+detected (a failed tick or keep-alive), so telegrams lost between the real drop and its detection stay
+`onlyA`/`onlyB`. A reassembled telegram carries the receive time of its first piece. In compare mode (not
+`--multi`, not after Ctrl+C) both tunnels stay open for one more `--grace` after the stop: a telegram received
+then only completes a pair with one from inside the window and is not counted on its own; a side that is down
+then is not reconnected.
 
 **Reading rule of thumb:**
 - Only a few `onlyA/onlyB` and `incomplete*` at the window edges, everything else `common`, and
@@ -192,9 +203,9 @@ shape plus the compare annotation, for offline analysis:
 ```xml
 <compare mode="bm" result="DIVERGENT" divergences="…" ifaceA="…" ifaceB="…" statusA="yes" ackA="yes" …>
   <counters common="…" onlyA="…" onlyB="…" integrityMismatch="…" ackMismatch="…" notReported="…"
-            lostA="…" lostB="…" incompleteA="…" incompleteB="…"/>
+            lostA="…" lostB="…" incompleteA="…" incompleteB="…" notComparableA="…" notComparableB="…"/>
   <telegram time="…" frameFormat="STD|EXT" source="…" destination="…" raw="…"
-            seenBy="AB|A|B" diff="common|onlyA|onlyB|integrityMismatch|ackMismatch|notReported|incomplete"
+            seenBy="AB|A|B" diff="common|onlyA|onlyB|integrityMismatch|ackMismatch|notReported|notComparable|incomplete"
             statusA="F0B0P0" ackA="ACK" statusB="F0B0P0" ackB="ACK"/>
 </compare>
 ```
