@@ -1,6 +1,15 @@
 # Changes
 
 
+## 2026-10-18 -- setpa waits for the button and assigns by serial number
+
+* `setpa <x.y.z>` waits until exactly one device is in programming mode, asking once a second as 03_05_02 2.3 p.14 asks, and says so: on a terminal until Ctrl+C or `--wait <time>`, in a script or with `-q` for `--wait <time>`, otherwise one look of 1 s (before: one look of 2.5 s). After a wait of more than 5 s the address is checked again before it is written
+* Answers are counted per telegram, not per sender. Two devices that both still had 15.15.255 counted as one, and `setpa` wrote the address to both. A Layer-2 repetition does not count; a sender whose answers all carry the repetition mark counts once. This needs an interface that passes the repetition mark of TP1 on in the indication: one that marks every frame repeated makes two such devices count as one again, one that never marks it can count a repetition as a second device
+* With several devices in programming mode `setpa` reads their serial numbers (PID 11), lists them and, on a terminal, writes the address to the one picked with 1-9 by its serial number; keys typed before the list are dropped, and only answers from the asked addresses count. A device that has the same address but is not in programming mode answers too; the list says so when more serial numbers come than devices are in programming mode, which a device in programming mode without a serial number can hide. In a script, or without a keyboard on stdin, it lists them and stops
+* `setpa <x.y.z> sn <SN>` assigns by serial number without programming mode (NM_IndividualAddress_SerialNumber_Write, 2.5 p.16-17): it checks that the address is free, writes, reads back by serial number and restarts the device so that a device with the OpenKNX stack saves the address; `--no-restart` leaves it out. When the restart cannot be sent, `setpa` warns that the device has to be restarted to keep the address, also on the programming-mode way
+* `setpa scan [<a.l>]` reads the serial numbers of the devices that still have 15.15.255 or a.l.255 (NM_SerialNumberDefaultIA_Scan, 2.24 p.66-67, 7 s); `-q` prints `sn` lines, and no answer ends with exit code 1
+
+
 ## ec/v0.3.0-beta.1: 2026-10-16
 
 The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-16

@@ -1396,14 +1396,14 @@ static void examples()
     // Whole jobs, in the order they actually happen - that is what the page is for; single commands
     // are what --help is for.
     static const Ex gNew[] = {
-        {"oknx -i 11.11.0.126 ps", "1 · nobody in programming mode yet? then press the button on the device",
-         "1 · noch niemand im Programmiermodus? dann die Taste am Gerät drücken"},
-        {"oknx -i 11.11.0.126 setpa 1.1.42", "2 · give it its address — refuses unless exactly one answers",
-         "2 · ihm seine Adresse geben — verweigert, wenn nicht genau eines antwortet"},
-        {"oknx -i 11.11.0.126 1.1.42 progmode off", "3 · programming mode off again, it is not a resting state",
-         "3 · Programmiermodus wieder aus, das ist kein Dauerzustand"},
-        {"oknx -i 11.11.0.126 1.1.42 info", "4 · did it take? mask, manufacturer, application",
-         "4 · hat es gegriffen? Maske, Hersteller, Applikation"},
+        {"oknx -i 11.11.0.126 setpa 1.1.42", "1 · waits for the programming button, gives the address, restarts it",
+         "1 · wartet auf die Programmiertaste, gibt die Adresse, startet neu"},
+        {"oknx -i 11.11.0.126 1.1.42 info", "2 · did it take? mask, manufacturer, application",
+         "2 · hat es gegriffen? Maske, Hersteller, Applikation"},
+        {"oknx -i 11.11.0.126 setpa scan", "   without the button: serial numbers of new devices",
+         "   ohne Taste: Seriennummern neuer Geräte"},
+        {"oknx -i 11.11.0.126 setpa 1.1.42 sn 00FA:01A2B3C4", "   the address by serial number",
+         "   die Adresse über die Seriennummer"},
     };
     static const Ex gSwap[] = {
         {"oknx -i 11.11.0.126 1.1.42 info ga", "1 · write down what it had: addresses, flags, sizes",
@@ -1750,8 +1750,14 @@ static void usage()
                   "(alles außer der Adresse) · factoryreset (ALLES)"));
     U.cmdRow("setpa <x.y.z>", L.tr("give the one device in PROGRAMMING MODE this address (no <pa> needed)",
                                    "dem einen Gerät im PROGRAMMIERMODUS diese Adresse geben (kein <pa> nötig)"));
-    U.cmdRow("", L.tr("refuses unless exactly one device answers, and reads the new address back as proof",
-                      "verweigert, wenn nicht genau eines antwortet, und liest die neue Adresse zur Kontrolle zurück"));
+    U.cmdRow("", L.tr("waits for the button (terminal: until Ctrl+C, script: --wait 2m), confirms, restarts it",
+                      "wartet auf die Taste (Terminal: bis Strg+C, Skript: --wait 2m), bestätigt, startet neu"));
+    U.cmdRow("", L.tr("several in programming mode: lists them with serial number, 1-9 picks one",
+                      "mehrere im Programmiermodus: listet sie mit Seriennummer, 1-9 wählt eines"));
+    U.cmdRow("setpa <x.y.z> sn <SN>", L.tr("the address by serial number, no programming mode; --no-restart",
+                                           "die Adresse über die Seriennummer, ohne Programmiermodus; --no-restart"));
+    U.cmdRow("setpa scan [<a.l>]", L.tr("serial numbers of the devices that still have 15.15.255 (or a.l.255)",
+                                        "Seriennummern der Geräte, die noch 15.15.255 (oder a.l.255) haben"));
     U.cmdRow("<pa> unload yes", L.tr("ERASE its configuration: address + association table and application go to UNLOADED",
                                      "Konfiguration LÖSCHEN: Adress- + Assoziationstabelle und Applikation auf UNLOADED"));
     U.cmdRow("", L.tr("only programming the device again brings it back; asks again on a terminal",
@@ -5446,7 +5452,7 @@ static bool commandLongOption(const std::string& a)
 {
     const std::string k = a.substr(0, a.find('='));
     return commandOptionTakesValue(a) || k == "--live" || k == "--no-details" || k == "--pack" || k == "--keep" ||
-           k == "--no-resume" || k == "--apply" || k == "--no-apply" || k == "--progress";
+           k == "--no-resume" || k == "--apply" || k == "--no-apply" || k == "--progress" || k == "--no-restart";
 }
 
 int main(int argc, char** argv)
@@ -9159,44 +9165,219 @@ int main(int argc, char** argv)
         }
     }
 
-    // `oknx -i <ip> setpa <x.y.z>` - NM_IndividualAddress_Write (03_05_02 2.3 p.13-15): check that no other
-    // device holds the address, find exactly one device in programming mode, write, confirm over a
-    // connection and restart it, which also ends its programming mode.
+    // `oknx -i <ip> setpa <x.y.z> [sn <SN>]` and `setpa scan [<a.l>]`.
+    // Programming mode: NM_IndividualAddress_Write (03_05_02 2.3 p.13-15) - check that no other device holds the
+    // address, wait until exactly one device is in programming mode, write, confirm over a connection and restart
+    // it, which ends programming mode. Serial number: NM_IndividualAddress_SerialNumber_Write (2.5 p.16-17), no
+    // programming mode needed. `scan`: NM_SerialNumberDefaultIA_Scan (2.24 p.66-67).
     if (!pos.empty() && pos[0] == "setpa")
     {
         ftc::I18n& L = g_i18n;
+        ftc::Theme& C = g_theme;
+        const FtcPropCb prevProp = g_knxTunnel.propertyCallback();
+        auto finish = [&](int rc) -> int {
+            g_knxTunnel.setBroadcastCallback(nullptr);
+            g_knxTunnel.setPropertyCallback(prevProp);
+            g_knxTunnel.disconnect();
+            socketCleanup();
+            return rc;
+        };
+        auto fail = [&](const std::string& title, std::initializer_list<std::string> detail,
+                        const std::string& hint) -> int {
+            g_ui.errorBlock(false, title, detail, hint);
+            return finish(2);
+        };
+        bool written = false; // the address went out; an abort after it cannot say whether it took
+        auto aborted = [&]() -> int {
+            if (quiet) std::fprintf(stderr, "\n[abort] %s\n", abortReason().c_str());
+            else
+                g_tpl.status(ftc::Tpl::Stat::Warn, abortReason(),
+                             {written ? L.tr("the address was sent, the read-back was stopped",
+                                             "die Adresse wurde gesendet, das Rücklesen wurde abgebrochen")
+                                      : L.tr("nothing more was sent", "es wurde nichts mehr gesendet")});
+            return finish(130);
+        };
+
+        uint32_t waitMs = 0; // --wait: how long to wait for programming mode; 0 = terminal until Ctrl+C, script one look
+        bool noRestart = false;
+        std::vector<std::string> args;
+        for (size_t i = 1; i < pos.size(); i++)
+        {
+            if (pos[i] == "--wait" || pos[i].rfind("--wait=", 0) == 0)
+            {
+                const bool inl = pos[i].size() > 6;
+                const std::string v = inl ? pos[i].substr(7) : (i + 1 < pos.size() ? pos[i + 1] : std::string());
+                if (std::atof(v.c_str()) <= 0.0 || (waitMs = ftc::Watch::parseInterval(v)) == 0)
+                    return fail(L.tr("--wait needs a time", "--wait braucht eine Zeit"),
+                                {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--wait 2m · --wait 90s");
+                if (!inl) i++;
+            }
+            else if (pos[i] == "--no-restart")
+                noRestart = true;
+            else if (pos[i].size() > 2 && pos[i][0] == '-' && pos[i][1] == '-')
+                return fail(L.tr("unknown option", "unbekannte Option") + std::string(": ") + pos[i],
+                            {L.tr("nothing was sent", "es wurde nichts gesendet")}, "--wait <time> · --no-restart");
+            else
+                args.push_back(pos[i]);
+        }
+        const char* usage = "oknx -i <ip> setpa 1.1.42   ·   setpa 1.1.42 sn 00FA:01A2B3C4   ·   setpa scan";
+
+        // Answers. A_IndividualAddress_Response is counted per telegram, not per sender: two devices that both
+        // still have 15.15.255 are two devices (2.2 p.13). A Layer-2 repetition does not count; a sender whose
+        // telegrams all carry the repetition mark still counts once, in case an interface does not pass it on.
+        struct ProgHit
+        {
+            uint16_t src;
+            unsigned orig, rep;
+        };
+        struct SnHit
+        {
+            uint16_t src;
+            uint8_t sn[6];
+        };
+        static std::vector<ProgHit> s_prog;
+        static std::vector<SnHit> s_snResp; // A_IndividualAddressSerialNumber_Response
+        static std::vector<SnHit> s_pid11;  // PID_SERIAL_NUMBER of the device object
+        static std::vector<uint16_t> s_asked; // the addresses PID 11 was read from; answers from others are not ours
+        s_prog.clear();
+        s_asked.clear();
+        s_snResp.clear();
+        s_pid11.clear();
+        g_knxTunnel.setBroadcastCallback([](uint16_t src, uint16_t apci, const uint8_t* d, uint8_t n, bool repeated) {
+            if ((apci & 0x03C0) == APCI_INDADDR_RESP)
+            {
+                for (ProgHit& h : s_prog)
+                    if (h.src == src)
+                    {
+                        (repeated ? h.rep : h.orig)++;
+                        return;
+                    }
+                s_prog.push_back({src, repeated ? 0u : 1u, repeated ? 1u : 0u});
+            }
+            else if (apci == APCI_INDADDR_SN_RESP && n >= 6)
+            {
+                SnHit h{src, {}};
+                std::memcpy(h.sn, d, 6);
+                s_snResp.push_back(h);
+            }
+        });
+        g_knxTunnel.setPropertyCallback([](uint16_t pa, uint8_t obj, uint8_t pid, const uint8_t* d, uint8_t n) {
+            if (obj != 0 || pid != 11 || n < 6) return; // a refusal carries no data
+            if (std::find(s_asked.begin(), s_asked.end(), pa) == s_asked.end()) return;
+            for (const SnHit& h : s_pid11)
+                if (h.src == pa && std::memcmp(h.sn, d, 6) == 0) return; // the same answer again
+            SnHit h{pa, {}};
+            std::memcpy(h.sn, d, 6);
+            s_pid11.push_back(h);
+        });
+        auto pumpFor = [&](uint32_t ms) {
+            for (const uint64_t t0 = nowMs(); nowMs() - t0 < ms && !g_abort;)
+            {
+                g_knxTunnel.pump();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        };
+        auto progCount = []() -> size_t {
+            size_t n = 0;
+            for (const ProgHit& h : s_prog) n += h.orig != 0 ? h.orig : 1;
+            return n;
+        };
+        auto probe = [&](uint32_t ms) {
+            s_prog.clear();
+            g_knxTunnel.sendIndividualAddressRead();
+            pumpFor(ms);
+        };
+        auto snStr = [](const uint8_t* sn) -> std::string {
+            char b[20];
+            std::snprintf(b, sizeof(b), "%02X%02X:%02X%02X%02X%02X", sn[0], sn[1], sn[2], sn[3], sn[4], sn[5]);
+            return b;
+        };
+        auto parseSn = [](const std::string& in, uint8_t out[6]) -> bool {
+            const std::string s = in.rfind("0x", 0) == 0 || in.rfind("0X", 0) == 0 ? in.substr(2) : in;
+            std::string h;
+            for (char ch : s)
+            {
+                if (ch == ':' || ch == '-') continue;
+                if (!std::isxdigit((unsigned char)ch)) return false;
+                h += ch;
+            }
+            if (h.size() != 12) return false;
+            for (int i = 0; i < 6; i++) out[i] = (uint8_t)std::strtoul(h.substr((size_t)i * 2, 2).c_str(), nullptr, 16);
+            return true;
+        };
+        auto mfrOf = [](const uint8_t* sn) -> std::string {
+            return ((sn[0] << 8) | sn[1]) == ftc::MFR_OPENKNX ? "OpenKNX" : std::string();
+        };
+
+        // `setpa scan [a.l]`: every device that still has the default address a.l.255 (15.15.255 by default)
+        // answers with its serial number, separately, because their answers differ.
+        if (!args.empty() && args[0] == "scan")
+        {
+            uint16_t at = 0xFFFF;
+            if (args.size() >= 2)
+            {
+                unsigned a = 0, l = 0;
+                char tail = 0;
+                if (args.size() > 2 || std::sscanf(args[1].c_str(), "%u.%u%c", &a, &l, &tail) != 2 || a > 15 || l > 15)
+                    return fail(L.tr("setpa scan takes a line: a.l", "setpa scan nimmt eine Linie: a.l"),
+                                {L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> setpa scan 1.1");
+                at = (uint16_t)((a << 12) | (l << 8) | 0xFF);
+            }
+            if (noRestart || waitMs != 0)
+                return fail(L.tr("--wait and --no-restart do not apply to scan", "--wait und --no-restart gelten nicht für scan"),
+                            {L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> setpa scan");
+            if (!quiet)
+                g_tpl.status(ftc::Tpl::Stat::Info,
+                             L.tr("serial numbers of the devices on ", "Seriennummern der Geräte auf ") + ftc::Tpl::pa(at),
+                             {L.tr("7 s", "7 s")});
+            s_asked.assign(1, at);
+            g_knxTunnel.sendPropertyValueRead(at, 0, 11, 1, 1);
+            pumpFor(7000); // 2.24 p.67: time-out 7 s
+            if (g_abort) return aborted();
+            if (quiet)
+                for (const SnHit& h : s_pid11) std::printf("sn\t%s\t%s\n", ftc::Tpl::pa(h.src).c_str(), snStr(h.sn).c_str());
+            else if (s_pid11.empty())
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("no device answered", "kein Gerät hat geantwortet"),
+                             {L.tr("no device has this address, or it gives no serial number",
+                                   "kein Gerät hat diese Adresse, oder es gibt keine Seriennummer heraus")});
+            else
+            {
+                g_tpl.status(ftc::Tpl::Stat::Ok, std::to_string(s_pid11.size()) + " " + L.tr("devices", "Geräte"), {});
+                for (const SnHit& h : s_pid11)
+                    std::printf("    %-10s  %s  %s\n", ftc::Tpl::pa(h.src).c_str(), C.bold(snStr(h.sn)).c_str(),
+                                C.dim(mfrOf(h.sn)).c_str());
+                std::printf("    %s\n", C.dim("oknx -i <ip> setpa <x.y.z> sn <SN>").c_str());
+            }
+            return finish(s_pid11.empty() ? 1 : 0);
+        }
+
         unsigned a1 = 0, b1 = 0, c1 = 0;
         char tail = 0;
-        const bool ok = pos.size() >= 2 &&
-                        std::sscanf(pos[1].c_str(), "%u.%u.%u%c", &a1, &b1, &c1, &tail) == 3 &&
-                        a1 <= 15 && b1 <= 15 && c1 <= 255;
+        uint8_t wantSn[6] = {0};
+        const bool bySn = args.size() == 3 && args[1].size() == 2 && std::tolower((unsigned char)args[1][0]) == 's' &&
+                          std::tolower((unsigned char)args[1][1]) == 'n';
+        const bool ok = (args.size() == 1 || bySn) &&
+                        std::sscanf(args[0].c_str(), "%u.%u.%u%c", &a1, &b1, &c1, &tail) == 3 && a1 <= 15 && b1 <= 15 &&
+                        c1 <= 255;
         if (!ok)
-        {
-            g_ui.errorBlock(false, L.tr("setpa needs the new individual address",
-                                        "setpa braucht die neue physikalische Adresse"),
-                            {L.tr("put exactly ONE device into programming mode first",
-                                  "vorher genau EIN Gerät in den Programmiermodus bringen")},
-                            "oknx -i <ip> setpa 1.1.42");
-            socketCleanup();
-            return 2;
-        }
+            return fail(L.tr("setpa needs the new individual address", "setpa braucht die neue physikalische Adresse"),
+                        {L.tr("then press the programming button, or give the serial number",
+                              "dann die Programmiertaste drücken, oder die Seriennummer angeben")},
+                        usage);
+        if (bySn && waitMs != 0)
+            return fail(L.tr("--wait is for programming mode", "--wait gilt für den Programmiermodus"),
+                        {L.tr("the serial-number way waits for nothing", "der Weg über die Seriennummer wartet auf nichts"),
+                         L.tr("nothing was sent", "es wurde nichts gesendet")},
+                        "oknx -i <ip> setpa " + args[0] + " sn " + args[2]);
+        if (bySn && !parseSn(args[2], wantSn))
+            return fail(L.tr("not a serial number", "keine Seriennummer") + std::string(": ") + args[2],
+                        {L.tr("12 hex digits, as on the device or in the scan", "12 Hex-Ziffern, wie am Gerät oder im scan"),
+                         L.tr("nothing was sent", "es wurde nichts gesendet")},
+                        "oknx -i <ip> setpa 1.1.42 sn 00FA:01A2B3C4");
         const uint16_t want = (uint16_t)((a1 << 12) | (b1 << 8) | c1);
 
-        static std::vector<uint16_t> s_inProg;
-        s_inProg.clear();
-        g_knxTunnel.setBroadcastCallback([](uint16_t src, uint16_t apci, const uint8_t*, uint8_t) {
-            if ((apci & 0x03C0) != APCI_INDADDR_RESP) return; // A_IndividualAddress_Response
-            for (uint16_t p : s_inProg)
-                if (p == src) return;
-            s_inProg.push_back(src);
-        });
-        auto probe = [&](uint32_t ms) {
-            s_inProg.clear();
-            g_knxTunnel.sendIndividualAddressRead();
-            for (uint64_t t0 = nowMs(); nowMs() - t0 < ms;) g_knxTunnel.pump();
-        };
         // DeviceDescriptor_Read inside a T_Connect to `pa`: 1 = answered, 2 = refused with T_Disconnect, 0 = nobody.
-        // Both 1 and 2 mean a device holds the address (03_05_02 2.3 p.14). The session stays open for the caller.
+        // Both 1 and 2 mean a device holds the address (2.3 p.14). The session stays open for the caller.
         static volatile bool s_ddSeen = false;
         static uint16_t s_ddPa = 0;
         auto coAsk = [&](uint16_t pa) -> int {
@@ -9218,83 +9399,302 @@ int main(int argc, char** argv)
             g_knxTunnel.setDeviceDescriptorCallback(prev);
             return r;
         };
+        // Confirm over a connection, then restart: that ends programming mode (2.3 step 4 p.15) and is what makes
+        // a device with the OpenKNX stack keep the address - it holds a new one in RAM until it saves on restart.
+        // 0 = no answer at the address, 1 = answered, restart not sent, 2 = answered and restart sent.
+        auto confirmAt = [&](uint16_t pa, bool restart) -> int {
+            const bool confirmed = coAsk(pa) == 1;
+            bool sent = false;
+            if (confirmed && restart)
+            {
+                // Until the read is T_ACKed the restart would reuse its sequence number and be dropped as a duplicate.
+                for (uint64_t t0 = nowMs(); nowMs() - t0 < 500 && !g_knxTunnel.scanReadAcked();) g_knxTunnel.pump();
+                if (g_knxTunnel.scanReadAcked())
+                {
+                    g_knxTunnel.sendRestart(pa, false, 0, 0);
+                    sent = true;
+                    for (uint64_t t0 = nowMs(); nowMs() - t0 < 300;) g_knxTunnel.pump();
+                }
+            }
+            g_knxTunnel.scanDisconnect();
+            return confirmed ? (sent ? 2 : 1) : 0;
+        };
+        auto snWhere = [&](const uint8_t sn[6], uint16_t& at) -> bool {
+            s_snResp.clear();
+            g_knxTunnel.sendIndividualAddressSerialNumberRead(sn);
+            for (const uint64_t t0 = nowMs(); nowMs() - t0 < 2000 && !g_abort;)
+            {
+                g_knxTunnel.pump();
+                for (const SnHit& h : s_snResp)
+                    if (std::memcmp(h.sn, sn, 6) == 0)
+                    {
+                        at = h.src;
+                        return true;
+                    }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        };
+
+        // NM_IndividualAddress_SerialNumber_Write: find the device by its serial number, check that the address
+        // is free, write, read back by serial number, restart unless --no-restart.
+        // @p fromProg: picked from programming mode, where the restart is also what ends it.
+        auto bySerial = [&](const uint8_t sn[6], bool fromProg) -> int {
+            uint16_t had = 0;
+            if (!snWhere(sn, had))
+            {
+                if (g_abort) return aborted();
+                return fail(L.tr("no device answers to this serial number", "kein Gerät antwortet auf diese Seriennummer"),
+                            {snStr(sn), L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> setpa scan");
+            }
+            if (had == want)
+            {
+                const int c = fromProg && !noRestart ? confirmAt(want, true) : 0; // ends its programming mode
+                if (quiet) std::printf("setpa\t%s\t%s\t1\n", ftc::Tpl::pa(had).c_str(), args[0].c_str());
+                else
+                    g_tpl.status(ftc::Tpl::Stat::Ok, snStr(sn) + "  " + L.tr("already has", "hat schon") + " " + args[0],
+                                 {c == 2 ? L.tr("restart sent, it ends programming mode", "Neustart gesendet, er beendet den Programmiermodus")
+                                  : fromProg && noRestart ? L.tr("no restart: it stays in programming mode and keeps the address only after a restart",
+                                                                 "ohne Neustart: es bleibt im Programmiermodus und behält die Adresse erst nach einem Neustart")
+                                  : fromProg ? L.tr("no restart possible - restart the device: it ends programming mode and keeps the address",
+                                                    "Neustart nicht möglich - das Gerät neu starten: das beendet den Programmiermodus und speichert die Adresse")
+                                             : L.tr("the address was not written", "die Adresse wurde nicht geschrieben")});
+                return finish(0);
+            }
+            const int occ = coAsk(want);
+            g_knxTunnel.scanDisconnect();
+            if (occ != 0)
+                return fail(L.tr("the address is already in use", "die Adresse ist schon vergeben"),
+                            {L.tr("another device answered on ", "ein anderes Gerät antwortete auf ") + args[0],
+                             L.tr("nothing was sent", "es wurde nichts gesendet")},
+                            "oknx -i <ip> " + args[0] + " info");
+            g_knxTunnel.sendIndividualAddressSerialNumberWrite(sn, want);
+            written = true;
+            pumpFor(300);
+            uint16_t now = 0;
+            const bool answered = snWhere(sn, now);
+            const bool took = answered && now == want;
+            const int conf = took && !noRestart ? confirmAt(want, true) : 0;
+            if (g_abort && !took) return aborted();
+            if (quiet)
+                std::printf("setpa\t%s\t%s\t%d\n", ftc::Tpl::pa(had).c_str(), args[0].c_str(), took ? 1 : 0);
+            else if (took)
+                g_tpl.status(conf == 2 ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Warn, ftc::Tpl::pa(had) + "  ->  " + args[0],
+                             {L.tr("serial number ", "Seriennummer ") + snStr(sn),
+                              noRestart ? L.tr("confirmed, no restart: a device with the OpenKNX stack keeps it only after a restart",
+                                               "bestätigt, ohne Neustart: ein Gerät mit OpenKNX-Stack behält sie erst nach einem Neustart")
+                              : conf == 2 ? L.tr("confirmed; restart sent, the device keeps the address",
+                                                 "bestätigt; Neustart gesendet, das Gerät behält die Adresse")
+                                          : L.tr("confirmed; no restart possible - restart the device so it keeps the address",
+                                                 "bestätigt; Neustart nicht möglich - das Gerät neu starten, damit es die Adresse behält")});
+            else
+                g_tpl.status(ftc::Tpl::Stat::Err, L.tr("the address was not taken", "die Adresse wurde nicht übernommen"),
+                             {answered ? L.tr("the device answers on ", "das Gerät antwortet auf ") + ftc::Tpl::pa(now)
+                                       : L.tr("the read-back by serial number got no answer",
+                                              "das Rücklesen über die Seriennummer bekam keine Antwort")});
+            return finish(took ? 0 : 1);
+        };
+
+        if (bySn) return bySerial(wantSn, false);
+
+        // Step 1: is the address free? Occupied is fine only if the device in programming mode is the one holding it.
         const bool occupied = coAsk(want) != 0;
         g_knxTunnel.scanDisconnect();
-        probe(2500);
-        if (s_inProg.size() == 1 && occupied && s_inProg[0] != want)
+        if (g_abort) return aborted();
+
+        // Step 2: wait until exactly one device is in programming mode, asking once a second (2.3 p.14). On a
+        // terminal until Ctrl+C or --wait, in a script one look unless --wait is given.
+        const bool tty = g_term.isTty() && !quiet;
+        const uint64_t tStart = nowMs();
+        bool hinted = false, progress = false;
+        auto endProgress = [&]() {
+            if (progress) std::printf("\n");
+            progress = false;
+        };
+        for (;;)
         {
-            g_knxTunnel.setBroadcastCallback(nullptr);
-            g_ui.errorBlock(false, L.tr("the address is already in use", "die Adresse ist schon vergeben"),
-                            {L.tr("another device answered on ", "ein anderes Gerät antwortete auf ") + pos[1],
+            probe(1000);
+            if (g_abort)
+            {
+                endProgress();
+                return aborted();
+            }
+            const size_t n = progCount();
+            if (n == 1) break;
+            if (n > 1)
+            {
+                endProgress();
+                // Who is it? Ask each answering address for its serial number; devices that share an address
+                // answer separately because their numbers differ.
+                s_pid11.clear();
+                s_asked.clear();
+                for (const ProgHit& h : s_prog) s_asked.push_back(h.src); // a copy: pump() below can grow s_prog
+                for (uint16_t src : s_asked)
+                {
+                    g_knxTunnel.sendPropertyValueRead(src, 0, 11, 1, 1);
+                    pumpFor(30);
+                }
+                for (const uint64_t t0 = nowMs(); nowMs() - t0 < 2000 && !g_abort;)
+                {
+                    bool all = true;
+                    for (const ProgHit& h : s_prog)
+                    {
+                        size_t got = 0;
+                        for (const SnHit& s : s_pid11) got += s.src == h.src;
+                        if (got < (h.orig != 0 ? h.orig : 1)) all = false;
+                    }
+                    if (all) break;
+                    g_knxTunnel.pump();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (g_abort) return aborted();
+                std::vector<std::string> lines;
+                // A device that is not in programming mode but has the same address answers PID 11 too.
+                if (s_pid11.size() > n)
+                    lines.push_back(L.tr("more devices answered than are in programming mode: compare the serial number on the device",
+                                         "mehr Geräte antworten, als im Programmiermodus sind: die Seriennummer am Gerät vergleichen"));
+                for (size_t i = 0; i < s_pid11.size() && i < 9; i++)
+                {
+                    char b[96];
+                    std::snprintf(b, sizeof(b), "%zu  %-10s  SN %s  %s", i + 1, ftc::Tpl::pa(s_pid11[i].src).c_str(),
+                                  snStr(s_pid11[i].sn).c_str(), mfrOf(s_pid11[i].sn).c_str());
+                    lines.push_back(b);
+                }
+                if (s_pid11.size() > 9)
+                    lines.push_back("+" + std::to_string(s_pid11.size() - 9) + " " +
+                                    L.tr("more - switch some programming modes off", "weitere - einige Programmiermodi ausschalten"));
+                for (const ProgHit& h : s_prog)
+                {
+                    size_t got = 0;
+                    for (const SnHit& s : s_pid11) got += s.src == h.src;
+                    for (size_t k = got; k < (h.orig != 0 ? h.orig : 1); k++)
+                        lines.push_back("-  " + ftc::Tpl::pa(h.src) + "  " +
+                                        L.tr("no serial number - switch its programming mode off",
+                                             "keine Seriennummer - seinen Programmiermodus ausschalten"));
+                }
+                char head[96];
+                std::snprintf(head, sizeof(head), L.tr("%zu devices in programming mode", "%zu Geräte im Programmiermodus"), n);
+#ifdef _WIN32
+                const bool kbd = tty && _isatty(_fileno(stdin));
+#else
+                const bool kbd = tty && isatty(STDIN_FILENO); // a background run must not touch the terminal mode
+#endif
+                if (!kbd)
+                {
+                    g_ui.errorBlock(false, head, {L.tr("it has to be exactly one", "es muss genau eines sein"),
+                                                  L.tr("nothing was sent", "es wurde nichts gesendet")},
+                                    "oknx -i <ip> setpa " + args[0] + " sn <SN>");
+                    for (const std::string& l : lines) std::fprintf(stderr, "    %s\n", l.c_str());
+                    return finish(2);
+                }
+                g_tpl.status(ftc::Tpl::Stat::Warn, head, {});
+                for (const std::string& l : lines) std::printf("    %s\n", l.c_str());
+                const size_t pickable = s_pid11.size() < 9 ? s_pid11.size() : 9;
+                std::printf("    %s\n",
+                            C.dim((pickable > 0 ? (pickable == 1 ? std::string("1") : "1-" + std::to_string(pickable)) + " " +
+                                                      L.tr("picks who gets ", "wählt, wer ") + args[0] +
+                                                      L.tr("", " bekommt") + "  ·  "
+                                                : std::string()) +
+                                  L.tr("Enter waits on  ·  Ctrl+C stops", "Enter wartet weiter  ·  Strg+C bricht ab"))
+                                .c_str());
+                std::fflush(stdout);
+                int picked = -1;
+                ftc::Keys keys;
+                {
+                    // Keys typed while it was waiting must not pick a device nobody has seen yet.
+#ifdef _WIN32
+                    while (_kbhit()) (void)_getch();
+#else
+                    tcflush(STDIN_FILENO, TCIFLUSH);
+#endif
+                    while (!g_abort && picked < 0)
+                    {
+                        const char k = keys.poll();
+                        if (k >= '1' && k < (char)('1' + pickable)) picked = k - '1';
+                        else if (k == '\n' || k == '\r')
+                            break;
+                        g_knxTunnel.pump();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                }
+                if (g_abort) return aborted();
+                keys.restore(); // the terminal is back to normal for whatever follows
+                if (picked >= 0)
+                {
+                    uint8_t sn[6];
+                    std::memcpy(sn, s_pid11[(size_t)picked].sn, 6);
+                    return bySerial(sn, true);
+                }
+                continue; // Enter: switch the others off, then it carries on
+            }
+            const bool keepWaiting = waitMs != 0 ? nowMs() - tStart < waitMs : tty;
+            if (!keepWaiting)
+            {
+                endProgress();
+                return fail(L.tr("no device in programming mode", "kein Gerät im Programmiermodus"),
+                            {L.tr("press the programming button on the device", "die Programmiertaste am Gerät drücken"),
                              L.tr("nothing was sent", "es wurde nichts gesendet")},
-                            "oknx -i <ip> " + pos[1] + " info");
-            g_knxTunnel.disconnect();
-            socketCleanup();
-            return 2;
+                            "oknx -i <ip> setpa " + args[0] + " --wait 2m");
+            }
+            if (!hinted && !quiet)
+            {
+                g_tpl.status(ftc::Tpl::Stat::Info, L.tr("press the programming button on the device",
+                                                        "die Programmiertaste am Gerät drücken"),
+                             {L.tr("Ctrl+C stops", "Strg+C bricht ab")});
+                hinted = true;
+            }
+            if (tty)
+            {
+                std::printf("\r    %s", C.dim(L.tr("waiting ", "warte ") + std::to_string((nowMs() - tStart) / 1000) + " s").c_str());
+                std::fflush(stdout);
+                progress = true;
+            }
         }
-        if (s_inProg.size() != 1)
+        endProgress();
+        const uint16_t had = s_prog[0].src;
+        bool occupiedNow = occupied;
+        if (nowMs() - tStart > 5000 && had != want) // checked before a long wait: look again
         {
-            g_knxTunnel.setBroadcastCallback(nullptr);
-            char det[120];
-            std::snprintf(det, sizeof(det),
-                          L.tr("%zu devices answered - it has to be exactly one",
-                               "%zu Geräte haben geantwortet - es muss genau eines sein"),
-                          s_inProg.size());
-            std::string who;
-            for (uint16_t p : s_inProg) who += (who.empty() ? "" : " · ") + ftc::Tpl::pa(p);
-            g_ui.errorBlock(false, L.tr("not exactly one device in programming mode",
-                                        "nicht genau ein Gerät im Programmiermodus"),
-                            {det, who.empty() ? L.tr("press the programming button on the device",
-                                                     "die Programmiertaste am Gerät drücken") : who,
-                             L.tr("nothing was sent", "es wurde nichts gesendet")},
-                            "oknx -i <ip> ps");
-            g_knxTunnel.disconnect();
-            socketCleanup();
-            return 2;
+            occupiedNow = coAsk(want) != 0;
+            g_knxTunnel.scanDisconnect();
+            if (g_abort) return aborted();
         }
-        const uint16_t had = s_inProg[0];
+        if (occupiedNow && had != want)
+            return fail(L.tr("the address is already in use", "die Adresse ist schon vergeben"),
+                        {L.tr("another device answered on ", "ein anderes Gerät antwortete auf ") + args[0],
+                         L.tr("nothing was sent", "es wurde nichts gesendet")},
+                        "oknx -i <ip> " + args[0] + " info");
+        // Step 3 and 4: write, confirm, restart. The restart ends programming mode, so it is always sent here.
         if (had != want)
         {
             g_knxTunnel.sendIndividualAddressWrite(want);
-            for (uint64_t t0 = nowMs(); nowMs() - t0 < 600;) g_knxTunnel.pump();
+            written = true;
+            pumpFor(600);
+            if (g_abort) return aborted();
         }
-        // Confirm over a connection, then restart: that ends programming mode (03_05_02 2.3 step 4 p.15).
-        const bool confirmed = coAsk(want) == 1;
-        bool restartSent = false;
-        if (confirmed)
-        {
-            // Until the read is T_ACKed the restart would reuse its sequence number and be dropped as a duplicate.
-            for (uint64_t t0 = nowMs(); nowMs() - t0 < 500 && !g_knxTunnel.scanReadAcked();) g_knxTunnel.pump();
-            if (g_knxTunnel.scanReadAcked())
-            {
-                g_knxTunnel.sendRestart(want, false, 0, 0);
-                restartSent = true;
-                for (uint64_t t0 = nowMs(); nowMs() - t0 < 300;) g_knxTunnel.pump();
-            }
-        }
-        g_knxTunnel.scanDisconnect();
-        bool took = confirmed;
+        const int conf = confirmAt(want, true);
+        if (g_abort && conf == 0) return aborted(); // the read-back was cut short, not refused
+        bool took = conf != 0;
         if (!took)
         {
             probe(2500); // a device without connections: the broadcast read-back still shows the new address
-            took = s_inProg.size() == 1 && s_inProg[0] == want;
+            took = progCount() == 1 && s_prog[0].src == want;
         }
-        g_knxTunnel.setBroadcastCallback(nullptr);
         if (quiet)
-            std::printf("setpa\t%s\t%s\t%d\n", ftc::Tpl::pa(had).c_str(), pos[1].c_str(), took ? 1 : 0);
+            std::printf("setpa\t%s\t%s\t%d\n", ftc::Tpl::pa(had).c_str(), args[0].c_str(), took ? 1 : 0);
         else if (took)
-            g_tpl.status(ftc::Tpl::Stat::Ok,
-                         ftc::Tpl::pa(had) + "  ->  " + pos[1],
-                         {restartSent ? L.tr("confirmed; restart sent, it ends programming mode",
-                                             "bestätigt; Neustart gesendet, er beendet den Programmiermodus")
-                                    : L.tr("confirmed; switch programming mode off now",
-                                           "bestätigt; jetzt den Programmiermodus ausschalten")});
+            g_tpl.status(conf == 2 ? ftc::Tpl::Stat::Ok : ftc::Tpl::Stat::Warn, ftc::Tpl::pa(had) + "  ->  " + args[0],
+                         {conf == 2 ? L.tr("confirmed; restart sent, it ends programming mode",
+                                           "bestätigt; Neustart gesendet, er beendet den Programmiermodus")
+                                    : L.tr("confirmed; no restart possible - restart the device so it keeps the address",
+                                           "bestätigt; Neustart nicht möglich - das Gerät neu starten, damit es die Adresse behält")});
         else
             g_tpl.status(ftc::Tpl::Stat::Err, L.tr("the address was not taken", "die Adresse wurde nicht übernommen"),
                          {L.tr("the read-back did not show it", "das Rücklesen zeigt sie nicht")});
-        g_knxTunnel.disconnect();
-        socketCleanup();
-        return took ? 0 : 1;
+        if (!quiet && noRestart)
+            g_tpl.status(ftc::Tpl::Stat::Info, L.tr("--no-restart is for the serial-number way", "--no-restart gilt für den Weg über die Seriennummer"),
+                         {L.tr("in programming mode the restart is what ends it", "im Programmiermodus beendet erst der Neustart ihn")});
+        return finish(took ? 0 : 1);
     }
 
     // `ga` is bus traffic, not a device command: it addresses a GROUP, so it names no PA, skips the

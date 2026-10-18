@@ -113,9 +113,23 @@ device; on a productive line use it per device and deliberately.
 |---|---|
 | `<pa> progmode [on\|off\|blink]` · `<pa> led …` | write PID_PROGMODE (54); `led` is the older spelling |
 | `<pa> restart` · `<pa> masterreset <code> yes` | A_Restart; a basic restart is answered by nothing |
-| `setpa <x.y.z>` | give the one device in programming mode a new individual address |
+| `setpa <x.y.z>` · `--wait <time>` | give the one device in programming mode a new individual address; waits for the button (on a terminal until Ctrl+C or `--wait`, in a script or with `-q` only with `--wait`), lists several with their serial numbers and lets you pick one |
+| `setpa <x.y.z> sn <SN>` · `--no-restart` | the address by serial number, without programming mode; restarts the device afterwards unless `--no-restart` |
+| `setpa scan [<a.l>]` | serial numbers of the devices that still have the default address 15.15.255 (or a.l.255) |
 | `<pa> unload yes` | unload every loadable object the device has, found by object type: address, association and group object table, application programs, a router's filter table |
 | `<pa> runstate` | the load states and the run state, read only |
+
+`setpa` asks once a second who is in programming mode (03_05_02 2.3) and counts the answers per telegram, not
+per sender: two new devices that both still have 15.15.255 are two devices, and both would take an address
+written to programming mode. A Layer-2 repetition does not count; that needs an interface that passes the
+repetition mark on. Two identical answers sent at the same
+instant merge on TP1 into one, so only the serial number tells such devices apart for sure. With several
+devices in programming mode `setpa` reads each one's serial number (PID 11), lists them, and writes the
+address to the one you pick by its serial number; the others stay in programming mode. `setpa <x.y.z> sn <SN>`
+does the same without programming mode (2.5): it checks that the address is free, writes, reads back by serial
+number and restarts the device. A device with the OpenKNX stack holds a new address in RAM and saves it on
+restart; with `--no-restart` it keeps it only after a later restart or download. `setpa scan` reads the serial
+numbers of the devices that still have the default address (2.24, 7 s).
 
 **KNX properties** — the interface objects of a device, independent of the file transfer. Which objects and
 PIDs exist, and how to read the answers: [knx-properties.md](../reference/knx-properties.md).
