@@ -16,6 +16,7 @@
 // The two response APCIs the callbacks below hand out raw, so a consumer can name them instead of
 // writing the number. Match with (apci & 0x03C0), the 4-bit-APCI mask.
 static constexpr uint16_t APCI_INDADDR_RESP = 0x0140;    // A_IndividualAddress_Response (broadcast)
+static constexpr uint16_t APCI_INDADDR_SN_RESP = 0x03DD; // A_IndividualAddressSerialNumber_Response (broadcast)
 static constexpr uint16_t APCI_GROUPVALUE_RESP = 0x0040; // A_GroupValue_Response
 
 // Group-addressed bus traffic. Host-only: the embedded client has no such callback, so this one is NOT
@@ -23,8 +24,9 @@ static constexpr uint16_t APCI_GROUPVALUE_RESP = 0x0040; // A_GroupValue_Respons
 using GroupCb = void (*)(uint16_t src, uint16_t ga, uint16_t apci, const uint8_t* data, uint8_t len);
 // Master-reset answer: error code 0 = done, plus the seconds the device says it needs.
 using RestartRespCb = void (*)(uint16_t src, uint8_t errorCode, uint16_t processTimeS);
-// Broadcast traffic (destination 0): the individual-address procedure.
-using BroadcastCb = void (*)(uint16_t src, uint16_t apci, const uint8_t* data, uint8_t len);
+// Broadcast traffic (destination 0): the individual-address procedure. @p repeated = cEMI Ctrl1 bit 5 clear,
+// the TP1 mark of a Layer-2 repetition (03_02_02 2.2.4); an interface may not pass it through.
+using BroadcastCb = void (*)(uint16_t src, uint16_t apci, const uint8_t* data, uint8_t len, bool repeated);
 
 // Callback prototypes — must match the ftc* callback prototypes in knx/src/knx/bau_systemB.h
 // (under #ifdef OPENKNX_FTC_CLIENT) exactly (shim contract §3).
@@ -104,6 +106,8 @@ class KnxIpTunnel
     bool sendBroadcast(const uint8_t* apdu, uint8_t len);        // one broadcast APDU (destination 0)
     bool sendIndividualAddressRead();                           // who is in programming mode?
     bool sendIndividualAddressWrite(uint16_t pa);               // give it this address
+    bool sendIndividualAddressSerialNumberRead(const uint8_t sn[6]);             // which address has this serial?
+    bool sendIndividualAddressSerialNumberWrite(const uint8_t sn[6], uint16_t pa); // give this serial that address
 
     // Connection-oriented (ETS-parity) scan: T_Connect / T_Data_Connected(DeviceDescriptor_Read) / T_Disconnect.
     bool scanConnect(uint16_t pa);

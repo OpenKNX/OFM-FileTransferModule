@@ -48,6 +48,8 @@ static constexpr uint16_t APCI_FUNC_PROP_CMD = 0x2C7;
 static constexpr uint16_t APCI_DEVDESC_READ = 0x300;
 static constexpr uint16_t APCI_INDADDR_WRITE = 0x0C0;
 static constexpr uint16_t APCI_INDADDR_READ = 0x100;
+static constexpr uint16_t APCI_INDADDR_SN_READ = 0x3DC;
+static constexpr uint16_t APCI_INDADDR_SN_WRITE = 0x3DE;
 static constexpr uint16_t APCI_GROUPVALUE_READ = 0x000;
 static constexpr uint16_t APCI_GROUPVALUE_WRITE = 0x080;
 static constexpr uint16_t APCI_RESTART = 0x380;
@@ -684,7 +686,7 @@ static void handleCemi(uint16_t selfPa, const DispatchCbs& cb, uint8_t* cemi, in
         if (ga == 0 && cb.bcast != nullptr && tpduLen >= 2 && (tpdu[0] & 0xFC) == 0x00)
         {
             const uint16_t apci = (uint16_t)(((tpdu[0] & 0x03) << 8) | tpdu[1]);
-            cb.bcast(sa, apci, &tpdu[2], (uint8_t)(tpduLen - 2));
+            cb.bcast(sa, apci, &tpdu[2], (uint8_t)(tpduLen - 2), (cemi[base] & 0x20) == 0);
             return;
         }
         if (cb.grp != nullptr && tpduLen >= 2 && ga != 0 && (tpdu[0] & 0xFC) == 0x00)
@@ -1144,6 +1146,30 @@ bool KnxIpTunnel::sendIndividualAddressWrite(uint16_t pa)
     const uint8_t apdu[4] = {(uint8_t)((APCI_INDADDR_WRITE >> 8) & 0x03), (uint8_t)(APCI_INDADDR_WRITE & 0xFF),
                              (uint8_t)(pa >> 8), (uint8_t)(pa & 0xFF)};
     return sendBroadcast(apdu, 4);
+}
+
+/**
+ * @brief Broadcast A_IndividualAddressSerialNumber_Read (03_03_07 3.2.4) - the device with @p sn answers
+ *        from its current address.
+ */
+bool KnxIpTunnel::sendIndividualAddressSerialNumberRead(const uint8_t sn[6])
+{
+    uint8_t apdu[8] = {(uint8_t)((APCI_INDADDR_SN_READ >> 8) & 0x03), (uint8_t)(APCI_INDADDR_SN_READ & 0xFF)};
+    memcpy(&apdu[2], sn, 6);
+    return sendBroadcast(apdu, sizeof(apdu));
+}
+
+/**
+ * @brief Broadcast A_IndividualAddressSerialNumber_Write (03_03_07 3.2.5 p.23): serial, new address, 4 reserved
+ *        octets. The device with @p sn takes @p pa, programming mode or not.
+ */
+bool KnxIpTunnel::sendIndividualAddressSerialNumberWrite(const uint8_t sn[6], uint16_t pa)
+{
+    uint8_t apdu[14] = {(uint8_t)((APCI_INDADDR_SN_WRITE >> 8) & 0x03), (uint8_t)(APCI_INDADDR_SN_WRITE & 0xFF)};
+    memcpy(&apdu[2], sn, 6);
+    apdu[8] = (uint8_t)(pa >> 8);
+    apdu[9] = (uint8_t)(pa & 0xFF); // apdu[10..13] reserved, 0
+    return sendBroadcast(apdu, sizeof(apdu));
 }
 
 /**
