@@ -1,9 +1,15 @@
 # Changes
 
 
+## ec/v0.3.0-beta.1: 2026-10-16
+
+The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-16
+below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
+
+
 ## 2026-10-16 -- setpa checks the address first, `scan -q` has a fixed record form
 
-* Fix: `setpa` follows NM_IndividualAddress_Write (03_05_02 2.3 p.13-15): it stops when another device already answers on the new address, writes only when the address changes, confirms over a transport connection and restarts the device, which ends its programming mode. A device without connections is still confirmed by the broadcast read-back, without a restart
+* Fix: `setpa` follows NM_IndividualAddress_Write (03_05_02 2.3 p.13-15): it stops when another device already answers on the new address, writes only when the address changes, confirms over a transport connection and, once the device acknowledges that read, restarts it, which ends its programming mode. A device without connections is still confirmed by the broadcast read-back, without a restart
 * Change: every line of `scan -q` starts with its record type and has a fixed field count: `ipdev` 5 (the tunnel addresses comma-separated in one field), `tunnel` 4, `device` 11, the counters 2. Device and tunnel lines used to start with the address
 * Fix: `alle` in the knxOTA picker shows the devices of the last search again instead of searching the line once more
 * Fix: `bm <x/y/z>` says that its group address filter hides point-to-point and broadcast frames
@@ -22,12 +28,6 @@
 * The write forms of `ga write`, and `--every`, `--count`, `--seconds`, `--live` and `-q` of `ga read`, work the same; `-q` prints `ga\task\t…` lines. One ask names each address once. With `--every` a cycle takes at least 1.5 s, a shorter interval is raised to that. The exit code says whether the telegrams were confirmed, not whether an answer came; a stopped ask lists what it sent first
 * The type an answer is decoded with stays with its address, also when several `<x/y/z>:<DPT>=<v>` are given
 * A negative L_Data.con names both causes: nobody on the TP line acknowledged the telegram, or the interface did not send it. On TP1 a group telegram is acknowledged only by a device or a coupler that has the address in its table; a frame the interface's transmitter drops gets a negative confirmation too. Before, it said "not confirmed (negative L_Data.con)"
-
-
-## ec/v0.3.0-beta.1: 2026-10-15
-
-The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-15
-below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
 
 
 ## 2026-10-15 -- the client counts only the answer it asked for
