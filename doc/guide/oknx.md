@@ -162,7 +162,7 @@ target wants one ([unlocking-a-device.md](unlocking-a-device.md)).
 | `<pa> rm` · `mkdir` · `rmdir` · `mv` | delete · create · remove · rename |
 | `<pa> format yes` | erase the **whole** filesystem — guarded |
 | `<pa> perf [kb] [pkg] [mode]` | throughput test without a file; `sd`/`efc` picks the drive |
-| `<pa> login <password>` / `logout` | unlock and lock writing; the password never goes on the wire |
+| `<pa> login [<password>]` / `logout` | unlock and lock writing; the password never goes on the wire. Without a password on the line it comes from `OKNX_FTC_PW_<a>_<l>_<d>` (e.g. `OKNX_FTC_PW_5_0_3`), else it is asked for on a terminal; without either a script gets exit code 2 |
 | `sd/` · `efc/` | prefix a **remote** path to leave LittleFS |
 
 **Transfer options** — order does not matter, and three spellings mean the same thing.

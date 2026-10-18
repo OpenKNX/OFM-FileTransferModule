@@ -1482,6 +1482,8 @@ static void examples()
         {"oknx -i 11.11.0.126 5.0.3 get /log.txt ./log.txt", "fetch one back", "eine zurückholen"},
         {"oknx -i 11.11.0.126 5.0.3 login 'secret'", "a device that asks for a password",
          "ein Gerät, das ein Passwort verlangt"},
+        {"oknx -i 11.11.0.126 5.0.3 login", "without one on the line: from OKNX_FTC_PW_5_0_3, else asked for",
+         "ohne eines im Aufruf: aus OKNX_FTC_PW_5_0_3, sonst abgefragt"},
         {"oknx -i 11.11.0.126 5.0.3 con", "its console, over the tunnel", "seine Konsole, über den Tunnel"},
         {"oknx -i 11.11.0.126 con", "the INTERFACE's own console, over its web socket",
          "die Konsole des INTERFACE selbst, über seinen Web-Socket"},
@@ -1866,7 +1868,8 @@ static void usage()
                       "abgelehnt — nie stillschweigend übergangen"));
 
     U.section(L.tr("ACCESS", "ZUGRIFF"), L.tr("(password-protected targets)", "(passwortgeschützte Ziele)"));
-    U.cmdRow("<pa> login <pw>", L.tr("unlock write actions (password -> MAC locally)", "Schreibaktionen freischalten (Passwort -> MAC lokal)"));
+    U.cmdRow("<pa> login [<pw>]", L.tr("unlock write actions (password -> MAC locally); without <pw> from OKNX_FTC_PW_<a>_<l>_<d>, else asked for",
+                                       "Schreibaktionen freischalten (Passwort -> MAC lokal); ohne <pw> aus OKNX_FTC_PW_<a>_<l>_<d>, sonst abgefragt"));
     U.cmdRow("<pa> logout", L.tr("lock the write actions again", "Schreibaktionen wieder sperren"));
 #endif
 
@@ -10957,13 +10960,25 @@ int main(int argc, char** argv)
     // `oknx <pa> login [pw]` is served HERE, not handed to the shared console parser. That parser would
     // call requestLogin a second time, from a second place -- and the two would have to agree on what
     // "signed in" means, on the retry, and on remembering the device's lock-out. One sign-in, one set of
-    // rules. Without a password on the line it is asked for: a secret typed into a shell ends up in the
-    // history, and this way it never does.
+    // rules. Without a password on the line it comes from OKNX_FTC_PW_<a>_<l>_<d>, else it is asked for:
+    // a secret typed into a shell ends up in the history, and this way it never does.
     if (reachHasPa && pos.size() >= 2 && (pos[1] == "login" || pos[1] == "li"))
     {
         ftc::I18n& L = g_i18n;
         const uint16_t lpa = (uint16_t)((rp_a << 12) | (rp_l << 8) | rp_d);
         std::string pw = (pos.size() >= 3) ? pos[2] : std::string();
+        char envName[32];
+        std::snprintf(envName, sizeof(envName), "OKNX_FTC_PW_%u_%u_%u", rp_a, rp_l, rp_d);
+        bool fromEnv = false;
+        if (pw.empty())
+        {
+            const char* ev = std::getenv(envName);
+            if (ev != nullptr && *ev != '\0')
+            {
+                pw = ev;
+                fromEnv = true;
+            }
+        }
         const uint32_t locked = authBackoffRemaining(lpa);
         if (locked)
             g_tpl.status(ftc::Tpl::Stat::Err,
@@ -10975,8 +10990,9 @@ int main(int argc, char** argv)
         {
             if (!g_term.isTty())
             {
-                std::fprintf(stderr, "%s\n", L.tr("usage: oknx <pa> login <password>",
-                                                  "Aufruf: oknx <pa> login <Passwort>"));
+                std::fprintf(stderr, "%s %s\n",
+                             L.tr("usage: oknx <pa> login <password>, or set", "Aufruf: oknx <pa> login <Passwort>, oder setze"),
+                             envName);
                 socketCleanup();
                 return 2;
             }
@@ -10988,9 +11004,15 @@ int main(int argc, char** argv)
         switch (si.outcome)
         {
             case FileTransferClient::FtcAuthOk:
-                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
-                             {L.tr("writes stay allowed until the device goes idle",
-                                   "Schreibzugriff gilt, bis das Gerät in Ruhe fällt")});
+                if (fromEnv)
+                    g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
+                                 {std::string(L.tr("with the password from ", "mit dem Passwort aus ")) + envName,
+                                  L.tr("writes stay allowed until the device goes idle",
+                                       "Schreibzugriff gilt, bis das Gerät in Ruhe fällt")});
+                else
+                    g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("signed in", "angemeldet"),
+                                 {L.tr("writes stay allowed until the device goes idle",
+                                       "Schreibzugriff gilt, bis das Gerät in Ruhe fällt")});
                 rc = 0;
                 break;
             case FileTransferClient::FtcAuthNotNeeded:
@@ -11005,6 +11027,9 @@ int main(int argc, char** argv)
                                  {L.tr("next attempt in ", "nächster Versuch in ") + waitText(si.backoffS),
                                   L.tr("this is the device's brute-force protection, not a fault",
                                        "das ist der Brute-Force-Schutz des Geräts, kein Fehler")});
+                else if (fromEnv)
+                    g_tpl.status(ftc::Tpl::Stat::Err, std::string(L.tr("the password from ", "das Passwort aus ")) + envName +
+                                                          L.tr(" was not accepted", " wurde nicht angenommen"), {});
                 else
                     g_tpl.status(ftc::Tpl::Stat::Err, L.tr("that password was not accepted",
                                                            "dieses Passwort wurde nicht angenommen"), {});
