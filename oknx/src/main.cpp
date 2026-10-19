@@ -94,6 +94,8 @@ typedef int sock_t;
 #include "serve/BenchCmd.h"
 #include "serve/Bridge.h"
 #include "serve/Leader.h"
+#include "serve/AttachClient.h"
+#include "serve/LeaseClient.h"
 #include "serve/Worker.h"
 #include "core/SelfInstall.h"
 static ftc::Term g_term;
@@ -145,6 +147,10 @@ static constexpr int FTC_DETAIL_WORKERS = 5;
 // interface). 0 = the built-in default. This is the ONLY place parallelism measurably pays: ~20 found
 // devices instead of 255 addresses, and the bus is not the limit there.
 static int g_workers = 0;
+static bool g_noServe = false;   // --no-serve: never reserve at a running oknx serve
+static ftc::serve::LeaseClient g_lease; // the reservation at a running oknx serve, held until the process ends
+static ftc::serve::AttachClient g_attach; // reading along a busmonitor oknx serve holds
+static bool g_attached = false;
 static bool g_probeSlot = false; // internal: this process is a tunnel-slot probe child (connect, emit SLOT, hold, exit)
 // `--ws-path`: where the interface's own web console lives. Empty = probe for it, newest path first.
 static std::string g_wsPath;
@@ -1891,6 +1897,8 @@ static void usage()
     U.cmdRow("serve describe [--markdown|--json]", L.tr("every operation: arguments, class, what it changes", "jede Operation: Argumente, Klasse, was sie ändert"));
     U.cmdRow("mcp", L.tr("MCP over stdio, passed on to the running serve", "MCP über stdio, an den laufenden serve weitergereicht"));
     U.cmdRow("bench lock <run> <ip…> · unlock · status", L.tr("hold the bench by hand, as a suite run does", "den Prüfstand von Hand belegen, wie ein Suite-Lauf"));
+    U.cmdRow("--no-serve", L.tr("do not reserve at a running serve (OKNX_SERVE_PORT names its port)",
+                                "nicht bei einem laufenden serve reservieren (OKNX_SERVE_PORT nennt seinen Port)"));
 
     U.section(L.tr("SHORT FORMS & FLAGS", "KURZFORMEN & FLAGS"), L.tr("(everywhere)", "(überall)"));
     U.cmdRow("p i d l u g a m", L.tr("ping · info · df · ll · send · get · apply · mv", "ping · info · df · ll · send · get · apply · mv"));
@@ -5647,6 +5655,8 @@ int main(int argc, char** argv)
             verbose = g_verbose = true;
         else if (a == "--quiet" || a == "-q")
             quiet = g_quiet = true;
+        else if (a == "--no-serve")
+            g_noServe = true;
         else if (a == "--log")
             logRequested = true;
         else if (a.rfind("--log=", 0) == 0)
@@ -5819,6 +5829,53 @@ int main(int argc, char** argv)
                                                "Fehler: --ws-path gilt nur für `con` ohne <pa> und ohne -D (oknx -i <ip> con --ws-path <pfad>)"));
         socketCleanup();
         return 1;
+    }
+
+    // A running `oknx serve` owns connections too: reserve the interface(s) this command needs there, then work
+    // locally as before. Local-only commands and the internal children reserve nothing.
+    if (!g_probeSlot && !g_noServe && !ip.empty() && !discover && !pos.empty())
+    {
+        const std::string& c0 = pos[0];
+        const bool local = c0 == "install" || c0 == "uninstall" || c0 == "gzip" || c0 == "delta" || c0 == "decode" ||
+                           c0 == "config" || c0 == "help" || c0 == "?" || c0 == "browse" || wsCon ||
+                           (c0 == "ga" && pos.size() >= 2 && (pos[1] == "import" || pos[1] == "table"));
+        if (!local)
+        {
+            const bool bm = c0 == "bm" || c0 == "busmon";
+            const bool gm = c0 == "gm" || c0 == "groupmon" || (c0 == "ga" && pos.size() >= 2 && (pos[1] == "monitor" || pos[1] == "mon"));
+            const std::string kind = bm ? "bm" : gm ? "gm" : "mgmt";
+            std::vector<ftc::serve::LeaseItem> items = {{ip, port, kind}};
+            if ((bm || gm) && pos.size() >= 3 && pos[1] == "compare") items.push_back({pos[2], port, kind});
+            std::string purpose = "oknx";
+            for (size_t i = 0; i < pos.size() && i < 4; ++i) purpose += " " + pos[i];
+            std::string why;
+            const char* envPort = std::getenv("OKNX_SERVE_PORT"); // serve started with --port elsewhere
+            const int servePort = envPort && std::atoi(envPort) > 0 ? std::atoi(envPort) : ftc::serve::SERVE_PORT_DEFAULT;
+            const auto out = g_lease.reserve(servePort, items, purpose, why);
+            // serve holds the very busmonitor this plain `bm` wants: read along instead of being refused
+            const bool plainBm = bm && (pos.size() == 1 || pos[1] != "compare");
+            std::string awhy;
+            if (out == ftc::serve::LeaseClient::Refused && plainBm && g_lease.holder() == "serve-busmon" &&
+                g_attach.start(servePort, ip, port, "busmon", awhy))
+                g_attached = true;
+            else if (out == ftc::serve::LeaseClient::Refused)
+            {
+                g_ui.errorBlock(false, g_i18n.tr("oknx serve holds this interface", "oknx serve hält dieses Interface"), {why},
+                                g_i18n.tr("free it there (monitor_stop, or `oknx serve lease rm <id>`), or run with --no-serve",
+                                          "dort freigeben (monitor_stop, oder `oknx serve lease rm <id>`), oder mit --no-serve"));
+                socketCleanup();
+                return 1;
+            }
+            else if (out == ftc::serve::LeaseClient::Unknown)
+            {
+                g_ui.errorBlock(false, g_i18n.tr("oknx serve does not answer", "oknx serve antwortet nicht"), {why},
+                                g_i18n.tr("look at `oknx serve status`, or run with --no-serve",
+                                          "`oknx serve status` ansehen, oder mit --no-serve"));
+                socketCleanup();
+                return 1;
+            }
+            if (out == ftc::serve::LeaseClient::Skipped && !why.empty() && !quiet) std::fprintf(stderr, "serve: %s\n", why.c_str());
+        }
     }
 
     // --- internal: tunnel-slot probe child --------------------------------------------------------
@@ -7368,6 +7425,7 @@ int main(int argc, char** argv)
     {
         ftc::Monitor mon(g_term, g_theme, g_tpl, g_i18n);
         mon.target(ip, port);
+        if (g_attached) mon.feed([](uint8_t* b, int cap, int waitMs) { return g_attach.read(b, cap, waitMs); });
         if (monOneGa)
         {
             mon.setGroupFilter(monGas);
@@ -7394,6 +7452,10 @@ int main(int argc, char** argv)
                                  }));
         const int rc = mon.run(isBus ? ftc::Monitor::Mode::Bus : ftc::Monitor::Mode::Group,
                                quiet, verbose, monFrames, monSeconds, &g_abort);
+        if (g_attached && g_attach.lost() > 0) // dropped in serve or here: the display above is not the whole bus
+            g_tpl.status(ftc::Tpl::Stat::Warn, g_i18n.tr("telegrams lost while reading along serve's busmonitor",
+                                                        "Telegramme verloren beim Mitlesen von serves Busmonitor"),
+                         {std::to_string(g_attach.lost())});
         socketCleanup();
         return rc;
     }
