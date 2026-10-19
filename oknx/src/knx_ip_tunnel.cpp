@@ -1244,6 +1244,7 @@ bool KnxIpTunnel::scanConnect(uint16_t pa)
 bool KnxIpTunnel::scanConnected() { return s.coConnected; }
 bool KnxIpTunnel::scanConnectedTo(uint16_t pa) { return s.coConnected && s.coPa == pa; }
 bool KnxIpTunnel::scanReadAcked() { return s.coReadAcked; }
+bool KnxIpTunnel::scanAwaitingAck() { return s.coAwaitingAck; }
 
 /**
  * @brief Issue a numbered CO A_DeviceDescriptor_Read on the open session and await its T_ACK.

@@ -116,6 +116,7 @@ class KnxIpTunnel
     bool scanConnected(); // true once the T_Connect is acknowledged / the CO session is up
     bool scanConnectedTo(uint16_t pa); // CO session is up and to pa
     bool scanReadAcked(); // true once the device T_ACKed our CO read -> present (presence-on-ACK, before the DD response)
+    bool scanAwaitingAck(); // a numbered CO frame is out and its T_ACK has not come yet
     void scanReadDescriptor();
     void scanDisconnect();
 

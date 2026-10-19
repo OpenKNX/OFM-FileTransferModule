@@ -10363,13 +10363,38 @@ int main(int argc, char** argv)
             for (const Obj& o : LOADABLE)
                 if (o.type == type) found.push_back({idx, &o, -1});
         }
+        // 03_05_02 3.31.3 p.138: the Unload event and 9 reserved octets (10 octets), over a connection; 3.31.4 p.142
+        // also allows it connectionless, which is the way when the device takes no connection.
+        static const uint8_t UNLOAD_EVENT[10] = {LE_UNLOAD, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        // the session counts as open once the T_Connect is sent: the first T_ACK (or a T_Disconnect) tells whether the device took it
+        bool co = !found.empty() && g_knxTunnel.scanConnect(tgt);
         for (const Found& f : found)
         {
             if (g_abort) break;
-            uint8_t v = LE_UNLOAD;
-            if (!g_knxTunnel.sendPropertyValueWrite(tgt, f.idx, PID_LOAD_STATE_CONTROL, 1, 1, &v, 1)) continue;
+            if (!g_knxTunnel.sendPropertyValueWrite(tgt, f.idx, PID_LOAD_STATE_CONTROL, 1, 1, UNLOAD_EVENT, sizeof(UNLOAD_EVENT)))
+                continue;
+            // over a connection the next numbered frame waits for this one's T_ACK (3 s, 03_03_04)
+            if (co)
+            {
+                for (uint64_t t0 = nowMs();
+                     g_knxTunnel.scanAwaitingAck() && g_knxTunnel.scanConnected() && nowMs() - t0 < 3000 && !g_abort;)
+                    g_knxTunnel.pump();
+                if (g_abort) break;
+                if (g_knxTunnel.scanAwaitingAck() || !g_knxTunnel.scanConnected())
+                {
+                    // no T_ACK, or the device refused the connection: this write may not have arrived and the next
+                    // numbered frame would repeat its sequence number, so this one and the rest go connectionless
+                    // (unloading an unloaded object leaves it unloaded)
+                    g_knxTunnel.scanDisconnect();
+                    co = false;
+                    if (!g_knxTunnel.sendPropertyValueWrite(tgt, f.idx, PID_LOAD_STATE_CONTROL, 1, 1, UNLOAD_EVENT,
+                                                            sizeof(UNLOAD_EVENT)))
+                        continue;
+                }
+            }
             for (uint64_t t0 = nowMs(); nowMs() - t0 < 500;) g_knxTunnel.pump();
         }
+        if (co) g_knxTunnel.scanDisconnect(); // the read-back below runs connectionless, as before
         // Read the state back: LS_UNLOADED (0) is the proof. LS_UNLOADING (4) is read again for up to 30 s
         // (03_05_02 p.142).
         int unloaded = 0;
