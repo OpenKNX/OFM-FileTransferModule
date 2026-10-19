@@ -13,6 +13,7 @@
 * `ga`, `prop read`, `busprop read`, `runstate`, `restart` and `setpa` of the command line now run on the same code as serve (`core/GaOps.h`, `core/PropRead.h`, `core/SetPa.h`); their output is unchanged
 * Fix: `oknx prop read` with a start index above 255 read the element at the index modulo 256 (the device management read took the index as one octet)
 * Fix: `oknx <pa> unload yes` sends the Unload event as the 10 octets 03_05_02 3.31.3.1 defines (04h and 9 reserved 00h) over a transport connection, instead of 1 octet connectionless; a device that refuses the connection or gives no T_ACK gets that write and the rest connectionless (3.31.4)
+* `scripts/Test-OknxServe.ps1` checks `oknx serve` on Windows and Linux (a Raspberry Pi included): start, one instance per port, the port held alone, restart, detach, and with `-Interface` the release of a killed worker's tunnel
 * `oknx --discover`'s search keeps the serial number, MAC address and service families of each interface; the monitors can hand their raw cEMI to a second reader
 
 

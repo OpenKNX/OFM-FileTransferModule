@@ -22,7 +22,8 @@ oknx serve describe             # every operation: arguments, class, what it cha
 ```
 
 `--port N` and `--rules <file>` change the two defaults. One serve per port: a second one says which
-program already holds it.
+program already holds it. `scripts/Test-OknxServe.ps1` checks these points on a machine (Windows, Linux, a
+Raspberry Pi), with its own port and configuration folder.
 
 Per interface serve starts a worker process (`oknx --_worker`), which owns that interface's connections.
 A worker that dies is noticed at its pipe; its operations end with `INTERNAL`, and the next worker for
