@@ -270,6 +270,7 @@ struct TunnelState
     sockaddr_in server{};   // KNXnet/IP server (data + control endpoint)
     uint32_t localIp = 0;   // our outgoing IP, host order (a<<24|b<<16|c<<8|d)
     uint16_t localPort = 0; // our local UDP port, host order
+    uint64_t lastSendWallMs = 0; // wall-clock ms of the last frame sent to the server (its 120 s timer runs from there)
 
     uint8_t channelId = 0;
     uint8_t txSeq = 0; // outgoing TUNNELING_REQUEST seq
@@ -344,6 +345,10 @@ bool sendKnxIp(uint16_t serviceType, const uint8_t* body, uint16_t bodyLen)
     put16(&pkt[4], total);
     if (bodyLen) memcpy(&pkt[6], body, bodyLen);
     int n = (int)::send(s.sock, (const char*)pkt, total, 0);
+    if (n == (int)total)
+        s.lastSendWallMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
     return n == (int)total;
 }
 
@@ -1319,6 +1324,8 @@ void KnxIpTunnel::pacingRate(uint32_t deliveredBps, bool clean)
  * @brief Tunnel-health getters (verbose console status line): read the TU-local session state.
  */
 uint8_t KnxIpTunnel::channelId() const { return _connected ? s.channelId : 0; }
+uint16_t KnxIpTunnel::localPort() const { return _connected ? s.localPort : 0; }
+uint64_t KnxIpTunnel::lastSendWallMs() const { return _connected ? s.lastSendWallMs : 0; }
 uint8_t KnxIpTunnel::txSeq() const { return _connected ? s.txSeq : 0; }
 uint8_t KnxIpTunnel::rxSeq() const { return _connected ? s.rxSeq : 0; }
 

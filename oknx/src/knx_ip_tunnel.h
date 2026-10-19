@@ -65,6 +65,8 @@ class KnxIpTunnel
      * @details 0 when not connected.
      */
     uint8_t channelId() const;
+    uint16_t localPort() const;       ///< our UDP port towards the server, 0 when not connected
+    uint64_t lastSendWallMs() const;  ///< wall-clock ms of the last frame we sent, 0 when not connected
     uint8_t txSeq() const;
     uint8_t rxSeq() const;
 
