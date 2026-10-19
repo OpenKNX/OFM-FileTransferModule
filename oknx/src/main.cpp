@@ -88,6 +88,7 @@ typedef int sock_t;
 #include "core/DeviceMgmt.h"
 #include "core/Discovery.h"
 #include "core/Gzip.h"
+#include "core/GaOps.h"
 #include "core/SelfInstall.h"
 static ftc::Term g_term;
 static ftc::I18n g_i18n;
@@ -9819,112 +9820,12 @@ int main(int argc, char** argv)
                         {L.tr("nothing was sent", "es wurde nichts gesendet")}, "oknx -i <ip> ga read '1/4/*' --every 10s --live");
 
         // The imported table of THIS interface gives names and types; `<x/y/z>:<DPT>` overrides the type.
-        static ftc::GaTable s_tab, s_inline;
-        s_tab.load(ip);
-        s_inline.clear();
-        auto infoOf = [](uint16_t g) -> const ftc::GaInfo* {
-            const ftc::GaInfo* gi = s_inline.find(g);
-            if (gi == nullptr || gi->main == 0) gi = s_tab.find(g);
-            return gi != nullptr && gi->main != 0 ? gi : nullptr;
-        };
-        auto nameOf = [](uint16_t g) -> std::string {
-            const ftc::GaInfo* gi = s_tab.find(g);
-            return gi != nullptr ? gi->name : std::string();
-        };
-
-        // One selector, comma lists already split: `x/y/z`, `x/y/z-n`, and on read also `*`, `x/*`,
-        // `x/y/*` over the imported table. 0/0/0 is NOT a group address: 03_05_01 reserves 0000h for
-        // broadcast, and a frame with address type "group" and destination 0 is a T_Data_Broadcast.
-        std::string selErr;
-        auto expand = [&](std::string tok, bool multi, std::vector<uint16_t>& out) -> bool {
-            uint16_t dMain = 0, dSub = 0;
-            const size_t colon = tok.find(':');
-            if (colon != std::string::npos)
-            {
-                if (!ftc::GaTable::parseDpt(tok.substr(colon + 1), dMain, dSub) || dMain == 0)
-                {
-                    selErr = L.tr("not a datapoint type", "kein Datenpunkttyp") + std::string(": ") + tok.substr(colon + 1);
-                    return false;
-                }
-                tok = tok.substr(0, colon);
-            }
-            const size_t first = out.size();
-            unsigned a = 0, b = 0, c = 0, d = 0;
-            char tail = 0;
-            const bool star = tok.size() >= 1 && tok.back() == '*';
-            if (!multi && (star || tok.find('-') != std::string::npos))
-            {
-                selErr = L.tr("ranges and * are for read only", "Bereiche und * gibt es nur für read") +
-                         std::string(": ") + tok;
-                return false;
-            }
-            if (multi && star)
-            {
-                const std::string head = tok.substr(0, tok.size() - 1);
-                int depth = -1;
-                if (head.empty()) depth = 0;
-                else if (std::sscanf(head.c_str(), "%u/%c", &a, &tail) == 1 && head.back() == '/' && a <= 31) depth = 1;
-                else if (std::sscanf(head.c_str(), "%u/%u/%c", &a, &b, &tail) == 2 && head.back() == '/' && a <= 31 && b <= 7)
-                    depth = 2;
-                if (depth < 0)
-                {
-                    selErr = L.tr("not a group address", "keine Gruppenadresse") + std::string(": ") + tok;
-                    return false;
-                }
-                s_tab.each([&](uint16_t g, const ftc::GaInfo&) {
-                    if (g == 0) return;
-                    if (depth >= 1 && ((g >> 11) & 0x1F) != a) return;
-                    if (depth >= 2 && ((g >> 8) & 0x07) != b) return;
-                    out.push_back(g);
-                });
-                if (out.size() == first)
-                {
-                    selErr = L.tr("no imported group address matches", "keine importierte Gruppenadresse passt") +
-                             std::string(": ") + tok;
-                    return false;
-                }
-            }
-            else if (multi && std::sscanf(tok.c_str(), "%u/%u/%u-%u%c", &a, &b, &c, &d, &tail) == 4 && a <= 31 &&
-                     b <= 7 && c <= d && d <= 255)
-            {
-                for (unsigned s = c; s <= d; s++)
-                    if ((a | b | s) != 0) out.push_back((uint16_t)((a << 11) | (b << 8) | s)); // 0/0/0-3 reads 0/0/1-3
-                if (out.size() == first)
-                {
-                    selErr = L.tr("0/0/0 is not a group address", "0/0/0 ist keine Gruppenadresse");
-                    return false;
-                }
-            }
-            else if (std::sscanf(tok.c_str(), "%u/%u/%u%c", &a, &b, &c, &tail) == 3 && a <= 31 && b <= 7 && c <= 255)
-                out.push_back((uint16_t)((a << 11) | (b << 8) | c));
-            else
-            {
-                selErr = L.tr("not a group address", "keine Gruppenadresse") + std::string(": ") + tok;
-                return false;
-            }
-            for (size_t i = first; i < out.size(); i++)
-            {
-                if (out[i] == 0)
-                {
-                    selErr = L.tr("0/0/0 is not a group address", "0/0/0 ist keine Gruppenadresse");
-                    return false;
-                }
-                if (dMain != 0)
-                {
-                    ftc::GaInfo gi;
-                    gi.main = dMain;
-                    gi.sub = dSub;
-                    s_inline.set(out[i], gi);
-                }
-            }
-            return true;
-        };
+        // The selection is the one `oknx serve` runs for ga_read.
+        ftc::GaSelect sel(ip, L);
+        auto infoOf = [&](uint16_t g) -> const ftc::GaInfo* { return sel.infoOf(g); };
+        auto nameOf = [&](uint16_t g) -> std::string { return sel.nameOf(g); };
         auto expandList = [&](const std::string& arg, bool multi, std::vector<uint16_t>& out) -> bool {
-            std::string tok;
-            std::istringstream ts(arg);
-            while (std::getline(ts, tok, ','))
-                if (!tok.empty() && !expand(tok, multi, out)) return false;
-            return true;
+            return sel.expandList(arg, multi, out);
         };
         const char* selHint = isAsk ? "oknx -i <ip> ga ask 31/0/1:16.001 uptime   ·   ga ask 31/0/1:16.001=uptime 31/0/2:16.001=uptime"
                               : isWrite ? "oknx -i <ip> ga write 1/4/5=1 1/4/6=0   ·   ga write 1/4/5 1/4/6 = 1"
@@ -9933,122 +9834,12 @@ int main(int argc, char** argv)
         // 03_03_07 3.1.3 p.16-17: the A_GroupValue_Write form follows the DATAPOINT's length, not the
         // size of the number - six bits or less rides in the APCI octet. With a known type the stack's
         // converter decides; without one, a plain 0-63 is the compact form and hex octets the long one.
-        struct Req
-        {
-            uint16_t ga = 0;
-            std::string shown; // the value as typed, for the write report
-            uint8_t small = 0, plen = 0, payload[14] = {0};
-            uint16_t dMain = 0, dSub = 0; // the type the answers are decoded with (0 = unknown)
-        };
+        using Req = ftc::GaReq;
         auto encode = [&](Req& r, const std::vector<std::string>& vals) -> int {
-            if (vals.empty() || vals[0].empty())
-                return fail(op + " " + L.tr("needs a value", "braucht einen Wert"),
-                            {L.tr("with an imported type: the value itself (21.5, 1, 80)",
-                                  "mit importiertem Typ: der Wert selbst (21.5, 1, 80)"),
-                             L.tr("without one: 0-63 plain, or hex octets", "ohne Typ: 0-63 blank, oder Hex-Oktette")},
-                            "oknx -i <ip> ga write 1/4/5 1   ·   ga write 0/7/0:9.001 21.5");
-            for (size_t i = 0; i < vals.size(); i++) r.shown += (i ? " " : "") + vals[i];
-            const ftc::GaInfo* gi = infoOf(r.ga);
-            uint16_t dMain = gi != nullptr ? gi->main : 0, dSub = gi != nullptr ? gi->sub : 0;
-            r.dMain = dMain;
-            r.dSub = dSub;
-            if (dMain != 0)
-            {
-                // Sub-byte datapoints (1 bit, 2 bit, 4 bit) are the compact form; everything else is
-                // carried in its own octets, as many as the type declares.
-                const bool subByte = (dMain == 1 || dMain == 2 || dMain == 3 || dMain == 23);
-                const Dpt d((short)dMain, (short)dSub);
-                const size_t need = subByte ? 1u : (size_t)d.dataLength();
-                // A typed value is one token: `21,5` must not become 21. Only a text (DPT 16) may carry spaces.
-                std::string tok = vals[0];
-                if (dMain == 16)
-                    for (size_t i = 1; i < vals.size(); i++) tok += " " + vals[i];
-                else if (vals.size() > 1 || tok.find(',') != std::string::npos)
-                    return fail(L.tr("a value of this type is one number", "ein Wert dieses Typs ist eine Zahl"),
-                                {ftc::GaTable::gaStr(r.ga) + "  DPT " + std::to_string(dMain) + "." + std::to_string(dSub) +
-                                     "  " + r.shown,
-                                 L.tr("decimal point, not comma: 21.5", "Dezimalpunkt, kein Komma: 21.5"),
-                                 L.tr("nothing was sent", "es wurde nichts gesendet")},
-                                "oknx -i <ip> ga write 0/7/0 21.5");
-                KNXValue v(false);
-                char* end = nullptr;
-                if (dMain == 16) v = tok.c_str();
-                else if (dMain == 9 || dMain == 14)
-                {
-                    const double dv = std::strtod(tok.c_str(), &end);
-                    if (end == nullptr || *end != 0) dMain = 0;
-                    v = dv;
-                }
-                else
-                {
-                    const long lv = std::strtol(tok.c_str(), &end, 0);
-                    if (end == nullptr || *end != 0) dMain = 0;
-                    v = (int64_t)lv;
-                }
-                uint8_t buf[16] = {0};
-                if (dMain != 0 && need <= sizeof(buf) && KNX_Encode_Value(v, buf, need, d))
-                {
-                    if (subByte) r.small = (uint8_t)(buf[0] & 0x3F);
-                    else
-                    {
-                        r.plen = (uint8_t)(need > sizeof(r.payload) ? sizeof(r.payload) : need);
-                        std::memcpy(r.payload, buf, r.plen);
-                    }
-                    return 0;
-                }
-                return fail(L.tr("that value does not fit the datapoint type", "dieser Wert passt nicht zum Datenpunkttyp"),
-                            {ftc::GaTable::gaStr(r.ga) + "  DPT " + std::to_string(gi->main) + "." + std::to_string(dSub) +
-                                 "  " + r.shown,
-                             L.tr("nothing was sent", "es wurde nichts gesendet")},
-                            "oknx -i <ip> ga write 0/7/0 21.5");
-            }
-            // Untyped: octets are separate tokens, or one comma list with 0x on every octet (`0x0C,0x1A`), so a
-            // decimal comma (`21,5`) is refused instead of going out as the octets 21 05.
-            std::vector<std::string> toks;
-            for (const std::string& t : vals)
-            {
-                const bool list = t.find(',') != std::string::npos;
-                for (size_t a = 0;;)
-                {
-                    const size_t b = t.find(',', a);
-                    toks.push_back(t.substr(a, b == std::string::npos ? std::string::npos : b - a));
-                    if (list && toks.back().rfind("0x", 0) != 0 && toks.back().rfind("0X", 0) != 0)
-                        return fail(L.tr("a comma list needs 0x on every octet", "eine Komma-Liste braucht 0x vor jedem Oktett"),
-                                    {ftc::GaTable::gaStr(r.ga) + "  " + r.shown,
-                                     L.tr("a number with a decimal point needs its type: ga write 0/7/0:9.001 21.5",
-                                          "eine Kommazahl braucht ihren Typ: ga write 0/7/0:9.001 21.5"),
-                                     L.tr("nothing was sent", "es wurde nichts gesendet")},
-                                    "oknx -i <ip> ga write 1/4/5=0x0C,0x1A   ·   ga write 1/4/5 0C 1A");
-                    if (b == std::string::npos) break;
-                    a = b + 1;
-                }
-            }
-            const bool hex = toks[0].rfind("0x", 0) == 0 || toks[0].rfind("0X", 0) == 0;
-            if (!hex && toks.size() == 1)
-            {
-                char* end = nullptr;
-                long v = std::strtol(toks[0].c_str(), &end, 10);
-                if (end == nullptr || *end != 0 || v < 0 || v > 63)
-                    return fail(L.tr("a plain value must be 0-63 without a known type",
-                                     "eine blanke Zahl muss ohne bekannten Typ 0-63 sein"),
-                                {ftc::GaTable::gaStr(r.ga) + "  " + r.shown,
-                                 L.tr("import the project, or give the type: a number 0/7/0:9.001 21.5, a text 31/0/1:16.001 uptime",
-                                      "Projekt importieren, oder Typ angeben: Zahl 0/7/0:9.001 21.5, Text 31/0/1:16.001 uptime")},
-                                "oknx -i <ip> ga import GA-Export.xml");
-                r.small = (uint8_t)v;
-                return 0;
-            }
-            for (const std::string& t : toks)
-            {
-                char* end = nullptr;
-                long v = std::strtol(t.c_str(), &end, 16);
-                if (t.empty() || end == nullptr || *end != 0 || v < 0 || v > 255 || r.plen >= sizeof(r.payload))
-                    return fail(r.plen >= sizeof(r.payload) ? L.tr("more than 14 octets", "mehr als 14 Oktette")
-                                                            : L.tr("not a hex octet", "kein Hex-Oktett") + std::string(": '") + t + "'",
-                                {L.tr("nothing was sent", "es wurde nichts gesendet")}, "0x00 .. 0xFF");
-                r.payload[r.plen++] = (uint8_t)v;
-            }
-            return 0;
+            ftc::GaEncodeError e; // the same encoding `oknx serve` runs for ga_write
+            if (ftc::gaEncode(r, vals, infoOf(r.ga), op, L, e) == 0) return 0;
+            const auto d = [&](size_t i) { return i < e.detail.size() ? e.detail[i] : std::string(); };
+            return fail(e.title, {d(0), d(1), d(2), d(3)}, e.hint);
         };
 
         // Read: every argument is a selector list. Write has three forms - `<ga> <v…>` (the old one, a comma
@@ -10060,7 +9851,7 @@ int main(int argc, char** argv)
             std::vector<uint16_t> gas;
             for (const std::string& a : args)
                 if (!expandList(a, true, gas))
-                    return fail(selErr, {L.tr("nothing was sent", "es wurde nichts gesendet")}, selHint);
+                    return fail(sel.error(), {L.tr("nothing was sent", "es wurde nichts gesendet")}, selHint);
             std::set<uint16_t> seen;
             for (uint16_t g : gas)
                 if (seen.insert(g).second)
@@ -10099,9 +9890,9 @@ int main(int argc, char** argv)
             for (const auto& it : items)
             {
                 std::vector<uint16_t> gas;
-                s_inline.clear(); // `0/7/0:9.001=21.5 0/7/0=1`: the type of the first does not carry over
+                sel.clearInline(); // `0/7/0:9.001=21.5 0/7/0=1`: the type of the first does not carry over
                 if (!expandList(it.first, false, gas))
-                    return fail(selErr, {L.tr("nothing was sent", "es wurde nichts gesendet")}, selHint);
+                    return fail(sel.error(), {L.tr("nothing was sent", "es wurde nichts gesendet")}, selHint);
                 for (uint16_t g : gas)
                 {
                     Req r;
@@ -10126,30 +9917,17 @@ int main(int argc, char** argv)
         // One telegram at a time, the next after the L_Data.con of the one before: the interface acknowledges
         // a tunnel request before its frame is on TP, so pacing on the tunnel ACK alone lets a list pile up in
         // the interface's transmit queue.
-        enum : uint8_t { CON_OK = 0, CON_NEG, CON_LOST, NOT_SENT, CON_STOPPED, SKIPPED }; // the last two: Ctrl+C
-        static volatile bool s_conSeen = false;
-        static bool s_conOk = false;
-        static uint16_t s_conGa = 0;
-        static uint64_t s_conAt = 0; // nowMs() of the confirmation: the telegram was on the bus
-        const FtcConCb prevCon = g_knxTunnel.confirmCallback();
-        g_knxTunnel.setConfirmCallback([](uint16_t da, bool ok) {
-            if (da != s_conGa) return;
-            s_conOk = ok;
-            s_conAt = nowMs();
-            s_conSeen = true;
-        });
-        auto sendOne = [&](const Req& r) -> uint8_t {
-            s_conGa = r.ga;
-            s_conSeen = false;
-            if (!g_knxTunnel.sendGroupValue(r.ga, isWrite || isAsk, r.small, r.payload, r.plen)) return NOT_SENT;
-            for (const uint64_t t0 = nowMs(); !s_conSeen && !g_abort && nowMs() - t0 < 3000;)
-            {
-                g_knxTunnel.pump();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            if (s_conSeen) return s_conOk ? CON_OK : CON_NEG;
-            return g_abort ? CON_STOPPED : CON_LOST;
+        enum : uint8_t // the last two: Ctrl+C
+        {
+            CON_OK = ftc::GA_CON_OK,
+            CON_NEG = ftc::GA_CON_NEG,
+            CON_LOST = ftc::GA_CON_LOST,
+            NOT_SENT = ftc::GA_NOT_SENT,
+            CON_STOPPED = ftc::GA_CON_STOPPED,
+            SKIPPED = ftc::GA_SKIPPED
         };
+        ftc::GaBus bus(g_knxTunnel, [] { return g_abort != 0; }); // the telegram path `oknx serve` runs too
+        auto sendOne = [&](const Req& r) -> uint8_t { return bus.sendOne(r, isWrite || isAsk); };
         auto conText = [&](uint8_t st) -> std::string {
             switch (st)
             {
@@ -10169,8 +9947,7 @@ int main(int argc, char** argv)
             else g_tpl.status(ftc::Tpl::Stat::Warn, abortReason(), {});
         };
         auto finish = [&](int rc) -> int {
-            g_knxTunnel.setGroupCallback(nullptr);
-            g_knxTunnel.setConfirmCallback(prevCon);
+            bus.release();
             g_knxTunnel.disconnect();
             socketCleanup();
             return rc;
@@ -10242,30 +10019,9 @@ int main(int argc, char** argv)
             return finish(okN == reqs.size() ? 0 : 1);
         }
 
-        struct Hit
-        {
-            uint16_t src, ga;
-            uint8_t small;
-            std::vector<uint8_t> d;
-            uint64_t t; // nowMs() when it arrived
-        };
-        static std::vector<Hit> s_hits;
-        static std::set<uint16_t> s_want;
-        static bool s_takeWrite = false; // ask: a GroupValue_Write on the address is an answer too
-        static uint16_t s_ownPa = 0;
-        s_hits.clear();
-        s_want.clear();
-        s_takeWrite = isAsk;
-        s_ownPa = g_knxTunnel.assignedPA();
-        for (const Req& r : reqs) s_want.insert(r.ga);
-        g_knxTunnel.setGroupCallback([](uint16_t src, uint16_t g, uint16_t apci, const uint8_t* d, uint8_t n) {
-            constexpr uint16_t APCI_GV_WRITE = 0x0080; // A_GroupValue_Write (03_03_07 Table 1)
-            const uint16_t svc = apci & 0x03C0;
-            if (svc != APCI_GROUPVALUE_RESP && !(s_takeWrite && svc == APCI_GV_WRITE)) return;
-            if (s_want.count(g) == 0) return;          // an answer to an address that was not asked
-            if (s_takeWrite && src == s_ownPa) return; // our own command, should the server pass it back
-            s_hits.push_back({src, g, (uint8_t)(apci & 0x3F), std::vector<uint8_t>(d, d + n), nowMs()});
-        });
+        using Hit = ftc::GaHit;
+        bus.listen(reqs, isAsk);
+        std::vector<Hit>& s_hits = bus.hits();
         auto hexOf = [](const Hit& h) -> std::string {
             char b[8];
             if (h.d.empty())
@@ -10307,43 +10063,7 @@ int main(int argc, char** argv)
         std::vector<uint8_t> st(reqs.size(), NOT_SENT);
         std::vector<uint64_t> sentAt(reqs.size(), 0);
         size_t sentN = 0, okN = 0; // of the last cycle
-        auto cycle = [&]() {
-            s_hits.clear();
-            s_ownPa = g_knxTunnel.assignedPA(); // a reconnect can hand out another tunnel address
-            sentN = okN = 0;
-            for (size_t i = 0; i < reqs.size(); i++)
-            {
-                sentAt[i] = nowMs();
-                st[i] = g_abort ? SKIPPED : sendOne(reqs[i]);
-                if (st[i] == CON_OK || st[i] == CON_NEG) sentAt[i] = s_conAt; // "+N ms" from the telegram on the bus
-                sentN += st[i] != NOT_SENT && st[i] != SKIPPED;
-                okN += st[i] == CON_OK;
-            }
-            const uint64_t t0 = nowMs();
-            for (;;)
-            {
-                if (g_abort || nowMs() - t0 >= (isAsk ? waitMs : 1500u)) break;
-                if (isAsk)
-                {
-                    bool all = true;
-                    size_t expected = 0;
-                    uint64_t lastHit = 0;
-                    for (size_t i = 0; i < reqs.size() && all; i++)
-                    {
-                        if (st[i] == NOT_SENT || st[i] == SKIPPED) continue; // never handed out: no answer to wait for
-                        expected++;
-                        bool got = false;
-                        for (const Hit& h : s_hits)
-                            if (h.ga == reqs[i].ga) { got = true; lastHit = h.t > lastHit ? h.t : lastHit; }
-                        all = got;
-                    }
-                    if (expected == 0 || (all && nowMs() - lastHit >= 300)) break;
-                }
-                g_knxTunnel.pump();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            if (!g_abort) g_knxTunnel.pump(); // what arrived during the last sleep still belongs to this cycle
-        };
+        auto cycle = [&]() { bus.cycle(reqs, isWrite || isAsk, isAsk, waitMs, st, sentAt, sentN, okN); };
         auto printQuiet = [&]() {
             for (size_t i = 0; i < reqs.size(); i++)
             {
