@@ -1049,6 +1049,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         logIndentDown();
         return;
     }
+    openknx.hardware.noteStagedUpdate(nullptr); // a record must only ever name a command that was written completely
     if (!picoOTA.commit()) // false = OTA command page not written -> do NOT reboot
     {
         logErrorP("PicoOTA commit failed -- apply aborted");
@@ -1056,6 +1057,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         logIndentDown();
         return;
     }
+    openknx.hardware.noteStagedUpdate((const char *)data); // released at the next start once the bootloader ran
     _rebootRequested = millis();
     logInfoP("Firmware armed; device will restart in ~2s to apply");
     logIndentDown();
@@ -1288,6 +1290,7 @@ void FileTransferModule::cmdFwUpdate(uint8_t length, uint8_t *data, uint8_t *res
         logIndentDown();
         return;
     }
+    LittleFS.remove(path); // the image now lives in the OTA slot; the staged file would only block the next upload
     logInfoP("Firmware written to OTA slot; reboot in ~2s to apply");
     _rebootRequested = millis(); // reuse loop()'s deferred flash.save()+restart()
     logIndentDown();
@@ -1972,6 +1975,7 @@ void FileTransferModule::deltaLoop()
                 deltaStop(FirmwarePatch::ERR_WRITE);
                 return;
             }
+            openknx.hardware.noteStagedUpdate(nullptr); // this command replaces a full apply's; its record would name the wrong file
             if (!picoOTA.commit())
             {
                 logErrorP("PicoOTA commit failed -- apply aborted");
