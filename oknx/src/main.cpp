@@ -91,6 +91,10 @@ typedef int sock_t;
 #include "core/GaOps.h"
 #include "core/PropRead.h"
 #include "core/SetPa.h"
+#include "serve/BenchCmd.h"
+#include "serve/Bridge.h"
+#include "serve/Leader.h"
+#include "serve/Worker.h"
 #include "core/SelfInstall.h"
 static ftc::Term g_term;
 static ftc::I18n g_i18n;
@@ -1875,6 +1879,18 @@ static void usage()
                                        "Schreibaktionen freischalten (Passwort -> MAC lokal); ohne <pw> aus OKNX_FTC_PW_<a>_<l>_<d>, sonst abgefragt"));
     U.cmdRow("<pa> logout", L.tr("lock the write actions again", "Schreibaktionen wieder sperren"));
 #endif
+
+    U.section("SERVE", L.tr("(one process owns the connections: HTTP/SSE API and MCP on 127.0.0.1)",
+                            "(ein Prozess besitzt die Verbindungen: HTTP/SSE-API und MCP auf 127.0.0.1)"));
+    U.cmdRow("serve [--port N] [--rules F]", L.tr("start it (8671, rules ~/.config/oknx/rules.json); --detach runs it in the background",
+                                                 "starten (8671, Regeln ~/.config/oknx/rules.json); --detach im Hintergrund"));
+    U.cmdRow("serve stop · status", L.tr("stop it · its connections, reservations, bench lock", "beenden · seine Verbindungen, Reservierungen, Belegung"));
+    U.cmdRow("serve open [--open]", L.tr("one-time link (60 s) to its pages in the browser", "Einmal-Link (60 s) zu seinen Seiten im Browser"));
+    U.cmdRow("serve logout · rekey", L.tr("end all browser sessions · new program key", "alle Browser-Sitzungen beenden · neuer Programm-Schlüssel"));
+    U.cmdRow("serve lease rm <id>", L.tr("end a reservation of the command line", "eine Reservierung der Kommandozeile beenden"));
+    U.cmdRow("serve describe [--markdown|--json]", L.tr("every operation: arguments, class, what it changes", "jede Operation: Argumente, Klasse, was sie ändert"));
+    U.cmdRow("mcp", L.tr("MCP over stdio, passed on to the running serve", "MCP über stdio, an den laufenden serve weitergereicht"));
+    U.cmdRow("bench lock <run> <ip…> · unlock · status", L.tr("hold the bench by hand, as a suite run does", "den Prüfstand von Hand belegen, wie ein Suite-Lauf"));
 
     U.section(L.tr("SHORT FORMS & FLAGS", "KURZFORMEN & FLAGS"), L.tr("(everywhere)", "(überall)"));
     U.cmdRow("p i d l u g a m", L.tr("ping · info · df · ll · send · get · apply · mv", "ping · info · df · ll · send · get · apply · mv"));
@@ -5471,6 +5487,13 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "fatal: socket init failed\n");
         return 1;
     }
+    // A worker of `oknx serve` speaks JSON over its pipe; it never touches the terminal or the config.
+    if (argc >= 2 && std::strcmp(argv[1], "--_worker") == 0)
+    {
+        const int rc = ftc::serve::workerMain(argc, argv);
+        socketCleanup();
+        return rc;
+    }
     g_color = initTerminal(); // UTF-8 + ANSI, TTY-aware, NO_COLOR-honoring
     // Config file (~/.config/oknx/config.toml) — the persisted defaults. Precedence: CLI flags > config > env.
     g_cfg.load();
@@ -5490,6 +5513,43 @@ int main(int argc, char** argv)
     OpenKNX::Log::Logger::setLineHook(&ftcLineHook); // route the embedded client's body lines through Stage-2 reformat
     std::signal(SIGINT, onAbortSignal);              // Ctrl+C -> graceful cancel (portable: Win CRT maps console Ctrl+C to SIGINT)
     std::signal(SIGTERM, onAbortSignal);             // kill/terminate -> same graceful path
+
+    // `oknx serve …` has its own options (its --port is the HTTP port, not the KNXnet/IP one): hand it every
+    // word after `serve` before the command-line parser reads them.
+    // serve / mcp / bench may follow the display options (--lang, --theme, --ascii): find the command word
+    int cmdAt = 1;
+    while (cmdAt < argc && (std::strcmp(argv[cmdAt], "--ascii") == 0 ||
+                            ((std::strcmp(argv[cmdAt], "--lang") == 0 || std::strcmp(argv[cmdAt], "--theme") == 0) && cmdAt + 1 < argc)))
+        cmdAt += std::strcmp(argv[cmdAt], "--ascii") == 0 ? 1 : 2;
+    if (cmdAt > 1 && cmdAt < argc &&
+        (std::strcmp(argv[cmdAt], "serve") == 0 || std::strcmp(argv[cmdAt], "mcp") == 0 || std::strcmp(argv[cmdAt], "bench") == 0))
+    {
+        // shift the display options away so the checks below see the command first
+        for (int k = 1; k + cmdAt - 1 < argc; ++k) argv[k] = argv[k + cmdAt - 1];
+        argc -= cmdAt - 1;
+    }
+    if (argc >= 2 && (std::strcmp(argv[1], "mcp") == 0 || std::strcmp(argv[1], "bench") == 0))
+    {
+        // both talk to serve on its HTTP port; --serve-port picks another one
+        int sp = ftc::serve::SERVE_PORT_DEFAULT;
+        std::vector<std::string> sargs;
+        for (int i = 2; i < argc; ++i)
+        {
+            if (std::strcmp(argv[i], "--serve-port") == 0 && i + 1 < argc) sp = std::atoi(argv[++i]);
+            else sargs.push_back(argv[i]);
+        }
+        const int rc = std::strcmp(argv[1], "mcp") == 0 ? ftc::serve::mcpBridgeMain(sp) : ftc::serve::benchMain(sargs, sp);
+        socketCleanup();
+        return rc;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "serve") == 0)
+    {
+        std::vector<std::string> sargs;
+        for (int i = 2; i < argc; ++i) sargs.push_back(argv[i]);
+        const int rc = ftc::serve::serveMain(g_selfPath, sargs, g_i18n.german() ? "de" : "en", FTC_CLI_VERSION);
+        socketCleanup();
+        return rc;
+    }
 
     std::string ip;
     uint16_t port = 3671;
