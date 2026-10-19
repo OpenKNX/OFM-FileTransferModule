@@ -221,7 +221,7 @@ class DevMgmtSession
      *          classic "first read ok, rest lost" desync); advances the client sequence only on a confirmed
      *          matching answer.
      */
-    DmRead readEx(uint16_t iot, uint8_t inst, uint8_t pid, uint8_t startIdx, uint8_t noe,
+    DmRead readEx(uint16_t iot, uint8_t inst, uint8_t pid, uint16_t startIdx, uint8_t noe,
                   uint8_t* out, size_t cap, size_t& outLen, uint8_t* propErr = nullptr)
     {
         using namespace detail;
@@ -297,7 +297,7 @@ class DevMgmtSession
      * @details On total silence re-open a fresh channel once (sequence resets) and retry. Absent properties
      *          answer Negative and are NOT retried.
      */
-    DmRead readReliable(uint16_t iot, uint8_t inst, uint8_t pid, uint8_t startIdx, uint8_t noe,
+    DmRead readReliable(uint16_t iot, uint8_t inst, uint8_t pid, uint16_t startIdx, uint8_t noe,
                         uint8_t* out, size_t cap, size_t& outLen, uint8_t* propErr = nullptr)
     {
         DmRead r = readEx(iot, inst, pid, startIdx, noe, out, cap, outLen, propErr);

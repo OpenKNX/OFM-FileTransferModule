@@ -6989,6 +6989,14 @@ int main(int argc, char** argv)
             if (pos.size() >= 6) startIdx = (uint16_t)std::strtoul(pos[5].c_str(), nullptr, 0);
             if (pos.size() >= 7) noe = (uint8_t)std::strtoul(pos[6].c_str(), nullptr, 0);
         }
+        // the start index has 12 bits and the count 4 on the wire: larger values would wrap without a word
+        if ((pos.size() >= 6 && std::strtoul(pos[5].c_str(), nullptr, 0) > 4095) ||
+            (!doWrite && pos.size() >= 7 && std::strtoul(pos[6].c_str(), nullptr, 0) > 15))
+        {
+            std::fprintf(stderr, "start index is 0..4095, count 0..15\n");
+            socketCleanup();
+            return 2;
+        }
 
         KnxIpTunnel tun;
         if (!tun.connect(ip, port))
@@ -7063,6 +7071,14 @@ int main(int argc, char** argv)
             if (pos.size() >= 6) startIdx = (uint16_t)std::strtoul(pos[5].c_str(), nullptr, 0);
             if (pos.size() >= 7) noe = (uint8_t)std::strtoul(pos[6].c_str(), nullptr, 0);
         }
+        // the start index has 12 bits and the count 4 on the wire: larger values would wrap without a word
+        if ((pos.size() >= 6 && std::strtoul(pos[5].c_str(), nullptr, 0) > 4095) ||
+            (!doWrite && pos.size() >= 7 && std::strtoul(pos[6].c_str(), nullptr, 0) > 15))
+        {
+            std::fprintf(stderr, "start index is 0..4095, count 0..15\n");
+            socketCleanup();
+            return 2;
+        }
 
         ftc::DevMgmtSession dm;
         std::string err;
@@ -7094,7 +7110,7 @@ int main(int argc, char** argv)
         {
             uint8_t out[256];
             size_t outLen = 0;
-            const ftc::DmRead r = dm.readEx(iot, inst, pid, (uint8_t)startIdx, noe, out, sizeof(out), outLen, &propErr);
+            const ftc::DmRead r = dm.readEx(iot, inst, pid, startIdx, noe, out, sizeof(out), outLen, &propErr);
             std::printf("prop read  IOT=%u inst=%u PID=%u startIdx=%u noe=%u\n", iot, inst, pid, startIdx, noe);
             if (r == ftc::DmRead::Data)
             {
