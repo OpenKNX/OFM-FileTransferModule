@@ -90,6 +90,7 @@ typedef int sock_t;
 #include "core/Gzip.h"
 #include "core/GaOps.h"
 #include "core/PropRead.h"
+#include "core/SetPa.h"
 #include "core/SelfInstall.h"
 static ftc::Term g_term;
 static ftc::I18n g_i18n;
@@ -9201,10 +9202,10 @@ int main(int argc, char** argv)
     {
         ftc::I18n& L = g_i18n;
         ftc::Theme& C = g_theme;
-        const FtcPropCb prevProp = g_knxTunnel.propertyCallback();
+        // The bus side is the one `oknx serve` runs for setpa; it restores the callbacks it takes over.
+        ftc::SetPaBus spb(g_knxTunnel, [] { return g_abort != 0; });
         auto finish = [&](int rc) -> int {
-            g_knxTunnel.setBroadcastCallback(nullptr);
-            g_knxTunnel.setPropertyCallback(prevProp);
+            spb.release();
             g_knxTunnel.disconnect();
             socketCleanup();
             return rc;
@@ -9252,68 +9253,14 @@ int main(int argc, char** argv)
         // Answers. A_IndividualAddress_Response is counted per telegram, not per sender: two devices that both
         // still have 15.15.255 are two devices (2.2 p.13). A Layer-2 repetition does not count; a sender whose
         // telegrams all carry the repetition mark still counts once, in case an interface does not pass it on.
-        struct ProgHit
-        {
-            uint16_t src;
-            unsigned orig, rep;
-        };
-        struct SnHit
-        {
-            uint16_t src;
-            uint8_t sn[6];
-        };
-        static std::vector<ProgHit> s_prog;
-        static std::vector<SnHit> s_snResp; // A_IndividualAddressSerialNumber_Response
-        static std::vector<SnHit> s_pid11;  // PID_SERIAL_NUMBER of the device object
-        static std::vector<uint16_t> s_asked; // the addresses PID 11 was read from; answers from others are not ours
-        s_prog.clear();
-        s_asked.clear();
-        s_snResp.clear();
-        s_pid11.clear();
-        g_knxTunnel.setBroadcastCallback([](uint16_t src, uint16_t apci, const uint8_t* d, uint8_t n, bool repeated) {
-            if ((apci & 0x03C0) == APCI_INDADDR_RESP)
-            {
-                for (ProgHit& h : s_prog)
-                    if (h.src == src)
-                    {
-                        (repeated ? h.rep : h.orig)++;
-                        return;
-                    }
-                s_prog.push_back({src, repeated ? 0u : 1u, repeated ? 1u : 0u});
-            }
-            else if (apci == APCI_INDADDR_SN_RESP && n >= 6)
-            {
-                SnHit h{src, {}};
-                std::memcpy(h.sn, d, 6);
-                s_snResp.push_back(h);
-            }
-        });
-        g_knxTunnel.setPropertyCallback([](uint16_t pa, uint8_t obj, uint8_t pid, const uint8_t* d, uint8_t n) {
-            if (obj != 0 || pid != 11 || n < 6) return; // a refusal carries no data
-            if (std::find(s_asked.begin(), s_asked.end(), pa) == s_asked.end()) return;
-            for (const SnHit& h : s_pid11)
-                if (h.src == pa && std::memcmp(h.sn, d, 6) == 0) return; // the same answer again
-            SnHit h{pa, {}};
-            std::memcpy(h.sn, d, 6);
-            s_pid11.push_back(h);
-        });
-        auto pumpFor = [&](uint32_t ms) {
-            for (const uint64_t t0 = nowMs(); nowMs() - t0 < ms && !g_abort;)
-            {
-                g_knxTunnel.pump();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        };
-        auto progCount = []() -> size_t {
-            size_t n = 0;
-            for (const ProgHit& h : s_prog) n += h.orig != 0 ? h.orig : 1;
-            return n;
-        };
-        auto probe = [&](uint32_t ms) {
-            s_prog.clear();
-            g_knxTunnel.sendIndividualAddressRead();
-            pumpFor(ms);
-        };
+        using ProgHit = ftc::SetPaProgHit;
+        using SnHit = ftc::SetPaSnHit;
+        auto& s_prog = spb.prog;
+        auto& s_pid11 = spb.pid11;
+        auto& s_asked = spb.asked;
+        auto pumpFor = [&](uint32_t ms) { spb.pumpFor(ms); };
+        auto progCount = [&]() -> size_t { return spb.progCount(); };
+        auto probe = [&](uint32_t ms) { spb.probe(ms); };
         auto snStr = [](const uint8_t* sn) -> std::string {
             char b[20];
             std::snprintf(b, sizeof(b), "%02X%02X:%02X%02X%02X%02X", sn[0], sn[1], sn[2], sn[3], sn[4], sn[5]);
@@ -9405,63 +9352,10 @@ int main(int argc, char** argv)
 
         // DeviceDescriptor_Read inside a T_Connect to `pa`: 1 = answered, 2 = refused with T_Disconnect, 0 = nobody.
         // Both 1 and 2 mean a device holds the address (2.3 p.14). The session stays open for the caller.
-        static volatile bool s_ddSeen = false;
-        static uint16_t s_ddPa = 0;
-        auto coAsk = [&](uint16_t pa) -> int {
-            s_ddPa = pa;
-            s_ddSeen = false;
-            const FtcDdCb prev = g_knxTunnel.deviceDescriptorCallback();
-            g_knxTunnel.setDeviceDescriptorCallback([](uint16_t p, uint8_t, const uint8_t*) {
-                if (p == s_ddPa) s_ddSeen = true;
-            });
-            int r = 0;
-            if (g_knxTunnel.scanConnect(pa))
-            {
-                for (uint64_t t0 = nowMs(); nowMs() - t0 < 100;) g_knxTunnel.pump();
-                g_knxTunnel.sendDeviceDescriptorRead(pa);
-                for (uint64_t t0 = nowMs(); nowMs() - t0 < 2000 && !s_ddSeen && g_knxTunnel.scanConnectedTo(pa);)
-                    g_knxTunnel.pump();
-                r = s_ddSeen ? 1 : (g_knxTunnel.scanConnectedTo(pa) ? 0 : 2);
-            }
-            g_knxTunnel.setDeviceDescriptorCallback(prev);
-            return r;
-        };
-        // Confirm over a connection, then restart: that ends programming mode (2.3 step 4 p.15) and is what makes
-        // a device with the OpenKNX stack keep the address - it holds a new one in RAM until it saves on restart.
-        // 0 = no answer at the address, 1 = answered, restart not sent, 2 = answered and restart sent.
-        auto confirmAt = [&](uint16_t pa, bool restart) -> int {
-            const bool confirmed = coAsk(pa) == 1;
-            bool sent = false;
-            if (confirmed && restart)
-            {
-                // Until the read is T_ACKed the restart would reuse its sequence number and be dropped as a duplicate.
-                for (uint64_t t0 = nowMs(); nowMs() - t0 < 500 && !g_knxTunnel.scanReadAcked();) g_knxTunnel.pump();
-                if (g_knxTunnel.scanReadAcked())
-                {
-                    g_knxTunnel.sendRestart(pa, false, 0, 0);
-                    sent = true;
-                    for (uint64_t t0 = nowMs(); nowMs() - t0 < 300;) g_knxTunnel.pump();
-                }
-            }
-            g_knxTunnel.scanDisconnect();
-            return confirmed ? (sent ? 2 : 1) : 0;
-        };
-        auto snWhere = [&](const uint8_t sn[6], uint16_t& at) -> bool {
-            s_snResp.clear();
-            g_knxTunnel.sendIndividualAddressSerialNumberRead(sn);
-            for (const uint64_t t0 = nowMs(); nowMs() - t0 < 2000 && !g_abort;)
-            {
-                g_knxTunnel.pump();
-                for (const SnHit& h : s_snResp)
-                    if (std::memcmp(h.sn, sn, 6) == 0)
-                    {
-                        at = h.src;
-                        return true;
-                    }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            return false;
-        };
+        auto coAsk = [&](uint16_t pa) -> int { return spb.coAsk(pa); };
+        // Confirm over a connection, then restart (SetPaBus::confirmAt): 0 no answer, 1 answered, 2 and restart sent.
+        auto confirmAt = [&](uint16_t pa, bool restart) -> int { return spb.confirmAt(pa, restart); };
+        auto snWhere = [&](const uint8_t sn[6], uint16_t& at) -> bool { return spb.snWhere(sn, at); };
 
         // NM_IndividualAddress_SerialNumber_Write: find the device by its serial number, check that the address
         // is free, write, read back by serial number, restart unless --no-restart.
@@ -9553,27 +9447,7 @@ int main(int argc, char** argv)
                 endProgress();
                 // Who is it? Ask each answering address for its serial number; devices that share an address
                 // answer separately because their numbers differ.
-                s_pid11.clear();
-                s_asked.clear();
-                for (const ProgHit& h : s_prog) s_asked.push_back(h.src); // a copy: pump() below can grow s_prog
-                for (uint16_t src : s_asked)
-                {
-                    g_knxTunnel.sendPropertyValueRead(src, 0, 11, 1, 1);
-                    pumpFor(30);
-                }
-                for (const uint64_t t0 = nowMs(); nowMs() - t0 < 2000 && !g_abort;)
-                {
-                    bool all = true;
-                    for (const ProgHit& h : s_prog)
-                    {
-                        size_t got = 0;
-                        for (const SnHit& s : s_pid11) got += s.src == h.src;
-                        if (got < (h.orig != 0 ? h.orig : 1)) all = false;
-                    }
-                    if (all) break;
-                    g_knxTunnel.pump();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
+                spb.askSerials();
                 if (g_abort) return aborted();
                 std::vector<std::string> lines;
                 // A device that is not in programming mode but has the same address answers PID 11 too.
