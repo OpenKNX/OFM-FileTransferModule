@@ -24,7 +24,7 @@ Import("env")  # noqa: F821  (injected by PlatformIO/SCons)
 ZIG_VERSION = "0.13.0"
 ZIG_BASE_URL = "https://ziglang.org/download"
 GLIBC_PIN = "2.28"      # portable glibc floor for the linux-gnu targets
-WINSOCK = ["-lws2_32"]  # Winsock for the Windows tunnel/discovery sockets
+WINSOCK = ["-lws2_32", "-lbcrypt", "-ladvapi32"]  # Winsock sockets; serve: key randomness + key file access list
 
 # target -> (os, engine, mac_arch, zig_triple, extra_link_flags)
 TARGETS = {
