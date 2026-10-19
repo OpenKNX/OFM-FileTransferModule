@@ -302,6 +302,8 @@ class WorkerProc : public WorkerApi
                 pumpTick();
                 if (monoMs() - lastJobEnd > 5000) closeMgmt(); // 5 s without a job: give the slot back
             }
+            else
+                closeMgmt(); // dropped by itself: no stale entry in the state file
         }
         closeMgmt();
         OpenKNX::Log::Logger::setLineHook(nullptr);
@@ -327,11 +329,9 @@ class WorkerProc : public WorkerApi
 
     void closeMgmt()
     {
-        if (!g_knxTunnel.connected()) return;
-        g_knxTunnel.disconnect();
+        if (g_knxTunnel.connected()) g_knxTunnel.disconnect();
         std::lock_guard<std::mutex> lk(_sm);
-        _conns.erase("mgmt");
-        _stateNow = true;
+        if (_conns.erase("mgmt")) _stateNow = true; // also after the tunnel dropped by itself
     }
 
     void noteMgmtConn()
