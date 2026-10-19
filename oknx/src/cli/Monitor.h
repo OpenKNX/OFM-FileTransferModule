@@ -164,9 +164,13 @@ class Monitor
                                    ? _i.tr("bus monitor · raw LPDU + ACK colour", "Busmonitor · Roh-LPDU + ACK-Farbe")
                                    : _i.tr("group monitor · decoded telegrams", "Gruppenmonitor · dekodierte Telegramme");
             _p.section(std::string(mode == Mode::Bus ? "busmon · " : "groupmon · ") + what, -1);
-            _p.status(Tpl::Stat::Ok, _i.tr("tunnel up", "Tunnel offen"),
-                      {std::string("IA ") + Tpl::pa(_assignedPA), std::string("ch ") + std::to_string(_channelId),
-                       _i.tr("Ctrl+C to stop", "Ctrl+C zum Beenden")});
+            if (_feed)
+                _p.status(Tpl::Stat::Ok, _i.tr("attached to the monitor oknx serve holds", "an den Monitor von oknx serve angehängt"),
+                          {_i.tr("no tunnel of our own", "kein eigener Tunnel"), _i.tr("Ctrl+C to stop", "Ctrl+C zum Beenden")});
+            else
+                _p.status(Tpl::Stat::Ok, _i.tr("tunnel up", "Tunnel offen"),
+                          {std::string("IA ") + Tpl::pa(_assignedPA), std::string("ch ") + std::to_string(_channelId),
+                           _i.tr("Ctrl+C to stop", "Ctrl+C zum Beenden")});
             if (mode == Mode::Group) groupHeader();
             else
                 _p.note(_i.tr("green = NOT acknowledged · grey = acknowledged · full bytes wrap (never truncate) · "
@@ -205,6 +209,14 @@ class Monitor
             if (maxFrames > 0 && _frames >= maxFrames) break;
             if (!pump(mode)) // tunnel gone (silent death or server DISCONNECT) -> reconnect, never hang
             {
+                if (_feed) // serve ended the monitor it shares: nothing of ours to re-dial
+                {
+                    if (!_quiet) _p.status(Tpl::Stat::Warn, _i.tr("oknx serve ended the monitor", "oknx serve hat den Monitor beendet"), {});
+                    else
+                        std::fprintf(stderr, "[serve] monitor ended by oknx serve\n");
+                    rc = 1;
+                    break;
+                }
                 if (abort && *abort)
                 {
                     aborted = true;
@@ -310,6 +322,7 @@ class Monitor
     I18n& _i;
     detail::socket_t _sock = (detail::socket_t)-1;
     uint16_t _localPort = 0;
+    uint64_t _lastSendWallMs = 0; // wall-clock ms of the last frame sent to the server
     uint8_t _channelId = 0;
     uint16_t _assignedPA = 0;
     uint8_t _rxSeq = 0;
@@ -336,6 +349,8 @@ class Monitor
     // an interactive run can export the whole run to XML on 'l'. Paused freezes only the SCROLL (capture keeps up).
     static constexpr size_t MON_CAP_MAX = 100000; ///< bounded run-capture (drops + logs once when full)
     std::function<void(const MonFrame&)> _sink;
+    std::function<void(const uint8_t*, int)> _rawSink; // every accepted cEMI, before any decoding
+    std::function<int(uint8_t*, int, int)> _feed;      // cEMI from oknx serve instead of an own tunnel
     bool _capture = false;
     bool _capWarned = false;
     bool _paused = false;
@@ -376,6 +391,11 @@ class Monitor
      */
     bool open(Mode mode, std::string& err)
     {
+        if (_feed) // attached to a monitor oknx serve holds: no tunnel of our own
+        {
+            _lastAlive = _lastIndication = _lastKeepalive = detail::nowMs();
+            return true;
+        }
         // Blocking wrapper (standalone Monitor::run): fire the request, then poll in 200 ms slices to the deadline.
         if (!sendConnect(mode, err)) return false;
         for (;;)
@@ -524,6 +544,20 @@ class Monitor
     bool pump(Mode mode)
     {
         using namespace detail;
+        if (_feed) // the cEMI comes from oknx serve; the decoding below is the same as for an own tunnel
+        {
+            uint8_t fb[600];
+            const int n = _feed(fb, (int)sizeof(fb), 60);
+            if (n < 0) return false; // serve ended the monitor
+            if (n > 0)
+            {
+                _lastAlive = _lastIndication = nowMs();
+                if (_rawSink) _rawSink(fb, n);
+                handleCemi(mode, fb, n);
+            }
+            if (mode == Mode::Bus && _pend.active && (nowMs() - _pend.ms) > 30) flushPending();
+            return true;
+        }
         fd_set rf;
         FD_ZERO(&rf);
         FD_SET(_sock, &rf);
@@ -547,6 +581,7 @@ class Monitor
                     if (_rxSeqValid && seq == _rxSeq) continue; // duplicate -> ack only
                     _rxSeq = seq;
                     _rxSeqValid = true;
+                    if (_rawSink) _rawSink(&buf[10], total - 10);
                     handleCemi(mode, &buf[10], total - 10);
                 }
                 else if (st == ST_DISCONNECT_REQ)
@@ -1387,7 +1422,12 @@ class Monitor
         pkt[4] = (uint8_t)(total >> 8);
         pkt[5] = (uint8_t)(total & 0xFF);
         if (bodyLen) std::memcpy(pkt + 6, body, bodyLen);
-        return (int)::send(_sock, (const char*)pkt, total, 0) == (int)total;
+        const bool ok = (int)::send(_sock, (const char*)pkt, total, 0) == (int)total;
+        if (ok)
+            _lastSendWallMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+        return ok;
     }
 
     /**
@@ -1559,6 +1599,15 @@ class Monitor
     uint16_t assignedPA() const { return _assignedPA; }
     const std::string& ip() const { return _ip; }
     uint8_t channel() const { return _channelId; }
+    uint16_t localPort() const { return _localPort; }
+    uint64_t lastSendWallMs() const { return _lastSendWallMs; }
+    /**
+     * @brief Take the cEMI from @p f instead of an own tunnel (a monitor oknx serve holds).
+     * @details @p f fills up to cap bytes, waits up to waitMs: >0 bytes, 0 none yet, <0 the source ended.
+     */
+    void feed(std::function<int(uint8_t*, int, int)> f) { _feed = std::move(f); }
+    /** @brief Hand every accepted cEMI (the tunnel payload, undecoded) to @p s as well, e.g. for a raw viewer. */
+    void rawSink(std::function<void(const uint8_t*, int)> s) { _rawSink = std::move(s); }
 
     /** @brief Open the tunnel (mode's KNX layer). Public wrapper over the setup path. */
     bool openTunnel(Mode mode, std::string& err) { return open(mode, err); }
