@@ -89,6 +89,7 @@ typedef int sock_t;
 #include "core/Discovery.h"
 #include "core/Gzip.h"
 #include "core/GaOps.h"
+#include "core/PropRead.h"
 #include "core/SelfInstall.h"
 static ftc::Term g_term;
 static ftc::I18n g_i18n;
@@ -6869,59 +6870,20 @@ int main(int argc, char** argv)
             socketCleanup();
             return 1;
         }
-        tun.setPropertyCallback(&busPropAnswer);
-
-        // The application program object is OT 3, but its INDEX is device specific. Measured
-        // 2026-09-27 on 5.0.3 and 5.0.8: index 3 is the GROUP OBJECT TABLE (OT 9) and the application
-        // program sits at 4. A hard-coded 3 asks the wrong object and reports "not implemented" for a
-        // property that is there, so the index is looked up through PID 1 (PID_OBJECT_TYPE).
-        auto readProp = [&](uint8_t obj, uint8_t pid) -> int {
-            g_bpPa = pa; g_bpObj = obj; g_bpPid = pid; g_bpSeen = false; g_bpLen = 0;
-            if (!tun.sendPropertyValueRead(pa, obj, pid, 1, 1)) return -2;
-            const uint64_t until = ftc::detail::nowMs() + 600;
-            while (!g_bpSeen && ftc::detail::nowMs() < until) tun.pump();
-            if (!g_bpSeen) return -2;
-            if (g_bpLen == 0) return -3;
-            return 0;
-        };
-        int appIdx = -1;
-        for (uint8_t i = 0; i <= 12; ++i)
-        {
-            // Same window and stop rule as `busprop dump`: object indices are contiguous, so no
-            // answer or an empty one on PID 1 ends the sweep instead of waiting out every index.
-            if (readProp(i, 1) != 0) break;
-            if (g_bpLen >= 2 && g_bpData[0] == 0x00 && g_bpData[1] == 0x03) { appIdx = (int)i; break; }
-        }
-        if (appIdx < 0)
+        // the same sweep, read and write `oknx serve` runs for runstate
+        const ftc::RunStateResult rs = ftc::runState(tun, pa, event);
+        int rc = 0;
+        if (rs.appIdx < 0)
         {
             std::printf("  runstate %s  -> no application program object (type 3) on this device\n",
                         paText.c_str());
-            tun.setPropertyCallback(nullptr);
             tun.disconnect();
             socketCleanup();
             return 4;
         }
-        std::printf("  application program object at index %d\n", appIdx);
-
-        auto readState = [&]() -> int {
-            g_bpPa = pa; g_bpObj = (uint8_t)appIdx; g_bpPid = 6; g_bpSeen = false; g_bpLen = 0;
-            if (!tun.sendPropertyValueRead(pa, (uint8_t)appIdx, 6, 1, 1)) return -2;
-            const uint64_t until = ftc::detail::nowMs() + 3000;
-            while (!g_bpSeen && ftc::detail::nowMs() < until) tun.pump();
-            if (!g_bpSeen) return -2;
-            if (g_bpLen == 0) return -3;   // answered, but the property carries nothing: not implemented
-            return (int)g_bpData[0];
-        };
-        auto name = [](int st) -> const char* {
-            switch (st) { case 0: return "halted"; case 1: return "running"; case 2: return "ready";
-                          case 3: return "terminated"; case 4: return "starting"; case 5: return "shutting down";
-                          default: return "?"; }
-        };
-
-        int rc = 0;
-        const int before = readState();
-        if (before == -2) { std::printf("  runstate %s  -> no answer\n", paText.c_str()); rc = 4; }
-        else if (before == -3)
+        std::printf("  application program object at index %d\n", rs.appIdx);
+        if (rs.before == -2) { std::printf("  runstate %s  -> no answer\n", paText.c_str()); rc = 4; }
+        else if (rs.before == -3)
         {
             // Exactly what a device without the property answers: a response with zero elements.
             std::printf("  runstate %s  -> PID_RUN_STATE_CONTROL is not implemented on this device\n",
@@ -6930,17 +6892,12 @@ int main(int argc, char** argv)
         }
         else
         {
-            std::printf("  runstate %s  -> %d (%s)\n", paText.c_str(), before, name(before));
+            std::printf("  runstate %s  -> %d (%s)\n", paText.c_str(), rs.before, ftc::runStateName(rs.before));
             if (event >= 0)
             {
-                const uint8_t ev = (uint8_t)event;
-                if (!tun.sendPropertyValueWrite(pa, (uint8_t)appIdx, 6, 1, 1, &ev, 1)) { std::printf("  -> SEND FAILED\n"); rc = 4; }
-                else
-                {
-                    const int after = readState();
-                    if (after < 0) { std::printf("  -> %s sent, but the state could not be read back\n", pos[2].c_str()); rc = 4; }
-                    else std::printf("  %-8s -> %d (%s)\n", pos[2].c_str(), after, name(after));
-                }
+                if (rs.sendFailed) { std::printf("  -> SEND FAILED\n"); rc = 4; }
+                else if (rs.after < 0) { std::printf("  -> %s sent, but the state could not be read back\n", pos[2].c_str()); rc = 4; }
+                else std::printf("  %-8s -> %d (%s)\n", pos[2].c_str(), rs.after, ftc::runStateName(rs.after));
             }
         }
 
@@ -7006,12 +6963,29 @@ int main(int argc, char** argv)
             socketCleanup();
             return 1;
         }
+        if (!doWrite)
+        {
+            // the same read `oknx serve` runs for busprop_read
+            std::printf("busprop read  pa=%s objIdx=%u PID=%u startIdx=%u noe=%u\n", paToStr(pa).c_str(), objIdx, pid,
+                        startIdx, noe);
+            const ftc::BusPropResult br = ftc::busPropRead(tun, pa, objIdx, pid, noe, startIdx);
+            int rc = 0;
+            if (!br.sent) { std::printf("  -> SEND FAILED\n"); rc = 4; }
+            else if (br.answered)
+            {
+                std::printf("  -> %u byte: ", (unsigned)br.data.size());
+                for (uint8_t b : br.data) std::printf("%02X", b);
+                std::printf("\n");
+            }
+            else { std::printf("  -> NO ANSWER\n"); rc = 4; }
+            tun.disconnect();
+            socketCleanup();
+            return rc;
+        }
         g_bpPa = pa; g_bpObj = objIdx; g_bpPid = pid; g_bpSeen = false; g_bpLen = 0;
         tun.setPropertyCallback(&busPropAnswer);
 
-        const bool sent = doWrite
-            ? tun.sendPropertyValueWrite(pa, objIdx, pid, noe, startIdx, payload.data(), (uint8_t)payload.size())
-            : tun.sendPropertyValueRead(pa, objIdx, pid, noe, startIdx);
+        const bool sent = tun.sendPropertyValueWrite(pa, objIdx, pid, noe, startIdx, payload.data(), (uint8_t)payload.size());
         std::printf("busprop %s pa=%s objIdx=%u PID=%u startIdx=%u noe=%u",
                     doWrite ? "write" : "read ", paToStr(pa).c_str(), objIdx, pid, startIdx, noe);
         if (doWrite) { std::printf(" data="); for (uint8_t b : payload) std::printf("%02X", b); }
@@ -7081,6 +7055,34 @@ int main(int argc, char** argv)
             return 2;
         }
 
+        if (!doWrite)
+        {
+            // the same read `oknx serve` runs for prop_read
+            const ftc::PropReadResult pr = ftc::propReadLocal(ip, port, iot, inst, pid, startIdx, noe);
+            if (!pr.connected)
+            {
+                std::fprintf(stderr, "prop: connect failed: %s\n", pr.connectError.c_str());
+                socketCleanup();
+                return 1;
+            }
+            int rc = 0;
+            std::printf("prop read  IOT=%u inst=%u PID=%u startIdx=%u noe=%u\n", iot, inst, pid, startIdx, noe);
+            if (pr.outcome == ftc::DmRead::Data)
+            {
+                std::printf("  -> %zu byte: ", pr.data.size());
+                for (uint8_t b : pr.data) std::printf("%02X", b);
+                std::printf("\n");
+            }
+            else if (pr.outcome == ftc::DmRead::Negative)
+            {
+                std::printf("  -> NEGATIVE con  error=0x%02X (%s)\n", pr.propError, ftc::dmPropErrorName(pr.propError));
+                rc = 3;
+            }
+            else { std::printf("  -> NO ANSWER\n"); rc = 4; }
+            socketCleanup();
+            return rc;
+        }
+
         ftc::DevMgmtSession dm;
         std::string err;
         if (!dm.open(ip, port, &err))
@@ -7100,25 +7102,6 @@ int main(int argc, char** argv)
             std::printf("\n");
             if (r == ftc::DmRead::Data)
                 std::printf("  -> POSITIVE con (accepted)\n");
-            else if (r == ftc::DmRead::Negative)
-            {
-                std::printf("  -> NEGATIVE con  error=0x%02X (%s)\n", propErr, ftc::dmPropErrorName(propErr));
-                rc = 3;
-            }
-            else { std::printf("  -> NO ANSWER\n"); rc = 4; }
-        }
-        else
-        {
-            uint8_t out[256];
-            size_t outLen = 0;
-            const ftc::DmRead r = dm.readEx(iot, inst, pid, startIdx, noe, out, sizeof(out), outLen, &propErr);
-            std::printf("prop read  IOT=%u inst=%u PID=%u startIdx=%u noe=%u\n", iot, inst, pid, startIdx, noe);
-            if (r == ftc::DmRead::Data)
-            {
-                std::printf("  -> %zu byte: ", outLen);
-                for (size_t i = 0; i < outLen; ++i) std::printf("%02X", out[i]);
-                std::printf("\n");
-            }
             else if (r == ftc::DmRead::Negative)
             {
                 std::printf("  -> NEGATIVE con  error=0x%02X (%s)\n", propErr, ftc::dmPropErrorName(propErr));
@@ -10473,33 +10456,11 @@ int main(int argc, char** argv)
         }
         // A master reset is answered, a basic restart is not: wait for the answer only where one is due,
         // and report the device's error code rather than calling an unanswered send a success.
-        static int s_mrErr = -1;
-        static uint16_t s_mrTime = 0;
-        s_mrErr = -1;
-        if (master)
-            g_knxTunnel.setRestartCallback([](uint16_t, uint8_t err, uint16_t secs) {
-                s_mrErr = (int)err;
-                s_mrTime = secs;
-            });
-        // 06 Profiles 4.2 p.37 row 11: the CONNECTION-ORIENTED restart is mandatory for every profile,
-        // the connectionless one is optional everywhere. The reachability probe closes its CO session
-        // before returning, so without this the request goes out connectionless and a device that only
-        // implements the mandatory form ignores it - and we would report "sent", exit 0, nothing rebooted.
-        bool co = g_knxTunnel.scanConnect(tgt);
-        if (co)
-        {
-            for (uint64_t t0 = nowMs(); !g_knxTunnel.scanConnected() && nowMs() - t0 < 800;) g_knxTunnel.pump();
-            co = g_knxTunnel.scanConnected();
-        }
-        const bool sent = g_knxTunnel.sendRestart(tgt, master, erase, 0);
-        const uint32_t window = master ? 3000u : 400u;
-        for (uint64_t t0 = nowMs(); nowMs() - t0 < window;)
-        {
-            g_knxTunnel.pump();
-            if (master && s_mrErr >= 0) break;
-        }
-        g_knxTunnel.setRestartCallback(nullptr);
-        if (co) g_knxTunnel.scanDisconnect(); // the device reboots anyway; leaving the session open wedges the next call
+        // The same request path `oknx serve` runs for restart.
+        const ftc::RestartResult rr = ftc::deviceRestart(g_knxTunnel, tgt, master, erase);
+        const bool sent = rr.sent;
+        const int s_mrErr = rr.masterError;
+        const uint16_t s_mrTime = rr.masterSeconds;
         if (master && sent)
         {
             char det[96];
