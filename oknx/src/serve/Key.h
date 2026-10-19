@@ -86,7 +86,11 @@ inline bool writeOwnerOnly(const std::string& path, const std::string& body, std
     std::string mk;
     const size_t cut = path.find_last_of("/\\");
     if (cut != std::string::npos) makeDirs(path.substr(0, cut), mk);
-    const std::string tmp = path + ".tmp";
+#ifdef _WIN32
+    const std::string tmp = path + ".tmp." + std::to_string((unsigned long)GetCurrentProcessId());
+#else
+    const std::string tmp = path + ".tmp." + std::to_string((long)::getpid()); // two serves on one folder: one file each
+#endif
 #ifdef _WIN32
     HANDLE tok = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))

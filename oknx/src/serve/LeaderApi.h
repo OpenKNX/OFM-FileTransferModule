@@ -43,7 +43,7 @@ class LeaderApi
                                                const std::string& who, json& error) = 0;
     virtual void closeReader(const std::string& ip, uint16_t port, const std::string& mode, const std::shared_ptr<Reader>& r) = 0;
     virtual json opsList() = 0;
-    virtual const Rules& rules() const = 0;
+    virtual std::shared_ptr<const Rules> rules() const = 0;
     virtual std::string benchConfigPath() const = 0;
 };
 

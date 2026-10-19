@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -134,7 +135,8 @@ class Leader : public LeaderApi
             std::fprintf(stderr, "serve: %s\n", err.c_str());
             return 1;
         }
-        if (!_rules.load(_rulesPath, err))
+        auto loaded = std::make_shared<Rules>();
+        if (!loaded->load(_rulesPath, err))
         {
             std::fprintf(stderr, "serve: %s: %s\n", _rulesPath.c_str(), err.c_str());
             return 1;
@@ -164,7 +166,8 @@ class Leader : public LeaderApi
         std::signal(SIGINT, onStopSignal);
         std::signal(SIGTERM, onStopSignal);
 #endif
-        logLine("start", {{"port", _port}, {"rules", _rules.loaded() ? _rules.path() : std::string("(none)")}});
+        setRules(loaded);
+        logLine("start", {{"port", _port}, {"rules", loaded->loaded() ? loaded->path() : std::string("(none)")}});
         setupServer(_svr4);
         setupServer(_svr6);
         if (!_svr4.bind_to_port("127.0.0.1", _port))
@@ -179,7 +182,7 @@ class Leader : public LeaderApi
         std::thread bench([this] { benchLoop(); });
         std::thread wd([this] { watchdogLoop(); });
         std::printf("oknx serve %s on http://127.0.0.1:%d%s  ·  rules: %s  ·  Ctrl+C stops\n", _version.c_str(), _port,
-                    v6 ? " and http://[::1]" : "", _rules.loaded() ? _rules.path().c_str() : "none (read-only defaults)");
+                    v6 ? " and http://[::1]" : "", loaded->loaded() ? loaded->path().c_str() : "none (read-only defaults)");
         std::fflush(stdout);
         while (!g_stop) std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -227,10 +230,11 @@ class Leader : public LeaderApi
         for (auto& o : _ops) a.push_back(opSummary(*o.second));
         return a;
     }
-    const Rules& rules() const override { return _rules; }
+    std::shared_ptr<const Rules> rules() const override { return rulesNow(); }
     std::string benchConfigPath() const override
     {
-        for (const auto& s : _rules.sites())
+        const auto rules = rulesNow();
+        for (const auto& s : rules->sites())
             if (!s.benchConfig.empty()) return s.benchConfig;
         return std::string();
     }
@@ -282,6 +286,12 @@ class Leader : public LeaderApi
             if (!auth(req, res, true, a)) return;
             sendJson(res, 200, {{"v", 1}, {"ok", true}, {"data", {{"ops", opsList()}}}});
         });
+        svr.Get("/api/rules", [this](const httplib::Request& req, httplib::Response& res) {
+            Access a;
+            if (!auth(req, res, true, a)) return;
+            sendJson(res, 200, {{"v", 1}, {"ok", true}, {"data", rulesJson()}});
+        });
+        svr.Put("/api/rules", [this](const httplib::Request& req, httplib::Response& res) { putRules(req, res); });
         svr.Get("/api/describe", [this](const httplib::Request& req, httplib::Response& res) {
             Access a;
             if (!auth(req, res, true, a)) return;
@@ -388,7 +398,8 @@ class Leader : public LeaderApi
             std::lock_guard<std::mutex> lk(_m);
             h["pid"] = (long)selfPid();
             h["port"] = _port;
-            h["rules"] = {{"path", _rules.path()}, {"loaded", _rules.loaded()}};
+            const auto rules = rulesNow();
+            h["rules"] = {{"path", rules->path()}, {"loaded", rules->loaded()}, {"loaded_at", rulesLoadedAt()}};
             json ws = json::array();
             for (auto& w : _workers)
                 ws.push_back({{"iface", w.first}, {"alive", w.second->alive.load()}, {"pid", w.second->child.pidValue()},
@@ -557,6 +568,7 @@ class Leader : public LeaderApi
     json runOperationInner(const std::string& name, const json& args, const Access& acc, ProgressFn progress,
                            std::shared_ptr<std::atomic<bool>> extCancel, bool wait)
     {
+        const auto rules = rulesNow(); // one set of rules for the whole check, also when they are replaced meanwhile
         // 1 known
         const OpDesc* d = findOp(name);
         if (!d) return errorEnvelope("GUARD_DENIED", "unknown operation", {{"rule", "known"}, {"op", name}});
@@ -567,7 +579,7 @@ class Leader : public LeaderApi
         // 3 rate
         if (!rateOk(acc.id))
             return errorEnvelope("RATE_LIMITED", "too many calls in one minute",
-                                 {{"retry_after_ms", 1000}, {"limit_per_minute", _rules.ratePerMinute()}});
+                                 {{"retry_after_ms", 1000}, {"limit_per_minute", rules->ratePerMinute()}});
         const std::string ip = args.value("ip", std::string());
         const uint16_t port = (uint16_t)args.value("port", 3671);
         const std::string ref = args.value("ref", std::string());
@@ -576,7 +588,7 @@ class Leader : public LeaderApi
         for (const auto& i : {std::make_pair(ip, port), std::make_pair(ref, refPort)})
         {
             if (i.first.empty()) continue;
-            const std::string r = _rules.check(*d, args, i.first, i.second);
+            const std::string r = rules->check(*d, args, i.first, i.second);
             if (!r.empty()) return errorEnvelope("GUARD_DENIED", r, {{"rule", r}, {"op", name}, {"ip", i.first}});
         }
         // 6 bench free
@@ -594,7 +606,7 @@ class Leader : public LeaderApi
         if (name == "suite_run")
         {
             const RuleSite* site = nullptr;
-            for (const auto& s : _rules.sites())
+            for (const auto& s : rules->sites())
                 if (s.suiteRun) site = &s;
             if (!site) return errorEnvelope("GUARD_DENIED", "no site of the rules allows suite_run", {{"rule", "suite_run"}});
             std::lock_guard<std::mutex> lk(_m);
@@ -771,6 +783,132 @@ class Leader : public LeaderApi
         }
     }
 
+    /** @brief The rules file as the pages edit it: its text, when serve loaded it, and per site what it made of it. */
+    json rulesJson()
+    {
+        const auto r = rulesNow();
+        json sites = json::array();
+        for (const auto& s : r->sites())
+        {
+            json prot = json::array();
+            for (const auto& p : s.protectedTargets) prot.push_back(p.pa);
+            json ifs = json::array();
+            for (const auto& ri : s.ifaces)
+            {
+                json cls = json::array();
+                for (OpClass c : ri.classes) cls.push_back(opClassName(c));
+                ifs.push_back({{"ip", ri.ip}, {"port", ri.port}, {"line", ri.line}, {"classes", cls}});
+            }
+            sites.push_back({{"name", s.name}, {"write_lines", s.writeLines}, {"setpa_lines", s.setpaLines}, {"protected", prot},
+                             {"ga_allow", s.gaAllow}, {"ga_deny", s.gaDeny}, {"interfaces", ifs}});
+        }
+        std::string text;
+        std::ifstream f(_rulesPath, std::ios::binary);
+        const bool exists = f.is_open();
+        if (exists)
+        {
+            std::stringstream ss;
+            ss << f.rdbuf();
+            text = ss.str();
+        }
+        return {{"path", _rulesPath}, {"exists", exists}, {"loaded", r->loaded()}, {"loaded_at", rulesLoadedAt()},
+                {"text", text}, {"effective", sites}};
+    }
+
+    /**
+     * @brief Replace the rules file from the pages: the text is checked by the loader serve starts with, the old
+     *        file stays as .bak, the new one replaces it in one step and applies to the next call. Not an MCP tool.
+     */
+    void putRules(const httplib::Request& req, httplib::Response& res)
+    {
+        Access a;
+        if (!auth(req, res, true, a)) return;
+        const json body = json::parse(req.body, nullptr, false);
+        if (!body.is_object() || !body.contains("text") || !body["text"].is_string())
+        {
+            sendJson(res, 400, errorEnvelope("INVALID_ARGUMENT", "send {\"text\": \"<the rules file>\"}"));
+            return;
+        }
+        const std::string text = body["text"].get<std::string>();
+        std::lock_guard<std::mutex> wl(_rulesWriteM); // one replacement at a time
+        std::string err;
+        const std::string cand = serveDir(true) + PATH_SEP + "rules.candidate." + std::to_string(selfPid()) + ".json";
+        // a symlinked rules.json is written where it points, so the link and its target stay what they are
+        std::string target = _rulesPath;
+        {
+            std::error_code ec;
+            if (std::filesystem::is_symlink(_rulesPath, ec))
+            {
+                const auto real = std::filesystem::canonical(_rulesPath, ec);
+                if (!ec) target = real.string();
+            }
+        }
+        {
+            std::ofstream o(cand, std::ios::binary | std::ios::trunc);
+            o << text;
+            if (!o)
+            {
+                sendJson(res, 500, errorEnvelope("INTERNAL", "cannot write " + cand));
+                return;
+            }
+        }
+        auto checked = std::make_shared<Rules>();
+        const bool ok = checked->load(cand, err);
+        std::remove(cand.c_str());
+        if (!ok)
+        {
+            sendJson(res, 400, errorEnvelope("INVALID_ARGUMENT", err, {{"rules", _rulesPath}}));
+            return;
+        }
+        bool hadOld = false;
+        std::string oldText;
+        {
+            std::ifstream old(target, std::ios::binary);
+            if (old)
+            {
+                std::stringstream ss;
+                ss << old.rdbuf();
+                oldText = ss.str();
+                hadOld = true;
+                std::string e2;
+                if (!writeOwnerOnly(target + ".bak", oldText, e2))
+                {
+                    sendJson(res, 500, errorEnvelope("INTERNAL", "the old rules could not be kept: " + e2));
+                    return;
+                }
+            }
+        }
+        if (!writeOwnerOnly(target, text, err))
+        {
+            sendJson(res, 500, errorEnvelope("INTERNAL", err));
+            return;
+        }
+        auto fresh = std::make_shared<Rules>();
+        if (!fresh->load(_rulesPath, err))
+        {
+            // the check accepted it, the reload did not (its bench_config changed in between): put the old file back,
+            // so the file and the rules serve applies stay the same
+            std::string e2;
+            const bool back = hadOld ? writeOwnerOnly(target, oldText, e2) : std::remove(target.c_str()) == 0;
+            if (!back)
+            {
+                // serve keeps the previous rules, the file does not: the next start would refuse it
+                sendJson(res, 500, errorEnvelope("INTERNAL", "not loaded (" + err + ") and the previous file could not be restored" +
+                                                                 (e2.empty() ? std::string() : ": " + e2)));
+                return;
+            }
+            sendJson(res, 400, errorEnvelope("INVALID_ARGUMENT", "not loaded, the previous rules stay: " + err));
+            return;
+        }
+        size_t ifaces = 0;
+        for (const auto& s : fresh->sites()) ifaces += s.ifaces.size();
+        const size_t sites = fresh->sites().size();
+        setRules(fresh);
+        logLine("rules_changed", {{"by", a.id}, {"caller", a.caller}, {"sites", sites}, {"interfaces", ifaces},
+                                  {"backup", hadOld ? target + ".bak" : std::string()}});
+        sendJson(res, 200, {{"v", 1}, {"ok", true}, {"data", rulesJson()}});
+    }
+
     json opSummary(OpRec& o)
     {
         std::lock_guard<std::mutex> lk(o.m);
@@ -786,7 +924,7 @@ class Leader : public LeaderApi
         auto& q = _rate[who.empty() ? std::string("none") : who];
         const uint64_t now = monoMs();
         while (!q.empty() && now - q.front() >= 60000) q.pop_front();
-        if ((int)q.size() >= _rules.ratePerMinute()) return false;
+        if ((int)q.size() >= rulesNow()->ratePerMinute()) return false;
         q.push_back(now);
         return true;
     }
@@ -1262,7 +1400,7 @@ class Leader : public LeaderApi
         }
         // the same guard as the monitor operation
         json probeArgs = {{"ip", ip}, {"mode", mode}, {"seconds", 1}};
-        const std::string r = _rules.check(*findOp("monitor"), probeArgs, ip, port);
+        const std::string r = rulesNow()->check(*findOp("monitor"), probeArgs, ip, port);
         if (!r.empty())
         {
             sendJson(res, 403, errorEnvelope("GUARD_DENIED", r, {{"rule", r}}));
@@ -1755,7 +1893,8 @@ class Leader : public LeaderApi
         if (profile.empty() || profile.size() > 64 || profile.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-_") != std::string::npos)
             return errorEnvelope("INVALID_ARGUMENT", "profile is a name like quick-check");
         std::string bc;
-        for (const auto& s : _rules.sites())
+        const auto rules = rulesNow();
+        for (const auto& s : rules->sites())
             if (s.suiteRun) bc = s.benchConfig;
         const size_t cut = bc.find_last_of("/\\");
         const std::string dir = cut == std::string::npos ? std::string(".") : bc.substr(0, cut);
@@ -2117,7 +2256,8 @@ class Leader : public LeaderApi
         while (!g_stop)
         {
             BenchLock b;
-            for (const auto& s : _rules.sites())
+            const auto rules = rulesNow(); // the lock file may come or go with a rules change
+            for (const auto& s : rules->sites())
                 if (!s.lockFile.empty())
                 {
                     BenchLock x = readBenchLock(s.lockFile);
@@ -2280,7 +2420,27 @@ class Leader : public LeaderApi
     std::string _lang;
     std::string _version;
     std::string _key;
-    Rules _rules;
+    std::shared_ptr<const Rules> _rulesP = std::make_shared<Rules>();
+    std::string _rulesLoadedAt;
+    mutable std::mutex _rulesM; ///< guards _rulesP and _rulesLoadedAt; every user takes a snapshot
+    std::mutex _rulesWriteM;    ///< one rules replacement at a time
+
+    std::shared_ptr<const Rules> rulesNow() const
+    {
+        std::lock_guard<std::mutex> lk(_rulesM);
+        return _rulesP;
+    }
+    std::string rulesLoadedAt() const
+    {
+        std::lock_guard<std::mutex> lk(_rulesM);
+        return _rulesLoadedAt;
+    }
+    void setRules(std::shared_ptr<const Rules> r)
+    {
+        std::lock_guard<std::mutex> lk(_rulesM);
+        _rulesP = std::move(r);
+        _rulesLoadedAt = isoNow();
+    }
     httplib::Server _svr4, _svr6;
     std::atomic<int> _activeConns{0};
 

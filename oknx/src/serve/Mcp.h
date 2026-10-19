@@ -628,7 +628,7 @@ class McpServer
     json resourceList(LeaderApi& L)
     {
         json a = json::array();
-        if (L.rules().loaded()) a.push_back({{"uri", "oknx://rules"}, {"name", "rules.json"}, {"mimeType", "application/json"},
+        if (L.rules()->loaded()) a.push_back({{"uri", "oknx://rules"}, {"name", "rules.json"}, {"mimeType", "application/json"},
                                             {"description", "the rules file serve guards with"}});
         if (!L.benchConfigPath().empty())
             a.push_back({{"uri", "oknx://bench-config"}, {"name", "Test-Bench-Config.json"}, {"mimeType", "application/json"},
@@ -666,7 +666,11 @@ class McpServer
     bool readResource(LeaderApi& L, const std::string& uri, std::string& text, std::string& mime)
     {
         mime = "application/json";
-        if (uri == "oknx://rules") return L.rules().loaded() && readFile(L.rules().path(), text);
+        if (uri == "oknx://rules")
+        {
+            const auto rules = L.rules();
+            return rules->loaded() && readFile(rules->path(), text);
+        }
         if (uri == "oknx://bench-config") return !L.benchConfigPath().empty() && readFile(L.benchConfigPath(), text);
         const std::string rp = "oknx://reports/", cp = "oknx://captures/", xp = "oknx://results/";
         if (uri.compare(0, rp.size(), rp) == 0)
