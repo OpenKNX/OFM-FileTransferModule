@@ -145,3 +145,93 @@ The PC client carries **no** protocol logic of its own. It only provides a base 
 protocol bug shows on both sides instead of hiding between two implementations.
 
 Built for eight targets; the list and the build itself are in [oknx.md](../guide/oknx.md).
+
+## oknx serve
+
+`oknx serve` lets Claude, pages, scripts and the command line share the interfaces of one machine. How to run
+it is in [serve.md](../guide/serve.md), the operations in [serve-operations.md](serve-operations.md). This part
+is how it is built.
+
+```mermaid
+flowchart TB
+    subgraph IN["callers, on 127.0.0.1 / ::1 only"]
+        direction LR
+        cl["Claude · MCP on /mcp"]
+        pg["pages /ui · API /api"]
+        cli["oknx command line<br/><i>reserves, then works locally</i>"]
+        br["oknx mcp<br/><i>stdio → /mcp</i>"]
+    end
+    subgraph LEAD["oknx serve: the leader, no tunnel of its own"]
+        g["guard<br/><i>known · valid · rate · class · target · bench · free</i>"]
+        a["allocation · shared monitors · leases · compare"]
+    end
+    subgraph W["one worker process per interface"]
+        direction LR
+        w1["oknx --_worker -i 11.11.0.210"]
+        w2["oknx --_worker -i 11.11.0.126"]
+    end
+    cl --> g
+    pg --> g
+    br --> g
+    cli -.->|"lease"| a
+    cli -->|"own tunnel after the lease"| i1
+    LEAD -->|"search · mDNS · HTTP :80"| i1
+    g --> a
+    a -->|"JSON lines over an inherited pipe pair"| w1
+    a --> w2
+    w1 -->|"KNXnet/IP"| i1["interface"]
+    w2 --> i2["interface"]
+```
+
+**Leader and workers.** The leader holds HTTP, MCP, the guard and the bookkeeping. It opens no tunnel; it does the
+KNXnet/IP search and mDNS for `discover` and reads and writes the interfaces' firmware pages over HTTP itself. Each
+interface in use gets a worker, `oknx --_worker -i <ip> --port <p>`, started with stdin/stdout on one inherited
+pipe pair and stderr on its log file; nothing else is inherited (POSIX: every other descriptor closed; Windows: a
+handle list with exactly those three). In a worker the management tunnel
+runs in one thread, the only one that touches the client's globals, one operation at a time; every monitor has
+its own thread and socket, so a slow operation never holds back a monitor's acknowledgements. An idle tunnel is
+closed after 5 s.
+
+**The pipe.** One JSON line per message, at most 1 MiB: `job`, `cancel`, `mon`, `mgmt_close`, `bye` to the worker;
+`hello`, `progress`, `result`, `frame`, `lost`, `mon`, `mgmt_closed` back. One writer per worker sends from two
+queues: control lines are never dropped, telegrams are bounded (20000); an overflow drops the oldest and sends
+`lost` with the span, before the next item of that stream. A dying worker is seen at its pipe: the operation it
+was running ends `INTERNAL`, queued ones go to the next worker, its monitors end. It writes its connections to a
+state file every 5 s, and the next worker for that interface sends `DISCONNECT_REQUEST` for every entry younger
+than 110 s (an interface drops a silent one after 120 s, 03_08_02 5.4).
+
+**Allocation.** A busmonitor excludes every other tunnel on its interface (03_08_04 2.2.4), so it is opened once
+and shared; so is a group monitor. Each reader has its own queue (4000); one that overflows for 30 s is closed,
+never silently thinned. A monitor without readers lingers 3 s. Management operations run one after another per
+interface. A reservation of the command line is one open HTTP request: it ends when the process ends; a
+busmonitor reservation conflicts with everything on its interface, two management ones do not. A plain `bm` of
+the command line reads along a busmonitor serve holds.
+
+**Guard.** Every call, from MCP, the API or a page, passes the same checks in this order, and the first refusal
+answers: operation known, arguments valid against its schema, rate, class allowed on the interface, target allowed
+(write lines, group address lists, protected targets, setpa line), bench free, connection free. The rules are one
+immutable snapshot the guard takes once (the rate limit reads the current limit); `PUT /api/rules` checks a new
+file with the same loader, keeps the old one as `.bak` and swaps the snapshot, so a call never sees half of each.
+
+**Bench lock.** `oknx bench lock` holds the bench with a JSON file; the test suite is to write the same file and
+does not yet:
+`{"version": 1, "run", "host", "pid", "start", "interfaces": [...], "heartbeat"}` (times in UTC, ISO 8601). The
+holder renews `heartbeat` every 10 s; the lock is valid on the machine it names (a lock without `host` on any
+machine) while the heartbeat is less than 60 s old or up to 15 s ahead. serve checks it every 2 s, stops its
+monitors, operations and connections on the named interfaces and answers `BENCH_LOCKED` there to everything but
+passive operations. A process started with `OKNX_BENCH_RUN` set does not reserve at serve (meant for the suite
+run).
+
+**MCP.** `/mcp` answers 2026-07-28 (`_meta` protocol version, mirrored headers, no session, closing the stream
+cancels) and 2025-03-26 to 2025-11-25 (`initialize`, `Mcp-Session-Id`, `notifications/cancelled`). A long call
+answers as SSE: a comment every 2 s, progress at least every 25 s when asked for. A result over 60000 bytes of JSON
+comes as a summary plus the resource `oknx://results/<id>`. No MCP operation changes the rules or the key.
+
+**Access.** Only loopback with serve's own Host; another site's Origin or a cross-site fetch is refused, also with
+the key. Programs send the key of `serve.key` (owner-only); a browser gets an HttpOnly, SameSite=Strict session
+from a one-time link (60 s, once; 12 h at most, 1 h idle). An FTC password comes from serve's environment or its
+terminal, never over the API.
+
+**One implementation.** Group reads and writes, property reads, run state, restart and setpa are in
+`core/GaOps.h`, `core/PropRead.h` and `core/SetPa.h`; the command line and the worker call the same code, and
+`Monitor`/`Compare` take a feed instead of a tunnel when serve hands them the telegrams.
