@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -41,6 +42,10 @@ struct DiscoveredIface
     std::string name;
     uint8_t medium = 0; // KNX medium code from the Device Information DIB
     uint16_t ia = 0;    // the interface's own individual address — its LINE decides what it can reach
+    uint16_t port = 3671;  // control endpoint port from the SEARCH_RESPONSE HPAI
+    uint8_t serial[6] = {0}; // Device Information DIB +8
+    uint8_t mac[6] = {0};    // Device Information DIB +18
+    std::vector<std::pair<uint8_t, uint8_t>> families; // Supported Service Families DIB: (family id, version)
 };
 
 namespace detail
@@ -257,6 +262,16 @@ inline std::vector<DiscoveredIface> discoverInterfaces(uint16_t port = 3671, int
         std::memcpy(nm, &buf[38], 30);
         nm[30] = 0;
         f.name = nm[0] ? nm : "(unnamed)";
+        f.port = (uint16_t)((buf[12] << 8) | buf[13]);
+        std::memcpy(f.serial, &buf[22], 6);
+        std::memcpy(f.mac, &buf[32], 6);
+        // The DIB after the 54-octet Device Information DIB: Supported Service Families (type 02h), pairs.
+        const int fam = 6 + 8 + 54;
+        if (n >= fam + 2 && buf[fam + 1] == 0x02)
+        {
+            const int flen = buf[fam];
+            for (int k = fam + 2; k + 1 < fam + flen && k + 1 < n; k += 2) f.families.push_back({buf[k], buf[k + 1]});
+        }
         // de-dupe (a router can answer on several interfaces)
         bool dup = false;
         for (const auto& e : found)
