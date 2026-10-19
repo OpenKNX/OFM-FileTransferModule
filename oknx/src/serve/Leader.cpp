@@ -367,7 +367,8 @@ class Leader : public LeaderApi
         }
         return a;
     }
-    bool sessionAccess(const httplib::Request& req, Access& a, bool topLevel = false)
+    /** @brief A browser session; @p touch false reads it without extending it (the pages' 5-s health poll). */
+    bool sessionAccess(const httplib::Request& req, Access& a, bool topLevel = false, bool touch = true)
     {
         const std::string sfs = lower(req.get_header_value("Sec-Fetch-Site"));
         if (!(sfs == "same-origin" || (topLevel && sfs == "none"))) return false;
@@ -382,7 +383,7 @@ class Leader : public LeaderApi
             _sessions.erase(it);
             return false;
         }
-        it->second.lastUse = now;
+        if (touch) it->second.lastUse = now;
         a.kind = Access::Session;
         a.id = "session:" + sid.substr(0, 8);
         a.caller = "browser";
@@ -393,11 +394,13 @@ class Leader : public LeaderApi
     {
         json h = {{"name", "oknx serve"}, {"version", _version}, {"ok", true}};
         Access a = keyAccess(req);
-        if (a.kind == Access::Key)
+        if (a.kind != Access::Key) sessionAccess(req, a, false, false); // the pages read it; polling keeps no session alive
+        if (a.kind == Access::Key || a.kind == Access::Session)
         {
             std::lock_guard<std::mutex> lk(_m);
             h["pid"] = (long)selfPid();
             h["port"] = _port;
+            h["key_path"] = keyPath();
             const auto rules = rulesNow();
             h["rules"] = {{"path", rules->path()}, {"loaded", rules->loaded()}, {"loaded_at", rulesLoadedAt()}};
             json ws = json::array();
@@ -630,6 +633,7 @@ class Leader : public LeaderApi
         op->access = acc;
         op->iface = ip.empty() ? std::string() : ifaceKey(ip, port);
         op->submitted = monoMs();
+        op->wallSubmitted = wallMs();
         op->timeoutMs = d->timeoutMs;
         op->onWorker = d->where == OpWhere::Worker;
         if (extCancel) op->cancel = extCancel;
@@ -912,8 +916,9 @@ class Leader : public LeaderApi
     json opSummary(OpRec& o)
     {
         std::lock_guard<std::mutex> lk(o.m);
-        json j = {{"id", o.id}, {"op", o.name}, {"args", o.args}, {"access", o.access.id}, {"iface", o.iface},
-                  {"running", !o.done}, {"age_ms", monoMs() - o.submitted}};
+        json j = {{"id", o.id}, {"op", o.name}, {"args", o.args}, {"access", o.access.id}, {"caller", o.access.caller},
+                  {"iface", o.iface}, {"running", !o.done}, {"age_ms", monoMs() - o.submitted}, {"wall_ms", o.wallSubmitted}};
+        if (o.done && o.result.contains("ms")) j["ms"] = o.result["ms"];
         if (o.done) j["code"] = o.result.value("ok", false) ? std::string("OK") : o.result["error"].value("code", std::string());
         return j;
     }
@@ -2156,7 +2161,7 @@ class Leader : public LeaderApi
     void deleteLease(const httplib::Request& req, httplib::Response& res)
     {
         Access a;
-        if (!auth(req, res, false, a)) return;
+        if (!auth(req, res, true, a)) return; // the overview releases a reservation with its session
         const bool had = endLease(req.matches[1]);
         sendJson(res, had ? 200 : 404, had ? json{{"v", 1}, {"ok", true}} : errorEnvelope("INVALID_ARGUMENT", "no such lease"));
     }

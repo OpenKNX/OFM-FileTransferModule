@@ -185,6 +185,7 @@ struct OpRec
     Access access;
     std::string iface; ///< ip:port it runs on ("" for net/passive)
     uint64_t submitted = 0, started = 0, ended = 0;
+    uint64_t wallSubmitted = 0; ///< wall clock (ms since 1970) when it came in, for the pages
     bool done = false;
     json result;    ///< the envelope {v, ok, op, id, ms, data | error}
     std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);

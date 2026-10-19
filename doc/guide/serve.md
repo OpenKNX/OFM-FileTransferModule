@@ -87,8 +87,22 @@ oknx serve open           # prints a one-time link (60 s, once); --open hands it
 oknx serve logout         # ends every browser session
 ```
 
-`/ui/` shows the interfaces, serve's connections and reservations, and runs the reading operations.
-`/ui/viewer` is the busmonitor viewer of the test suite, connected to serve instead of the bridge.
+`/ui/` has three views, in the look of the OpenKNX web interface:
+
+- **Overview**: serve, the bench lock, the interfaces the search finds with what the rules allow on each, serve's
+  connections (a monitor can be stopped there), the reservations of the command line (released there) and the
+  recent operations with their result.
+- **API**: every operation to try out. The form and the JSON of the request stay in step and are checked against
+  the operation's schema while typing; the answer, the matching curl call and the schema are shown below. Long
+  operations show their progress.
+- **Rules**: `rules.json` to click together or edit as JSON, checked the way serve checks it when it loads.
+  **Save** writes it only when serve's own loader accepts it, keeps the previous file as `rules.json.bak`, notes
+  the change in `operations.log` and applies it to the next call, without a restart; a monitor or reservation that
+  is already running goes on until it ends (stop or release it in the overview). The same is
+  `GET`/`PUT /api/rules` (`{"text": "<the file>"}`) with the key; MCP has no operation for it.
+
+`/ui/viewer` is the busmonitor viewer of the test suite, read from the folder next to the rules' `bench_config` and
+connected to serve instead of the bridge; it is not part of the binary.
 
 ## The command line next to serve
 
