@@ -1,6 +1,20 @@
 # Changes
 
 
+## 2026-10-19 -- oknx serve: one process for the API, MCP and the bench
+
+* `oknx serve` runs in the background on 127.0.0.1 and ::1 (port 8671) and owns the KNXnet/IP connections it opens: one worker process per interface (`oknx --_worker`), an HTTP/SSE API, MCP 2026-07-28 and 2025-03-26 … 2025-11-25 on `/mcp`, and the pages under `/ui` with the busmonitor viewer. Every call goes through one guard with the rules file `~/.config/oknx/rules.json`: without an entry an interface allows only searching and reading its firmware state
+* Operations: discover, device_state, device_bus, tunnels, device_info, ga_read, prop_read, busprop_read, monitor, compare, bench_state, monitor_stop, and the writing ones ga_write, ga_ask, restart, runstate, setpa, ftc_login, ftc_send, ftc_get, device_tunnel_close, device_busmon_stop, device_reset, suite_run; `oknx serve describe` lists them with their arguments
+* A monitor is opened once and shared by every reader, each with its own bounded queue; a lost telegram is reported, never silent. `compare` runs on the telegram streams of two workers with the rules of `oknx gm|bm compare`
+* The command line reserves the interfaces it needs at a running serve and works locally as before; a plain `bm` reads along a busmonitor serve holds. `--no-serve` skips that, `OKNX_SERVE_PORT` names another port
+* `oknx mcp` passes MCP over stdio to the running serve; `oknx bench lock|unlock|status` holds the bench by hand with the lock file a suite run uses
+* `oknx serve open` gives a one-time link (60 s) for the pages; programs send the key of `~/.config/oknx/serve.key`, readable by its owner alone
+* `ftc_login` takes the password from `OKNX_FTC_PW_<a>_<l>_<d>` of serve's environment or asks in serve's terminal; never over MCP or the API
+* `ga`, `prop read`, `busprop read`, `runstate`, `restart` and `setpa` of the command line now run on the same code as serve (`core/GaOps.h`, `core/PropRead.h`, `core/SetPa.h`); their output is unchanged
+* Fix: `oknx prop read` with a start index above 255 read the element at the index modulo 256 (the device management read took the index as one octet)
+* `oknx --discover`'s search keeps the serial number, MAC address and service families of each interface; the monitors can hand their raw cEMI to a second reader
+
+
 ## 2026-10-19 -- login takes the password from the environment, ps counts every device
 
 * `oknx <pa> login` without a password on the line takes it from `OKNX_FTC_PW_<a>_<l>_<d>` (for 5.0.3: `OKNX_FTC_PW_5_0_3`), so a script signs in without the password in its command line; the result names the variable, never the value. Without it a terminal still asks, a script gets exit code 2 with the name of the variable

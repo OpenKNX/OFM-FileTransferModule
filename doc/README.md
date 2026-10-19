@@ -27,6 +27,7 @@ guide is the shorter one.
 | How do I flash a device over the bus? | [firmware-update.md](guide/firmware-update.md) |
 | How does the browser page work? | [knxota-web.md](guide/knxota-web.md) |
 | What can the desktop client do? | [oknx.md](guide/oknx.md) |
+| How do Claude, pages and scripts share the interfaces? | [serve.md](guide/serve.md) |
 | How do I reach a device's console over the bus? | [console.md](guide/console.md) |
 | Why is writing locked, and how do I log in? | [unlocking-a-device.md](guide/unlocking-a-device.md) |
 | How long will my transfer take, `safe` or `fast`? | [throughput.md](guide/throughput.md) |
