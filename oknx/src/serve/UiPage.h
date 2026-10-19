@@ -378,7 +378,7 @@ function renderOverview() {
   const leases = health.leases || [];
   $("o-lease-n").textContent = leases.length;
   $("o-leases").innerHTML = leases.map(l => '<tr><td class="mono">' + esc(l.purpose || "") + '</td><td class="mono">' + esc((l.items || []).map(i => i.ip).join(", ")) + '</td><td>' +
-      esc((l.items || []).map(i => kindName(i.kind)).join(", ")) + '</td><td class="mono">' + esc(l.pid) + '</td><td class="mono">' + ago(l.since_ms) + '</td><td><button class="mini" data-lease="' + esc(l.id) + '">' +
+      esc((l.items || []).map(i => i.kind === "bm" ? T("exklusiv", "exclusive") : kindName(i.kind)).join(", ")) + '</td><td class="mono">' + esc(l.pid) + '</td><td class="mono">' + ago(l.since_ms) + '</td><td><button class="mini" data-lease="' + esc(l.id) + '">' +
       T("freigeben", "release") + '</button></td></tr>').join("") || '<tr><td colspan="6" class="gray">' + T("keine", "none") + '</td></tr>';
 }
 async function loadOps() {

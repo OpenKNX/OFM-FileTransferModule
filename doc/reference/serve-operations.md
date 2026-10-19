@@ -292,6 +292,18 @@ Class: `device-write` · in the leader · time limit: 5 s
 | `ip` * | string (ipv4) | IPv4 address of the KNXnet/IP interface |
 | `port` | integer 1..65535 | KNXnet/IP port of the interface (default 3671) |
 
+### `device_mreset` — Restart an interface
+
+M_Reset.req over device management, as `oknx -i <ip> reset`: the interface does the steps of a Basic Restart (an OpenKNX interface does not reboot); every KNXnet/IP connection to it closes, also those of other clients. Waits up to wait_s for it to answer again.
+
+Class: `device-write` · in the worker · time limit: 150 s
+
+| Argument | type / range | meaning |
+|---|---|---|
+| `ip` * | string (ipv4) | IPv4 address of the KNXnet/IP interface |
+| `port` | integer 1..65535 | KNXnet/IP port of the interface (default 3671) |
+| `wait_s` | integer 1..120 | how long to wait for the interface to answer again (default 30) |
+
 ### `suite_run` — Start a test suite run
 
 Run-Tests.ps1 -TestProfile <profile> next to the bench config. The run holds the bench through its lock file; follow it with bench_state. Needs "suite_run": true in a bench site of the rules. Changes the bench devices.

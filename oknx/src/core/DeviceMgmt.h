@@ -392,6 +392,57 @@ class DevMgmtSession
         return writeEx(iot, inst, pid, startIdx, 1, data, dataLen, propErr) == DmRead::Data;
     }
 
+    /** @brief What an M_Reset.req got back: nothing, the interface's ACK, or the ACK and M_Reset.ind. */
+    enum class Reset
+    {
+        NotOpen,
+        NoAnswer,
+        Acked,
+        Indicated
+    };
+    /**
+     * @brief M_Reset.req (03_06_03 4.1.7.5.1): the interface does the steps of a Basic Restart, which close every
+     *        KNXnet/IP connection, this one included. Sent up to 3 times without an ACK; afterwards the session is
+     *        closed (a DISCONNECT_REQUEST of the interface is answered).
+     */
+    Reset reset()
+    {
+        using namespace detail;
+        if (!_open) return Reset::NotOpen;
+        unsigned char req[11] = {0x06, 0x10, 0x03, 0x10, 0x00, 0x0B, 0x04, _chId, _seq, 0x00, 0xF1}; // M_Reset.req
+        bool acked = false, indicated = false, closedByServer = false;
+        unsigned char buf[256];
+        for (int attempt = 0; attempt < 3 && !acked && !indicated && !closedByServer; ++attempt)
+        {
+            send(req, sizeof(req));
+            // the ACK comes at once; the M_Reset.ind follows it (OpenKNX) or not at all (a device that reboots)
+            const uint64_t deadline = nowMs() + 1500;
+            while (nowMs() < deadline && !indicated && !closedByServer)
+            {
+                const int n = recvSvc(buf, sizeof(buf), 0, (int)(deadline - nowMs()));
+                if (n < 0) break;
+                const uint16_t svc = (uint16_t)((buf[2] << 8) | buf[3]);
+                if (svc == 0x0311 && n >= 10 && buf[7] == _chId && buf[8] == _seq) acked = true;
+                else if (svc == 0x0310 && n >= 11 && buf[7] == _chId)
+                {
+                    unsigned char ack[10] = {0x06, 0x10, 0x03, 0x11, 0x00, 0x0A, 0x04, _chId, buf[8], 0x00};
+                    send(ack, 10);
+                    if (buf[10] == 0xF0) indicated = true; // M_Reset.ind
+                }
+                else if (svc == 0x0209 && n >= 8 && buf[6] == _chId) // the interface closes the connection
+                {
+                    unsigned char rsp[8] = {0x06, 0x10, 0x02, 0x0A, 0x00, 0x08, _chId, 0x00};
+                    send(rsp, 8);
+                    closedByServer = true;
+                }
+            }
+        }
+        if (closedByServer) _open = false; // nothing left to disconnect
+        close();
+        if (indicated) return Reset::Indicated;
+        return acked || closedByServer ? Reset::Acked : Reset::NoAnswer;
+    }
+
     /**
      * @brief Best-effort DISCONNECT and socket teardown; safe to call on an already-closed session.
      */

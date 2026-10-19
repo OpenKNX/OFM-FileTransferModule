@@ -16,6 +16,7 @@
 #include "core/GaOps.h"
 #include "core/Describe.h"
 #include "core/DeviceMgmt.h"
+#include "core/MReset.h"
 #include "core/PropRead.h"
 #include "core/SetPa.h"
 #include "knx_ip_tunnel.h"
@@ -55,6 +56,8 @@ class WorkerApi
     virtual void progress(const Job& job, const json& data) = 0;
     /** @brief Open the management tunnel if it is not open; false with @p error filled when that fails. */
     virtual bool ensureTunnel(json& error) = 0;
+    /** @brief Close the management tunnel if it is open. */
+    virtual void closeTunnel() = 0;
     /** @brief Set up the FTC client once and give it the interface's max APDU (FTC operations only). */
     virtual void prepareFtc() = 0;
     /** @brief Collect what the FTC client narrates into @p v (nullptr stops it). */
@@ -277,6 +280,25 @@ inline json opPropRead(WorkerApi& w, const Job& job)
         return opOk({{"outcome", "negative"}, {"error_code", hx}, {"error_name", dmPropErrorName(r.propError)}, {"raw", ""}, {"length", 0}});
     }
     return opFail("NO_ANSWER", "the interface did not answer the property read");
+}
+
+/**
+ * @brief `device_mreset`: M_Reset.req to the interface (the restart of `oknx -i <ip> reset`), then wait until it
+ *        answers again. Every KNXnet/IP connection to it closes; this worker gives its own tunnel back first.
+ */
+inline json opMReset(WorkerApi& w, const Job& job)
+{
+    w.closeTunnel(); // closed by the restart anyway: leave it cleanly and drop it from the state file
+    const uint32_t waitMs = (uint32_t)job.args.value("wait_s", 30) * 1000u;
+    const auto cancel = job.cancel;
+    const MResetResult r = mresetInterface(w.ip(), w.port(), waitMs, [cancel] { return cancel->load(); });
+    if (!r.connected) return opFail("CONNECT_FAILED", "no device management connection: " + r.connectError);
+    if (r.outcome == DevMgmtSession::Reset::NoAnswer) return opFail("NO_ANSWER", "the interface did not answer M_Reset.req");
+    json d = {{"outcome", mresetOutcomeName(r.outcome)}, {"back", r.back}};
+    if (r.back) d["back_after_ms"] = r.backAfterMs;
+    if (!r.back && *job.cancel) return opFail("CANCELLED", "the reset was sent; the wait for the interface was cancelled", d);
+    if (!r.back) return opFail("NO_ANSWER", "the reset was sent; the interface did not answer again in time", d);
+    return opOk(d);
 }
 
 /** @brief `busprop_read`: A_PropertyValue_Read to a device on the bus (the read of `oknx busprop read`). */
@@ -816,6 +838,7 @@ inline json runWorkerOp(WorkerApi& w, const Job& job)
     if (job.op == "ping") return opPing(w, job);
     if (job.op == "ftc") return opFtc(w, job);
     if (job.op == "prop_read") return opPropRead(w, job);
+    if (job.op == "device_mreset") return opMReset(w, job);
     if (job.op == "busprop_read") return opBusPropRead(w, job);
     if (job.op == "ga_read") return opGaRead(w, job);
     if (job.op == "device_info") return opDeviceInfo(w, job);

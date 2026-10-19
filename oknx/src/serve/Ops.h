@@ -489,6 +489,20 @@ inline const std::vector<OpDesc>& opTable()
         }
         {
             OpDesc d;
+            d.name = "device_mreset";
+            d.titleEn = "Restart an interface";
+            d.titleDe = "Ein Interface neu starten";
+            d.helpEn = "M_Reset.req over device management, as `oknx -i <ip> reset`: the interface does the steps of a Basic Restart (an OpenKNX interface does not reboot); every KNXnet/IP connection to it closes, also those of other clients. Waits up to wait_s for it to answer again.";
+            d.helpDe = "M_Reset.req über Device Management wie `oknx -i <ip> reset`: das Interface führt die Schritte eines Basic Restart aus (ein OpenKNX-Interface bootet dabei nicht neu); jede KNXnet/IP-Verbindung zu ihm schließt, auch die anderer Clients. Wartet bis zu wait_s, bis es wieder antwortet.";
+            d.cls = OpClass::DeviceWrite;
+            d.where = OpWhere::Worker;
+            d.changes = true;
+            d.input = obj({{"ip", ipField()}, {"wait_s", integer("how long to wait for the interface to answer again (default 30)", 1, 120)}}, {"ip"});
+            d.timeoutMs = 150000;
+            v.push_back(d);
+        }
+        {
+            OpDesc d;
             d.name = "suite_run";
             d.titleEn = "Start a test suite run";
             d.titleDe = "Einen Lauf der Test-Suite starten";

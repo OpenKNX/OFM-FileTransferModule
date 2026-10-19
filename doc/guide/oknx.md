@@ -137,6 +137,7 @@ PIDs exist, and how to read the answers: [knx-properties.md](../reference/knx-pr
 | | |
 |---|---|
 | `prop read\|write <iot> <inst> <pid> [start] [hex]` | the interface's **own** objects, by object type + instance |
+| `reset [yes]` | restart the **interface** with M_Reset over device management (03_06_03 4.1.7.5): the steps of a Basic Restart, an OpenKNX interface does not reboot. Waits until it answers again; every connection to it closes, also other clients', so a terminal always asks, also after `yes`, and a script needs `yes`; while it runs, `oknx serve` keeps the interface free. Exit 0 back, 1 no connection, 2 not confirmed, 4 no answer, 130 stopped. `-q`: `mreset <ip> <indicated\|acked\|no-answer\|connect-failed> <back 0\|1> <ms>` |
 | `busprop read\|write <pa> <objIdx> <pid> [start] [hex]` | the objects of a **remote** device over the bus, by object index |
 | `busprop dump <pa>` | walk every index and known PID and print what answers |
 | `<pa> runstate [start\|stop]` | read the run state machine of the application program; `stop` halts group communication |

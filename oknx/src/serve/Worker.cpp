@@ -181,6 +181,7 @@ class WorkerProc : public WorkerApi
         noteMgmtConn();
         return true;
     }
+    void closeTunnel() override { closeMgmt(); }
     void prepareFtc() override
     {
         if (!_ftcSetup)

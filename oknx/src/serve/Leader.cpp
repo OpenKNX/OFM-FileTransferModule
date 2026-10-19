@@ -953,14 +953,17 @@ class Leader : public LeaderApi
             }
             stopMonitor(key, "bm", "CANCELLED");
         }
+        if (op->name == "device_mreset" && resetWouldCut(key, true, busy)) return false;
         {
             std::lock_guard<std::mutex> lk(_m);
             for (auto& l : _leases)
                 for (const auto& it : l.second->items)
                     if (ifaceKey(it.ip, it.port) == key && it.kind == "bm")
                     {
-                        busy = errorEnvelope("BUSY", "the command line holds a busmonitor here",
-                                             {{"holder", "cli:" + std::to_string(l.second->pid)}, {"since_ms", monoMs() - l.second->since}});
+                        busy = errorEnvelope("BUSY", "the command line holds this interface alone",
+                                             {{"holder", "cli:" + std::to_string(l.second->pid)},
+                                              {"purpose", l.second->purpose},
+                                              {"since_ms", monoMs() - l.second->since}});
                         return false;
                     }
         }
@@ -980,6 +983,46 @@ class Leader : public LeaderApi
         }
         if (start) dispatchNext(key);
         return true;
+    }
+
+    /**
+     * @brief Whether M_Reset on @p key would close a connection in use: a group monitor with readers or a command
+     *        line reservation. @p stopIdle stops a group monitor without readers (it waits for the worker's answer, so
+     *        never on the worker's reader thread).
+     */
+    bool resetWouldCut(const std::string& key, bool stopIdle, json& busy)
+    {
+        std::shared_ptr<SharedMon> gm = findMon(key, "gm");
+        if (gm && gm->readerCount() > 0)
+        {
+            busy = errorEnvelope("BUSY", "a group monitor with readers uses this interface; the reset would close it",
+                                 {{"holder", "serve-groupmon"}, {"readers", gm->readerCount()}, {"since_ms", monoMs() - gm->since}});
+            return true;
+        }
+        if (gm && stopIdle) stopMonitor(key, "gm", "CANCELLED");
+        std::lock_guard<std::mutex> lk(_m);
+        for (auto& l : _leases)
+            for (const auto& it : l.second->items)
+                if (ifaceKey(it.ip, it.port) == key)
+                {
+                    busy = errorEnvelope("BUSY", "the command line uses this interface; the reset would close it",
+                                         {{"holder", "cli:" + std::to_string(l.second->pid)},
+                                          {"purpose", l.second->purpose},
+                                          {"since_ms", monoMs() - l.second->since}});
+                    return true;
+                }
+        return false;
+    }
+
+    /** @brief Whether a device_mreset runs on @p key; call with _m held. */
+    bool resetRunningLocked(const std::string& key)
+    {
+        auto r = _mgmtRunning.find(key);
+        if (r == _mgmtRunning.end() || r->second.empty()) return false;
+        auto it = _ops.find(r->second);
+        if (it == _ops.end() || it->second->name != "device_mreset") return false;
+        std::lock_guard<std::mutex> lk2(it->second->m);
+        return !it->second->done;
     }
 
     /** @brief Start the next queued management operation of @p key, if none runs. */
@@ -1007,6 +1050,17 @@ class Leader : public LeaderApi
             op = q.front();
             q.pop_front();
             running = op->id;
+        }
+        // asked again here: a reader or a reservation may have come while the reset waited in the queue
+        json busy;
+        if (op->name == "device_mreset" && resetWouldCut(key, false, busy)) // may run on a worker's reader thread
+        {
+            {
+                std::lock_guard<std::mutex> lk(_m);
+                _mgmtRunning[key].clear();
+            }
+            finishOp(*op, busy);
+            return;
         }
         const size_t colon = key.rfind(':');
         const std::string ip = key.substr(0, colon);
@@ -1255,6 +1309,14 @@ class Leader : public LeaderApi
                 return nullptr;
             }
             stopMonitor(key, other, "CANCELLED");
+        }
+        {
+            std::lock_guard<std::mutex> lk(_m);
+            if (resetRunningLocked(key))
+            {
+                error = errorEnvelope("BUSY", "serve restarts this interface", {{"holder", "serve-op:" + _mgmtRunning[key]}});
+                return nullptr;
+            }
         }
         if (mode == "bm")
         {
@@ -2023,7 +2085,7 @@ class Leader : public LeaderApi
         }
         if (kind == "bm" && gm && gm->readerCount() > 0)
         {
-            busy = errorEnvelope("BUSY", "serve uses this interface; a busmonitor needs it alone", {{"holder", "serve-groupmon"}, {"iface", key}});
+            busy = errorEnvelope("BUSY", "serve uses this interface; this command needs it alone", {{"holder", "serve-groupmon"}, {"iface", key}});
             return true;
         }
         return false;
@@ -2088,9 +2150,14 @@ class Leader : public LeaderApi
                                                               {"iface", key}}));
                             return;
                         }
+                if (resetRunningLocked(key))
+                {
+                    sendJson(res, 409, errorEnvelope("BUSY", "serve restarts this interface", {{"holder", "serve-op:" + _mgmtRunning[key]}, {"iface", key}}));
+                    return;
+                }
                 if (it.kind == "bm" && (!_mgmtRunning[key].empty() || !_mgmtQueue[key].empty()))
                 {
-                    sendJson(res, 409, errorEnvelope("BUSY", "serve uses this interface; a busmonitor needs it alone",
+                    sendJson(res, 409, errorEnvelope("BUSY", "serve uses this interface; this command needs it alone",
                                                      {{"holder", "serve-op"}, {"iface", key}}));
                     return;
                 }

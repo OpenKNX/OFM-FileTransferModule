@@ -90,6 +90,7 @@ typedef int sock_t;
 #include "core/Gzip.h"
 #include "core/GaOps.h"
 #include "core/PropRead.h"
+#include "core/MReset.h"
 #include "core/SetPa.h"
 #include "serve/BenchCmd.h"
 #include "serve/Bridge.h"
@@ -1791,6 +1792,9 @@ static void usage()
     U.cmdRow("prop read|write <iot> <inst> <pid> [start] [hex]",
              L.tr("the INTERFACE's own objects (local device management, by object TYPE + instance)",
                   "die EIGENEN Objekte des Interfaces (lokales Device Management, nach Objekt-TYP + Instanz)"));
+    U.cmdRow("reset [yes]",
+             L.tr("restart the INTERFACE (M_Reset over device management: Basic Restart, no reboot on OpenKNX); every connection to it closes, also other clients'",
+                  "das INTERFACE neu starten (M_Reset über Device Management: Basic Restart, bei OpenKNX kein Neubooten); jede Verbindung zu ihm schließt, auch fremde"));
     U.cmdRow("busprop read|write <pa> <objIdx> <pid> [start] [hex]",
              L.tr("a REMOTE device's objects over the bus, by object INDEX (A_PropertyValue_Read/Write)",
                   "die Objekte eines ENTFERNTEN Geräts über den Bus, nach Objekt-INDEX (A_PropertyValue_Read/Write)"));
@@ -5843,7 +5847,8 @@ int main(int argc, char** argv)
         {
             const bool bm = c0 == "bm" || c0 == "busmon";
             const bool gm = c0 == "gm" || c0 == "groupmon" || (c0 == "ga" && pos.size() >= 2 && (pos[1] == "monitor" || pos[1] == "mon"));
-            const std::string kind = bm ? "bm" : gm ? "gm" : "mgmt";
+            const bool alone = bm || c0 == "reset"; // M_Reset closes every connection to the interface
+            const std::string kind = alone ? "bm" : gm ? "gm" : "mgmt";
             std::vector<ftc::serve::LeaseItem> items = {{ip, port, kind}};
             if ((bm || gm) && pos.size() >= 3 && pos[1] == "compare") items.push_back({pos[2], port, kind});
             std::string purpose = "oknx";
@@ -7126,6 +7131,58 @@ int main(int argc, char** argv)
         }
         tun.setPropertyCallback(nullptr);
         tun.disconnect();
+        socketCleanup();
+        return rc;
+    }
+
+    // `oknx -i <ip> reset [yes]` — M_Reset.req to the interface itself (03_06_03 4.1.7.5.1), then wait until it
+    // answers a DESCRIPTION_REQUEST again. Every KNXnet/IP connection to it closes: `yes` is the script's consent,
+    // on a terminal a person is asked as well.
+    if (!ip.empty() && pos.size() >= 1 && pos[0] == "reset")
+    {
+        ftc::I18n& L = g_i18n;
+        const bool said = pos.size() >= 2 && pos[1] == "yes";
+        if (!said && !(g_term.isTty() && !quiet))
+        {
+            g_ui.errorBlock(false, L.tr("reset closes every connection to the interface", "reset schließt jede Verbindung zum Interface"),
+                            {L.tr("also those of other clients (programming software, a visualisation)",
+                                  "auch die anderer Clients (Programmiersoftware, Visualisierung)")},
+                            "oknx -i " + ip + " reset yes");
+            socketCleanup();
+            return 2;
+        }
+        if (g_term.isTty() && !quiet)
+        {
+            g_tpl.status(ftc::Tpl::Stat::Warn, ip + " " + L.tr("will be restarted", "wird neu gestartet"),
+                         {L.tr("every connection to it closes, also other clients'", "jede Verbindung zu ihm schließt, auch fremde")});
+            if (!ftc::confirm(g_term, g_theme, L, L.tr("really restart this interface?", "dieses Interface wirklich neu starten?")))
+            {
+                socketCleanup();
+                return 2;
+            }
+        }
+        const ftc::MResetResult r = ftc::mresetInterface(ip, port, 30000, [] { return g_abort != 0; });
+        int rc = 0;
+        if (!r.connected) rc = 1;
+        else if (r.outcome == ftc::DevMgmtSession::Reset::NoAnswer) rc = 4;
+        else if (!r.back) rc = g_abort ? 130 : 4;
+        if (quiet)
+            std::printf("mreset\t%s\t%s\t%d\t%u\n", ip.c_str(), r.connected ? ftc::mresetOutcomeName(r.outcome) : "connect-failed",
+                        r.back ? 1 : 0, (unsigned)r.backAfterMs);
+        else if (!r.connected)
+            g_ui.errorBlock(false, L.tr("no device management connection", "keine Device-Management-Verbindung"), {r.connectError}, "");
+        else if (r.outcome == ftc::DevMgmtSession::Reset::NoAnswer)
+            g_ui.errorBlock(false, L.tr("the interface did not answer M_Reset", "das Interface hat auf M_Reset nicht geantwortet"), {}, "");
+        else
+        {
+            g_tpl.status(ftc::Tpl::Stat::Ok, "M_Reset", {r.outcome == ftc::DevMgmtSession::Reset::Indicated ? "M_Reset.ind" : L.tr("acknowledged", "quittiert")});
+            if (r.back)
+                g_tpl.status(ftc::Tpl::Stat::Ok, L.tr("answers again", "antwortet wieder"), {std::to_string(r.backAfterMs) + " ms"});
+            else if (g_abort)
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("stopped - the reset was sent", "gestoppt - der Reset ist gesendet"), {});
+            else
+                g_tpl.status(ftc::Tpl::Stat::Warn, L.tr("no answer within 30 s", "keine Antwort innerhalb von 30 s"), {});
+        }
         socketCleanup();
         return rc;
     }
