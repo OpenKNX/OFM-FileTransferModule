@@ -19,7 +19,9 @@
 #include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -54,6 +56,41 @@ class Compare
     /** @brief Write the annotated capture to @p path when the run ends (after the drain), for offline analysis. */
     void xmlOut(const std::string& path) { _xmlPath = path; }
 
+    /** @brief What a side fed from outside receives (serve: the telegram stream of a worker). */
+    struct FedEvent
+    {
+        enum Kind
+        {
+            Frame, ///< one decoded telegram
+            Up,    ///< the side's connection is up (pa = its tunnel address)
+            Down,  ///< the side's connection dropped
+            Lost   ///< telegrams of this side between t0 and t1 never arrived (a full queue on the way)
+        } kind = Frame;
+        MonFrame f;
+        uint64_t t0 = 0, t1 = 0;
+        uint16_t pa = 0;
+    };
+    /** @brief A side fed from outside; the feeder pushes, compare drains it once per pass. */
+    struct FedSide
+    {
+        std::mutex m;
+        std::deque<FedEvent> q;
+        void push(FedEvent e)
+        {
+            std::lock_guard<std::mutex> lk(m);
+            q.push_back(std::move(e));
+        }
+    };
+    /**
+     * @brief Take both sides from @p a and @p b instead of own tunnels: run() then opens, flushes and closes
+     *        nothing and prints no result line; resultLine() gives it. The matching rules stay the same.
+     */
+    void fed(FedSide* a, FedSide* b)
+    {
+        _fedSide[0] = a;
+        _fedSide[1] = b;
+    }
+
     /**
      * @brief Run the compare/multi view until @p abort, @p maxFrames or @p maxSeconds (0 = unlimited).
      * @return 0 identical · 2 divergent · 1 no tunnel, nothing compared or --xml not written · 130 Ctrl+C.
@@ -86,7 +123,7 @@ class Compare
         // COOPERATIVELY from the start (marked down + immediate retry), so an unreachable B never blocks startup or
         // the loop: A streams and stays responsive while B keeps retrying in the background.
         std::string eA;
-        if (!_A.openTunnel(mode, eA))
+        if (!_fedSide[0] && !_A.openTunnel(mode, eA))
         {
             fail(_ipA, eA);
             return 1;
@@ -134,8 +171,11 @@ class Compare
         // Teardown: flush each side's still-pending busmon telegram INTO the inbox FIRST, then drain + grace it out,
         // so the last un-acked frame is counted / matched / rendered / captured (not dropped).
         _tearing = true; // teardown frames are late-edge (their partner may arrive after capture ends)
-        _A.flushBus();
-        _B.flushBus();
+        if (!_fedSide[0])
+        {
+            _A.flushBus();
+            _B.flushBus();
+        }
         std::vector<std::string> tail;
         processInbox(tail);
         normFlushAll(tail); // flush any bytes still in the reassembly accumulators (tagged, never dropped)
@@ -166,8 +206,11 @@ class Compare
             else if (!_quiet)
                 _p.status(Tpl::Stat::Ok, _i.tr("capture saved", "Aufzeichnung gespeichert"), {w});
         }
-        _A.closeTunnel();
-        _B.closeTunnel();
+        if (!_fedSide[0])
+        {
+            _A.closeTunnel();
+            _B.closeTunnel();
+        }
         return rc;
     }
 
@@ -241,6 +284,21 @@ class Compare
     void gapClose(int side)
     {
         if (!_gaps[side].empty() && _gaps[side].back().second == 0) _gaps[side].back().second = detail::nowMs();
+    }
+    /** @brief A closed span of lost telegrams; kept in front of an open gap, which gapClose() finds at the back. */
+    void gapLost(int side, uint64_t t0, uint64_t t1)
+    {
+        auto& g = _gaps[side];
+        const bool open = !g.empty() && g.back().second == 0;
+        if (g.size() >= GAPS_MAX) // full: widen the last closed gap so the span still counts as not comparable
+        {
+            auto& w = open && g.size() >= 2 ? g[g.size() - 2] : g.back();
+            if (w.second == 0) return; // an open gap covers everything from its start
+            if (t0 < w.first) w.first = t0;
+            if (t1 > w.second) w.second = t1;
+            return;
+        }
+        g.insert(open ? g.end() - 1 : g.end(), {t0, t1});
     }
 
     /*********************************************************************
@@ -344,6 +402,8 @@ class Compare
     uint64_t _stopMs = 0;         // end of the comparison window
     std::string _stopWall;        // the same instant as wall-clock text, for the XML
     std::string _xmlPath;         // --xml: write the annotated capture here after the run
+    FedSide* _fedSide[2] = {nullptr, nullptr}; // serve: both sides fed from outside, no own tunnels
+    uint16_t _fedPa[2] = {0, 0};
 
     /** @brief Per-service divergence tally for the summary breakdown (sums to the counter totals). */
     struct Svc { uint64_t onlyA = 0, onlyB = 0, mismatch = 0, integ = 0, ack = 0, notrep = 0; };
@@ -378,10 +438,50 @@ class Compare
      * @details The connect wait is sliced across loop iterations (sendConnect once, pollReopen(0) each pass), so an
      *          unreachable B never freezes A's frames, the keyboard or the render — no 3 s stall.
      */
+    /** @brief A fed side: move its pushed events into the inbox and the gap list; never blocks for long. */
+    void serviceFed(int side)
+    {
+        std::deque<FedEvent> evs;
+        {
+            std::lock_guard<std::mutex> lk(_fedSide[side]->m);
+            evs.swap(_fedSide[side]->q);
+        }
+        if (evs.empty() && side == 1) std::this_thread::sleep_for(std::chrono::milliseconds(5)); // no tick() to wait in
+        for (auto& e : evs)
+        {
+            switch (e.kind)
+            {
+                case FedEvent::Frame: _inbox.push_back({side, e.f}); break;
+                case FedEvent::Up:
+                    _fedPa[side] = e.pa;
+                    if (_down[side] && !_draining) // after the stop a side that comes back compares nothing
+                    {
+                        _down[side] = false;
+                        gapClose(side);
+                    }
+                    break;
+                case FedEvent::Down:
+                    if (!_down[side])
+                    {
+                        _down[side] = true;
+                        gapOpen(side);
+                        _reconnected = true;
+                    }
+                    break;
+                case FedEvent::Lost: gapLost(side, e.t0, e.t1 > 0 ? e.t1 : e.t0 + 1); break;
+            }
+        }
+    }
+
     void serviceSide(int side, Monitor::Mode mode, const volatile std::sig_atomic_t* abort, uint64_t start, int maxSeconds)
     {
         (void)start;
         (void)maxSeconds;
+        if (_fedSide[side])
+        {
+            serviceFed(side);
+            return;
+        }
         Monitor& m = side == 0 ? _A : _B;
         if (_down[side])
         {
@@ -1727,8 +1827,8 @@ class Compare
         if (!_stopWall.empty())
             std::fprintf(fp, "         stop=\"%s\" drainMs=\"%d\"\n", _stopWall.c_str(), _draining ? _graceMs : 0);
         std::fprintf(fp, "         ifaceA=\"%s\" paA=\"%s\" ifaceB=\"%s\" paB=\"%s\"\n",
-                     Monitor::xmlEsc(_ipA).c_str(), Tpl::pa(_A.assignedPA()).c_str(),
-                     Monitor::xmlEsc(_ipB).c_str(), Tpl::pa(_B.assignedPA()).c_str());
+                     Monitor::xmlEsc(_ipA).c_str(), Tpl::pa(sidePa(0)).c_str(),
+                     Monitor::xmlEsc(_ipB).c_str(), Tpl::pa(sidePa(1)).c_str());
         // per-side capability discovery: does each side deliver the 0x03 status add-info and the L2 acknowledge?
         std::fprintf(fp, "         statusA=\"%s\" statusB=\"%s\" ackA=\"%s\" ackB=\"%s\">\n",
                      _statSeen[0] ? "yes" : "no", _statSeen[1] ? "yes" : "no",
@@ -1770,9 +1870,9 @@ class Compare
         const std::string what = std::string(mode == Monitor::Mode::Bus ? "busmon" : "groupmon") + " " +
                                  (_diffOn ? _i.tr("compare", "Vergleich") : _i.tr("multi", "Multi"));
         _p.section(what, -1);
-        const std::string bState = _down[1] ? _i.tr("connecting…", "verbinde…") : "IA " + Tpl::pa(_B.assignedPA());
+        const std::string bState = _down[1] ? _i.tr("connecting…", "verbinde…") : "IA " + Tpl::pa(sidePa(1));
         _p.status(_down[1] ? Tpl::Stat::Warn : Tpl::Stat::Ok, _i.tr("tunnels", "Tunnel"),
-                  {"A " + _ipA + " · IA " + Tpl::pa(_A.assignedPA()), "B " + _ipB + " · " + bState,
+                  {"A " + _ipA + " · IA " + Tpl::pa(sidePa(0)), "B " + _ipB + " · " + bState,
                    _i.tr("Ctrl+C to stop", "Ctrl+C zum Beenden")});
         if (_diffOn)
             _p.note(_i.tr("green = only A · amber = only B · dim = common · red = divergence",
@@ -1798,23 +1898,13 @@ class Compare
     {
         const uint64_t div = divergences();
         const bool noB = _diffOn && nothingCompared();
-        if (_quiet || !_render)
+        if (_fedSide[0])
+        { /* fed: the caller takes resultLine() */
+        }
+        else if (_quiet || !_render)
         {
             // scripted: one summary line to stdout, no chrome (all fidelity dimensions + per-side capability)
-            const char* result = !_diffOn ? "MULTI" : noB ? "INCOMPARABLE" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
-            std::printf("%s\tseenA=%llu\tseenB=%llu\tcommon=%llu\tonlyA=%llu\tonlyB=%llu\tcountMismatch=%llu"
-                        "\tintegrityMismatch=%llu\tackMismatch=%llu\tnotReported=%llu\tlostA=%llu\tlostB=%llu"
-                        "\tstatusA=%s\tstatusB=%s\tackA=%s\tackB=%s\tnormalize=%s\tincompleteA=%llu\tincompleteB=%llu"
-                        "\tnotComparableA=%llu\tnotComparableB=%llu\n",
-                        result, (unsigned long long)_seenA, (unsigned long long)_seenB, (unsigned long long)_common,
-                        (unsigned long long)_onlyA, (unsigned long long)_onlyB, (unsigned long long)_mismatch,
-                        (unsigned long long)_integMismatch, (unsigned long long)_ackMismatch, (unsigned long long)_notReported,
-                        (unsigned long long)_lost[0], (unsigned long long)_lost[1],
-                        _statSeen[0] ? "yes" : "no", _statSeen[1] ? "yes" : "no",
-                        _ackSeen[0] ? "yes" : "no", _ackSeen[1] ? "yes" : "no",
-                        (mode == Monitor::Mode::Bus && _normalize) ? "on" : "off",
-                        (unsigned long long)_normIncomplete[0], (unsigned long long)_normIncomplete[1],
-                        (unsigned long long)_notCmp[0], (unsigned long long)_notCmp[1]);
+            std::fputs(resultLine(mode).c_str(), stdout);
             std::fflush(stdout);
         }
         else
@@ -1825,6 +1915,39 @@ class Compare
         if (noB) return 1; // nothing was compared, as when A cannot connect
         if (_diffOn && div > 0) return 2;
         return 0;
+    }
+
+  public:
+    /** @brief The scripted result line (`-q`): result word, then key=value fields, tab-separated, with newline. */
+    std::string resultLine(Monitor::Mode mode)
+    {
+        const uint64_t div = divergences();
+        const bool noB = _diffOn && nothingCompared();
+        const char* result = !_diffOn ? "MULTI" : noB ? "INCOMPARABLE" : (div == 0 ? "IDENTICAL" : "DIVERGENT");
+        char b[1024];
+        std::snprintf(b, sizeof(b),
+                      "%s\tseenA=%llu\tseenB=%llu\tcommon=%llu\tonlyA=%llu\tonlyB=%llu\tcountMismatch=%llu"
+                      "\tintegrityMismatch=%llu\tackMismatch=%llu\tnotReported=%llu\tlostA=%llu\tlostB=%llu"
+                      "\tstatusA=%s\tstatusB=%s\tackA=%s\tackB=%s\tnormalize=%s\tincompleteA=%llu\tincompleteB=%llu"
+                      "\tnotComparableA=%llu\tnotComparableB=%llu\n",
+                      result, (unsigned long long)_seenA, (unsigned long long)_seenB, (unsigned long long)_common,
+                      (unsigned long long)_onlyA, (unsigned long long)_onlyB, (unsigned long long)_mismatch,
+                      (unsigned long long)_integMismatch, (unsigned long long)_ackMismatch, (unsigned long long)_notReported,
+                      (unsigned long long)_lost[0], (unsigned long long)_lost[1],
+                      _statSeen[0] ? "yes" : "no", _statSeen[1] ? "yes" : "no",
+                      _ackSeen[0] ? "yes" : "no", _ackSeen[1] ? "yes" : "no",
+                      (mode == Monitor::Mode::Bus && _normalize) ? "on" : "off",
+                      (unsigned long long)_normIncomplete[0], (unsigned long long)_normIncomplete[1],
+                      (unsigned long long)_notCmp[0], (unsigned long long)_notCmp[1]);
+        return b;
+    }
+
+  private:
+    /** @brief The tunnel address of a side: its own monitor, or what the feeder reported. */
+    uint16_t sidePa(int side) const
+    {
+        if (_fedSide[side]) return _fedPa[side];
+        return side == 0 ? _A.assignedPA() : _B.assignedPA();
     }
 
     void drawFinalResult(Monitor::Mode mode, bool aborted, bool userStop)
