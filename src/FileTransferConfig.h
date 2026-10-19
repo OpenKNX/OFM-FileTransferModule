@@ -146,3 +146,11 @@
     #define FTC_CMD_NAME "ftc"
     #define FTC_CMD_RUN  "ftc"
 #endif
+
+// The command parsers read no floating point. On the RP2040 the newlib integer scanf is linked anyway
+// (tzset), so siscanf keeps the floating-point scanf engine out of the image; a PC libc has no siscanf.
+#if defined(ARDUINO_ARCH_RP2040) && !defined(FTC_HOST_BUILD)
+    #define FTC_SSCANF siscanf
+#else
+    #define FTC_SSCANF sscanf
+#endif

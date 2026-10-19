@@ -929,7 +929,7 @@ void FileTransferClient::ftcScanWriteRow(const FtcEntry &e, bool probed)
 bool FileTransferClient::ftcScanProbeStart(const FtcEntry &e)
 {
     unsigned a = 0, l = 0, d = 0;
-    if (sscanf(e.name, "%u.%u.%u", &a, &l, &d) != 3 || a > 15 || l > 15 || d > 255) return false;
+    if (FTC_SSCANF(e.name, "%u.%u.%u", &a, &l, &d) != 3 || a > 15 || l > 15 || d > 255) return false;
     const uint16_t pa = (uint16_t)((a << 12) | (l << 8) | d);
     _devMfr = 0;
     _devVerMaj = _devVerMin = _devVerRev = 0;

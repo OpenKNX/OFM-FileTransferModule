@@ -28,7 +28,7 @@ using OpenKNX::Network::WEB_POST;
 uint16_t FileTransferWebClient::parsePa(const std::string &s)
 {
     unsigned a = 0, l = 0, d = 0;
-    if (sscanf(s.c_str(), "%u.%u.%u", &a, &l, &d) != 3) return 0;
+    if (FTC_SSCANF(s.c_str(), "%u.%u.%u", &a, &l, &d) != 3) return 0;
     if (a > 15 || l > 15 || d > 255) return 0;
     return (uint16_t)((a << 12) | (l << 8) | d);
 }

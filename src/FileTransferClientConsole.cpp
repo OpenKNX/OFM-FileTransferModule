@@ -168,7 +168,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
     }
 
     char a1[24] = {0}, a2[24] = {0};
-    const int ntok = sscanf(cmd.c_str(), "ftc scan %23s %23s", a1, a2);
+    const int ntok = FTC_SSCANF(cmd.c_str(), "ftc scan %23s %23s", a1, a2);
 
     // "deep [N]" anywhere = deep scan: N passes (default 5), union across passes -- robust over IP.
     const char *dp = strstr(cmd.c_str(), " deep");
@@ -176,7 +176,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
     if (dp != nullptr)
     {
         unsigned n = 0;
-        sw = (sscanf(dp, " deep %u", &n) == 1 && n >= 2 && n <= 20) ? (uint8_t)n : 5;
+        sw = (FTC_SSCANF(dp, " deep %u", &n) == 1 && n >= 2 && n <= 20) ? (uint8_t)n : 5;
     }
     // "ets" anywhere = connection-oriented (ETS-parity) scan: T_Connect per address, finds BCU1/BCU2.
     const bool co = strstr(cmd.c_str(), " ets") != nullptr;
@@ -186,14 +186,14 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
     // "save <path>" anywhere = write the listing to a backend CSV (path stops at the next space).
     char savePath[80] = {0};
     const char *svp = strstr(cmd.c_str(), " save ");
-    if (svp != nullptr) sscanf(svp, " save %79s", savePath);
+    if (svp != nullptr) FTC_SSCANF(svp, " save %79s", savePath);
     // "pace <ms>" = fixed no-loss inter-probe gap (0/absent = the fastest-but-safe default that finds all);
     // "drain <ms>" = end-of-sweep wait for slow answers; "tmo <ms>" = con-wait before an address is retried.
     uint32_t paceMs = 0, drainMs = 0, tmoMs = 0;
     { unsigned v = 0; const char *p = nullptr;
-      if ((p = strstr(cmd.c_str(), " pace "))  && sscanf(p, " pace %u", &v)  == 1 && v <= 2000)  paceMs  = v;
-      if ((p = strstr(cmd.c_str(), " drain ")) && sscanf(p, " drain %u", &v) == 1 && v <= 60000) drainMs = v;
-      if ((p = strstr(cmd.c_str(), " tmo "))   && sscanf(p, " tmo %u", &v)   == 1 && v <= 5000)  tmoMs   = v; }
+      if ((p = strstr(cmd.c_str(), " pace "))  && FTC_SSCANF(p, " pace %u", &v)  == 1 && v <= 2000)  paceMs  = v;
+      if ((p = strstr(cmd.c_str(), " drain ")) && FTC_SSCANF(p, " drain %u", &v) == 1 && v <= 60000) drainMs = v;
+      if ((p = strstr(cmd.c_str(), " tmo "))   && FTC_SSCANF(p, " tmo %u", &v)   == 1 && v <= 5000)  tmoMs   = v; }
     // "deep"/"ets"/"openknx"/"info"/"save"/"pace"/"drain"/"tmo" as a 2nd token are keywords, not a range end.
     const bool a2IsEnd = (ntok >= 2 && strcmp(a2, "deep") != 0 && strcmp(a2, "ets") != 0 &&
                           strcmp(a2, "openknx") != 0 && strcmp(a2, "info") != 0 && strcmp(a2, "save") != 0 &&
@@ -227,7 +227,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
     {
         unsigned ar = 0;
         char g1[24] = {0}, grest[80] = {0};
-        const int m = sscanf(cmd.c_str(), "ftc scan area %u %23s %79[^\n]", &ar, g1, grest);
+        const int m = FTC_SSCANF(cmd.c_str(), "ftc scan area %u %23s %79[^\n]", &ar, g1, grest);
         if (m < 1 || ar > 15)
         {
             openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " scan area <0..15> yes i really know what i am doing");
@@ -252,7 +252,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
     }
 
     unsigned a = 0, l = 0, d = 0;
-    const int f = sscanf(a1, "%u.%u.%u", &a, &l, &d);
+    const int f = FTC_SSCANF(a1, "%u.%u.%u", &a, &l, &d);
     if (f == 2 && a <= 15 && l <= 15)
     {
         char lbl[24];
@@ -268,7 +268,7 @@ void FileTransferClientConsole::showScan(const std::string &cmd)
         if (a2IsEnd)
         {
             unsigned a2a = 0, l2 = 0, d2 = 0;
-            if (sscanf(a2, "%u.%u.%u", &a2a, &l2, &d2) != 3 || a2a > 15 || l2 > 15 || d2 > 255)
+            if (FTC_SSCANF(a2, "%u.%u.%u", &a2a, &l2, &d2) != 3 || a2a > 15 || l2 > 15 || d2 > 255)
             {
                 openknx.logger.logWithPrefix("FTC", "bad end address -- expected a.l.d, e.g. " FTC_CMD_NAME " scan 5.0.1 5.0.50");
                 return;
@@ -298,7 +298,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     char paStr[24] = {0};
     char sub[16] = {0};
     char arg[80] = {0};
-    const int argc = sscanf(cmd.c_str(), "ftc %23s %15s %79s", paStr, sub, arg);
+    const int argc = FTC_SSCANF(cmd.c_str(), "ftc %23s %15s %79s", paStr, sub, arg);
 
     // "ftc" with nothing but whitespace after it (e.g. "ftc " or "ftc   ") -> full help, like `ftc ?`.
     if (argc < 1 || strcmp(paStr, "?") == 0 || strcmp(paStr, "help") == 0)
@@ -330,7 +330,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     if (argc >= 1 && (strcmp(paStr, "verbose") == 0 || strcmp(paStr, "v") == 0))
     {
         unsigned lv = 0;
-        if (argc >= 2 && sscanf(sub, "%u", &lv) == 1 && lv <= 2)
+        if (argc >= 2 && FTC_SSCANF(sub, "%u", &lv) == 1 && lv <= 2)
             _client.setVerbosity((uint8_t)lv);
         openknx.logger.logWithPrefixAndValues("FTC", "output level %u (0 quiet · 1 compact · 2 live)",
                                               (unsigned)_client.verbosity());
@@ -344,7 +344,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     }
 
     unsigned a = 0, l = 0, d = 0;
-    if (sscanf(paStr, "%u.%u.%u", &a, &l, &d) != 3 || a > 15 || l > 15 || d > 255)
+    if (FTC_SSCANF(paStr, "%u.%u.%u", &a, &l, &d) != 3 || a > 15 || l > 15 || d > 255)
     {
         openknx.logger.logWithPrefixAndValues("FTC", "bad PA '%s' -- expected a.l.d, e.g. 5.0.3", paStr);
         return true;
@@ -430,7 +430,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
         // Optional [maxbytes]: cap the per-drain output so the answer fits a constrained tunnel's max frame
         // (e.g. 16 for a small IP interface). Omitted/0 -> the full window; requestConsole() range-checks it.
         unsigned mb = 0;
-        sscanf(cmd.c_str(), "ftc %*s %*s %u", &mb);
+        FTC_SSCANF(cmd.c_str(), "ftc %*s %*s %u", &mb);
         _client.requestConsole(pa, (uint8_t)mb);
         return true;
     }
@@ -482,7 +482,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     {
         // ftc <pa> receive|download|get <remote> [local] [pkg] [verbose]  -- pull a file onto the local sink (SD).
         char rem[FTC_PATH_MAX] = {0}, a2[FTC_PATH_MAX] = {0}, a3[80] = {0}, a4[80] = {0};
-        const int n = sscanf(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %" FTC_PATH_SCAN "s %79s %79s", rem, a2, a3, a4);
+        const int n = FTC_SSCANF(cmd.c_str(), "ftc %*s %*s %" FTC_PATH_SCAN "s %" FTC_PATH_SCAN "s %79s %79s", rem, a2, a3, a4);
         if (n < 1)
         {
             openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> receive <remotepath> [localpath] [pkg] [verbose]   e.g. " FTC_CMD_NAME " 5.0.3 receive fw.bin sd/fw.bin 16");
@@ -551,7 +551,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
     if (strcmp(sub, "mv") == 0)
     {
         char newp[80] = {0};
-        if (sscanf(cmd.c_str(), "ftc %*s %*s %79s %79s", arg, newp) != 2)
+        if (FTC_SSCANF(cmd.c_str(), "ftc %*s %*s %79s %79s", arg, newp) != 2)
         {
             openknx.logger.logWithPrefix("FTC", "usage: " FTC_CMD_NAME " <pa> mv <old> <new>   e.g. " FTC_CMD_NAME " 5.0.3 mv /a.bin /b.bin");
             return true;
@@ -582,7 +582,7 @@ bool FileTransferClientConsole::processCommand(const std::string &cmd)
             return true;
         }
         char remote[80] = {0};
-        sscanf(cmd.c_str(), "ftc %*s %*s %*s %79s", remote); // optional: where it is staged on the target
+        FTC_SSCANF(cmd.c_str(), "ftc %*s %*s %*s %79s", remote); // optional: where it is staged on the target
         _client.requestDeltaSend(pa, arg, remote);
         return true;
     }
