@@ -1,7 +1,18 @@
 # Changes
 
 
-## 2026-10-19 -- oknx serve: one process for the API, MCP and the bench
+## ec/v0.3.0-beta.1: 2026-10-25
+
+Everything after `ec/v0.2.0-beta.1`. The library version is `0.3.0`; it is reported over the bus, so `ftc <pa> info`
+shows 0.3.0 as the module version.
+
+### 2026-10-20 -- a successful update releases the staged image
+
+* Fix: after a full firmware update over FTC the staged image is released, so the next upload finds the space. RP2040: the image is noted and OGM-Common removes it at the next start once the bootloader has run; the staged image of a delta update is not noted. ESP32: the image is removed once it is written to the OTA slot
+* Change (ESP32): the client commands are parsed with `siscanf`, as on the RP2040; the ESP32 and ESP32-S3 images shrink by 9692 to 16004 bytes
+* Fix (oknx serve): a worker drops the management entry of a tunnel that the interface closed or that timed out; a following worker could send a DISCONNECT for that channel within 110 s although another client may hold it by then
+
+### 2026-10-19 -- oknx serve: one process for the API, MCP and the bench
 
 * `oknx serve` runs in the background on 127.0.0.1 and ::1 (port 8671) and owns the KNXnet/IP connections it opens: one worker process per interface (`oknx --_worker`), an HTTP/SSE API, MCP 2026-07-28 and 2025-03-26 … 2025-11-25 on `/mcp`, and the pages under `/ui` with the busmonitor viewer. Every call goes through one guard with the rules file `~/.config/oknx/rules.json`: without an entry an interface allows only searching and reading its firmware state
 * Operations: discover, device_state, device_bus, tunnels, device_info, ga_read, prop_read, busprop_read, monitor, compare, bench_state, monitor_stop, and the writing ones ga_write, ga_ask, restart, runstate, setpa, ftc_login, ftc_send, ftc_get, device_tunnel_close, device_busmon_stop, device_reset, suite_run; `oknx serve describe` lists them with their arguments
@@ -19,14 +30,14 @@
 * `oknx --discover`'s search keeps the serial number, MAC address and service families of each interface; the monitors can hand their raw cEMI to a second reader
 
 
-## 2026-10-19 -- login takes the password from the environment, ps counts every device
+### 2026-10-19 -- login takes the password from the environment, ps counts every device
 
 * `oknx <pa> login` without a password on the line takes it from `OKNX_FTC_PW_<a>_<l>_<d>` (for 5.0.3: `OKNX_FTC_PW_5_0_3`), so a script signs in without the password in its command line; the result names the variable, never the value. Without it a terminal still asks, a script gets exit code 2 with the name of the variable
 * Hardening: `Invoke-FtmHardening.ps1` without `-TargetPassword` takes it from the same variable for `-Target`, the one the suite runner sets for its other stages; the login line names where the password came from
 * Fix: `oknx ps` counted the devices in programming mode per address, so two devices that both had 15.15.255 showed as one and the "exactly one" note stayed away; it now counts every answer except a Layer-2 repetition, marks a shared address with `×N` and says that only the serial numbers tell those devices apart. Under `-q` each device gets its own line, the mask only on the first; `ps locate` and `ps --seconds 0` count the same way
 
 
-## 2026-10-18 -- compare checks both sides at a gap and writes its capture on request
+### 2026-10-18 -- compare checks both sides at a gap and writes its capture on request
 
 * Fix: a fragment without a partner (an incomplete reassembly or a lone acknowledge octet) close to a gap of its own side is `notComparable` too. When B joined in the middle of a telegram, its incomplete tail counted as `onlyB` and made a clean run DIVERGENT. A complete telegram there still counts, so a real loss on the other side stays visible. The class is shown as "(Verbindungslücke)" instead of "(Gegenseite getrennt)"
 * `oknx gm|bm compare … --xml <file>` (or `--xml=<file>`) writes the annotated capture to that file when the run ends, after the drain and also without a terminal; the `<compare>` element carries `stop` and `drainMs` (0 when no drain ran). A file that cannot be written completely turns exit code 0 into 1; every other exit code stays. `--xml` with any other command, or without a file, is refused
@@ -35,14 +46,14 @@
 * Fix: the time shown for a monitor telegram (in `gm`, `bm`, `compare` and their XML) took its seconds from the wall clock and its milliseconds from the monotonic clock, so the milliseconds did not belong to the second and a time could run backwards; both now come from the wall clock
 
 
-## 2026-10-18 -- compare counts a telegram as lost only when the other side could see it
+### 2026-10-18 -- compare counts a telegram as lost only when the other side could see it
 
 * Fix: `oknx gm|bm compare` counted a telegram as `onlyA` while B was still connecting: A opens first, B after it, and a cyclic telegram in that time turned two identical monitors into DIVERGENT. A telegram without a partner now counts as `onlyA`/`onlyB` only when the other side was connected from `--grace` before to `--grace` after it; otherwise it is `notComparable`, shown dimmed with "(Gegenseite getrennt)" and kept out of the result. The same applies around a reconnect mid-run or with the `r` key, counted from when the drop is detected. A reassembled telegram now carries the receive time of its first piece, not the time it was completed
 * At the stop both tunnels stay open for one more `--grace` in compare mode (not with `--multi`, not after Ctrl+C), so the partner of a telegram from the last moments can still arrive; a telegram received after the stop only completes a pair and is not counted on its own
 * The result line keeps its fields and ends with `notComparableA=` and `notComparableB=`; the XML counters carry the same two. When nothing was compared, because B never connected or every telegram fell into a time a side was down, the result is `INCOMPARABLE` with exit code 1; before, every telegram of A counted as `onlyA`
 
 
-## 2026-10-18 -- setpa waits for the button and assigns by serial number
+### 2026-10-18 -- setpa waits for the button and assigns by serial number
 
 * `setpa <x.y.z>` waits until exactly one device is in programming mode, asking once a second as 03_05_02 2.3 p.14 asks, and says so: on a terminal until Ctrl+C or `--wait <time>`, in a script or with `-q` for `--wait <time>`, otherwise one look of 1 s (before: one look of 2.5 s). After a wait of more than 5 s the address is checked again before it is written
 * Answers are counted per telegram, not per sender. Two devices that both still had 15.15.255 counted as one, and `setpa` wrote the address to both. A Layer-2 repetition does not count; a sender whose answers all carry the repetition mark counts once. This needs an interface that passes the repetition mark of TP1 on in the indication: one that marks every frame repeated makes two such devices count as one again, one that never marks it can count a repetition as a second device
@@ -51,13 +62,7 @@
 * `setpa scan [<a.l>]` reads the serial numbers of the devices that still have 15.15.255 or a.l.255 (NM_SerialNumberDefaultIA_Scan, 2.24 p.66-67, 7 s); `-q` prints `sn` lines, and no answer ends with exit code 1
 
 
-## ec/v0.3.0-beta.1: 2026-10-16
-
-The library version moves to `0.3.0` with this tag. It covers the dated sections from 2026-10-02 to 2026-10-16
-below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as the module version.
-
-
-## 2026-10-16 -- setpa checks the address first, `scan -q` has a fixed record form
+### 2026-10-16 -- setpa checks the address first, `scan -q` has a fixed record form
 
 * Fix: `setpa` follows NM_IndividualAddress_Write (03_05_02 2.3 p.13-15): it stops when another device already answers on the new address, writes only when the address changes, confirms over a transport connection and, once the device acknowledges that read, restarts it, which ends its programming mode. A device without connections is still confirmed by the broadcast read-back, without a restart
 * Change: every line of `scan -q` starts with its record type and has a fixed field count: `ipdev` 5 (the tunnel addresses comma-separated in one field), `tunnel` 4, `device` 11, the counters 2. Device and tunnel lines used to start with the address
@@ -71,7 +76,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * Fix: `unload` finds the loadable objects by their object type and unloads every one the device has: address, association and group object table, both application programs and a router's filter table. The fixed indices 1/2/3 hit the group object table instead of the application on a System B device, and the filter table instead of the address table on a router. `-q` prints one `unloadobj` line per object and an `unload` summary
 
 
-## 2026-10-16 -- oknx asks an object that answers a command
+### 2026-10-16 -- oknx asks an object that answers a command
 
 * `oknx -i <ip> ga ask <x/y/z> <value>` writes like `ga write` and then collects the GroupValue_Write and GroupValue_Response telegrams that come back on the same address. A `ga read` does not see an answer that comes as a write, as the OpenKNX diagnose object sends it. Measured over 11.11.0.31: `ga ask 31/0/1:16.001 uptime` answered 49 ms after the confirmation of its telegram, `mem` with two telegrams 48 ms apart, an unknown command with none. The diagnose object of that device has no read flag, so `ga read 31/0/1` gets no answer
 * Collecting ends 300 ms after the last answer once every address that went out has one, at the latest `--wait <ms>` (default 1500, 100 to 60000) after the last telegram. Each answer shows how long after the L_Data.con of its telegram it came, or after the send when no confirmation came. Answers are matched by address only, so a GroupValue_Write that another device sends on the address in that time counts too
@@ -80,14 +85,14 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * A negative L_Data.con names both causes: nobody on the TP line acknowledged the telegram, or the interface did not send it. On TP1 a group telegram is acknowledged only by a device or a coupler that has the address in its table; a frame the interface's transmitter drops gets a negative confirmation too. Before, it said "not confirmed (negative L_Data.con)"
 
 
-## 2026-10-15 -- the client counts only the answer it asked for
+### 2026-10-15 -- the client counts only the answer it asked for
 
 * Fix: the BCU1/BCU2 identity read counts a memory answer only when it answers the address that was read. A late answer for another chunk moved the cursor, so the identity could be decoded from octets that were never written
 * Fix: a table whose `PID_TABLE_REFERENCE` is 0 is skipped as unloaded (03_05_01 4.2.7 p.31) instead of reading its header from address 0000h
 * Fix (test suite): F-N-4 waits for the remote console session to end before it measures, and its title says it measures the client device
 
 
-## 2026-10-15 -- oknx reads and writes several group addresses at once
+### 2026-10-15 -- oknx reads and writes several group addresses at once
 
 * `oknx -i <ip> ga read` takes a list (space or comma), a range `x/y/a-b`, and `x/*`, `x/y/*`, `*` over the imported table, and prints one table: address, name, sender, value. Measured on the test line: 100 addresses in 5.2 s
 * `ga read … --every <int>` reads again and again; `--count N` or `--seconds N` ends it. The output is a log with a time stamp per cycle; `--live` keeps one table updated in place and marks a changed value with `*`, and falls back to the log while the table is taller than the window. One cycle takes at least 1.5 s, the answer window; a cycle that takes longer than the interval is reported once, and the cycles then follow back to back. A cycle in which no telegram could be sent ends the run with exit code 1, also when the tunnel would have come back a cycle later
@@ -97,7 +102,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * `-q` keeps the `ga` / `gaval` line format. The address column is the canonical `x/y/z` instead of the typed token, and the last field of a `ga write` line is always 0. A read that was sent but not confirmed now ends with exit code 1, before 0
 
 
-## 2026-10-11 -- the knxOTA page explains itself to the person doing the update
+### 2026-10-11 -- the knxOTA page explains itself to the person doing the update
 
 * The page opens with a short paragraph on what knxOTA does. A "?" at the step bar shows what to do in the active step, and two more explain the capabilities of the target and the two transfer methods
 * **safe is the default method.** fast has to be chosen, and its help says that it uses the whole bus, can delay other telegrams and gains about a tenth
@@ -113,7 +118,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * `oknx bm`: a busmonitor indication that carries fewer octets than its telegram announces is tagged `INCOMPLETE a/b` (German `UNVOLLSTÄNDIG a/b`), and the legend says what the two numbers are. The tag was `TORSO`, a word of this tool and not of KNX. The cause can be the bus or the monitoring interface: a third-party interface delivered 219 of the 263 octets of every long file transfer block that was acknowledged on the bus
 
 
-## 2026-10-10 -- the device info reads the bus voltage of every device
+### 2026-10-10 -- the device info reads the bus voltage of every device
 
 * `ftc <pa> info` and `oknx -i <ip> <pa> info` end with a transport connection of their own and an `A_ADC_Read` for channel 1 with 8 conversions on every device; before, only a BCU1 or BCU2 was asked. A scan does not read it. A device that returns conversions shows its bus voltage -- measured: 28.5 V on a Siemens BCU1 -- and an OpenKNX device answers read count 0 and shows none
 * `A_ADC_Read` goes out over the connection only. 03_03_07 Table 1 p.9 lists it for `T_Data_Connected` and not for `T_Data_Individual`, and a device with the matching knx fix no longer answers it connectionless. When the read cannot go over a connection to the target, for example while an ETS holds the connection, the report follows at once without the voltage; `FTC_ADC_TMO` (2 s) bounds the wait for the answer
@@ -123,14 +128,14 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * knxOTA page: the label of the window scale was cut off to "Fenster (", because the chart reserved a fixed 44 px for it. The margin now follows the measured width of the label
 * The bus voltage read needs the knx version that carries `ftcScanConnectedTo()`
 
-## 2026-10-07 -- the interface's own console finds its socket again
+### 2026-10-07 -- the interface's own console finds its socket again
 
 * The device moved its web console onto one socket shared by the whole web UI: `ws://<ip>/openknx/ws` instead of `/console`, and every frame on it is `key:payload`. `oknx -i <ip> con` still asked for `/console` and got a 404 -- "no websocket upgrade (no webconsole?)"
 * A path change alone would not have been enough: on the shared socket a command goes out as `cmd:<line>` and only the frames keyed `log` are console output. Sending the bare line reached nothing, and the other pages' status frames would have been printed as console text
 * Both generations are in the field, so the path is probed, newest first, and the framing follows from the one that answered. Nothing has to be configured
 * `con --ws-path <path>` skips the probe and takes exactly this path, to pin a generation without guessing: `/console` is read as the bare text of older firmware, every other path as `key:payload`. Per invocation, not a stored default: which socket a device serves is a property of that device, and a stored default would break the other half of a mixed installation. The path has to start with `/`; the option is refused with a `<pa>`, with `-D` and with any command other than `con` (`help` still prints the usage)
 
-## 2026-10-03 -- the scan reads every device by default; the parallel range scan is gone
+### 2026-10-03 -- the scan reads every device by default; the parallel range scan is gone
 
 * `scan` now reads each found device's identity by default. `--no-details` turns that off, `openknx` narrows it to the System B candidates, and `--workers N` / `-W N` says how many of those reads run at once (5). `details` is still accepted and does nothing
 * The parallel range scan (`--tunnels N` / `scan … fast`) is removed. Measured over three interleaved blocks of three runs each, it returned a different set every time -- 47 to 60 of 49 to 68 addresses moved between runs, against 1 to 5 for the sweep -- while the serial sweep found every address the connection-oriented scan found and 29 more. Both spellings now exit 1 with a message instead of being silently ignored
@@ -154,7 +159,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * `info ga` exited 1 for a device with no group objects at all. Zero objects is a complete read -- an unloaded device, or an application without KOs -- so the exit code now follows only the truncation flag
 * A tunnel slot the interface did not hand out was printed as "busy" whatever the reason. Only `E_NO_MORE_CONNECTIONS` means the interface is full; an unanswered probe now reads "unknown", and the panel says that a probe went unanswered instead of attributing the slot to somebody else
 
-## 2026-10-02 -- "no group address" and "unknown" are decided per row
+### 2026-10-02 -- "no group address" and "unknown" are decided per row
 
 * `?` ("the address table could not be read") was a RUN-wide flag but printed on every empty row, so an object that legitimately has no group address -- TSAP 0 is the device's own address -- was reported as unreadable. It is a bit in `FtcGaEntry` now, set where the row is built, and `groupAddressesMissing()` is gone with the flag. The row stays 8 bytes: `cfgValid` and the new bit share one octet as bitfields
 * `oknx` groups its rows by KO, so it folds the bit over a KO's associations: an object whose resolved addresses are complete prints them, and one with an unresolved association prints `?` behind them -- "and at least one more we could not read", instead of claiming the list is whole
@@ -164,7 +169,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * `_gaAddrRead` counted a table as fully read when the entry index reached the declared count -- but the index advances for an entry the row cap threw away too. A table whose last chunk crossed `FTC_GA_MAX` therefore reported "this object has no group address" for addresses the client itself had discarded
 
 
-## 2026-10-02 -- the group-comm report no longer blocks the device loop
+### 2026-10-02 -- the group-comm report no longer blocks the device loop
 
 * The report is printed a slice at a time (8 rows per `loop()` pass) instead of queueing the whole thing at once. With `FTC_GA_MAX = 300` that burst was ~39 KB of queued lines plus ~300 `vsnprintf` in a single pass on a device with 264 KB; it is ~1 KB now. `loop()` drains the queue before it runs the state machine again, so the slices keep it short by themselves
 * The row limit was deliberately NOT lowered: the knxOTA web page reads the same `_gaObjects` array and would have lost rows with it
@@ -174,7 +179,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * Chained memory reads no longer look like duplicates of each other: on a fast IP link the answer arrives inside the 12 ms duplicate window and was being dropped, costing three timeouts per chunk
 * `FTC_MEM_BUF` 32 → 48. It was exactly the length of the BCU identity block, so a device answering more octets than asked for on the last chunk had the whole block silently time out
 
-## oknx 1.0.5 -- the help reads like the job now: 2026-10-02
+### oknx 1.0.5 -- the help reads like the job now: 2026-10-02
 
 * Violet is reserved for `<pa>`, the device a line acts on. The command word used to get the same colour, which said "ga is a device" and undid the one thing this tool has to teach; commands are bold now, and a bare word after an option is its value, not a verb
 * The USAGE block says out loud that its colours are the legend for every line below -- and only when colour is actually being printed, so a piped or `NO_COLOR` run does not claim colours it did not use
@@ -187,7 +192,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * Seven more commands and switches that were in the dispatch but in no help line: `knxota resume`, `delta make|show|apply` with `--pack` and `--limit`, `--ui-demo`, `--dry-run`, `--force-install`, `--browse` / `--file-browser`, and the `_conprobe` measurement aid. Audited against the source: 41 options, 0 undocumented
 
 
-## oknx 1.0.4 -- programming an address, unloading a device, framed help: 2026-10-02
+### oknx 1.0.4 -- programming an address, unloading a device, framed help: 2026-10-02
 
 * `setpa <x.y.z>` is the ETS "programme the individual address": it addresses nobody, it picks the one device in PROGRAMMING MODE. Broadcast A_IndividualAddress_Read first, refuse unless exactly one device answers, write, then read the new address back as the proof. Verified on the rig: 5.0.3 -> 5.0.99 -> 5.0.3, each step confirmed on the bus
 * `<pa> unload yes` writes LE_UNLOAD (4) to PID_LOAD_STATE_CONTROL (5) on the address table, the association table and the application program, then reads every load state back and reports success only when all three are UNLOADED. A terminal asks again on top of the `yes`, because only an ETS download undoes it. Verified on 5.0.3: all three states 01 -> 00, checked with a separate `busprop read`
@@ -200,7 +205,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * `gm` shows the group address and its name in two columns, so the names no longer shift with the address length; the name column follows the terminal width and a longer name is cut
 
 
-## oknx 1.0.3 -- the project's own names and datapoint types: 2026-10-02
+### oknx 1.0.3 -- the project's own names and datapoint types: 2026-10-02
 
 * `ga import <export>` reads an ETS group-address export and remembers it, so the export file is only needed while importing. A fresh import replaces the table, because an export is the full picture and an address deleted in ETS has to disappear here too
 * All four output formats of the ETS export dialog are read, verified against real exports of one project: XML, XML (ETS4), CSV (layouts 1/1, 1/3, 3/1, 3/3) and CSV (ETS3), with tab, comma or semicolon. The six that carry a datapoint type produce byte-identical tables; the two that do not -- XML (ETS4) and CSV (ETS3) -- are imported and reported as carrying none, instead of leaving a table that silently decodes nothing
@@ -216,7 +221,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * Host only. The device firmware compiles none of this and is byte-identical (RP2040 1150800 B before and after)
 
 
-## oknx 1.0.2 -- device restart and group addresses: 2026-10-02
+### oknx 1.0.2 -- device restart and group addresses: 2026-10-02
 
 * `<pa> restart` reboots any KNX device (A_Restart, basic). It is unacknowledged by definition, so the tool says so instead of claiming a confirmation. Verified on 5.0.3: the device's RAM-held login window is gone 14 s later, which an idle timeout cannot explain
 * `<pa> masterreset <code> yes` sends a master reset. The erase code is given by NAME, because a mistyped digit is not recoverable over the bus, and `yes` is required. `--help` says what each code erases: `confirmedrestart` nothing, `resetparam`, `resetlinks`, `resetap`, `resetia`, `factoryresetwithoutia`, `factoryreset`
@@ -226,7 +231,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * `gm <x/y/z>` is the group monitor restricted to one address, `ga monitor <x/y/z>` the same thing spelled the other way. It is the existing monitor with a filter, not a second viewer, so the keys, the export and the decoding are unchanged
 * The tunnel can now address a group at all: its cEMI builder had the destination address type nailed to "individual"
 
-## oknx 1.0.1 -- group objects of BIM M112 devices: 2026-10-02
+### oknx 1.0.1 -- group objects of BIM M112 devices: 2026-10-02
 
 * `info ga` reads the group-object descriptors of mask 0x0700-0x0705 devices, so flags, priority and object size are shown there instead of `?`. The descriptor is the classic one with a 2-octet value pointer: `[count:1][ram-ptr:2]` then 4 octets per object. Derived from an ETS busmonitor of 1.1.30 and confirmed against ETS on every object of 1.1.30, 1.1.161 and 1.1.12
 * Those devices publish no `PID_TABLE_REFERENCE` for that table -- they answer obj 3 PID 7 with nr_of_elem 0 -- so the walk falls back to the fixed base 0x4400 that ETS uses, but only after asking, and it checks the table header before taking a flag from it
@@ -235,7 +240,7 @@ below; the version is reported over the bus, so `ftc <pa> info` shows 0.3.0 as t
 * Group-object flags of a device that answers more octets than were asked for are no longer reported as a truncated read -- the surplus is re-requested, nothing is lost
 
 
-## ec/v1dev -- `oknx`, legacy servers, hardening: 2026-09-29
+### ec/v1dev -- `oknx`, legacy servers, hardening: 2026-09-29
 
 **Renaming of the PC tool -- breaking, without an alias**
 
