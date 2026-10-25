@@ -1,6 +1,12 @@
 # Changes
 
 
+## ec/v0.3.0-beta.2: 2026-10-25
+
+One build fix of the PC tool on top of `ec/v0.3.0-beta.1`; the device firmware is unchanged.
+
+* Fix (oknx build): the Linux and Windows targets of oknx build on a Windows host through zig -- the toolchain gets batch wrappers there, include paths are quoted for project folders with spaces, and `win_compat.h` is found through the include path. The oknx README describes the Windows x64 build and how to add the binary to an existing release with `scripts/release/Post.ps1`
+
 ## ec/v0.3.0-beta.1: 2026-10-25
 
 Everything after `ec/v0.2.0-beta.1`. The library version is `0.3.0`; it is reported over the bus, so `ftc <pa> info`
