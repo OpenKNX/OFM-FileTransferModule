@@ -102,10 +102,26 @@ def provision_zig():
 
 
 def write_wrappers(bin_dir, zig, triple):
-    """Write cc/c++/gcc/g++/ar/ranlib that exec `zig <sub> -target <triple>` (POSIX host only)."""
-    if platform.system().lower() == "windows":
-        die("zig cross wrappers need a POSIX host (macOS/Linux); Windows-host cross is CI's job.")
+    """Write host-native compiler wrappers for the selected zig target."""
+    on_windows = platform.system().lower() == "windows"
     os.makedirs(bin_dir, exist_ok=True)
+    if on_windows:
+        scripts = {
+            "cc": ("cc", True),
+            "gcc": ("cc", True),
+            "c++": ("c++", True),
+            "g++": ("c++", True),
+            "ar": ("ar", False),
+            "ranlib": ("ranlib", False),
+        }
+        for name, (subcommand, targeted) in scripts.items():
+            target_args = " -target %s" % triple if targeted else ""
+            p = os.path.join(bin_dir, name + ".bat")
+            with open(p, "w") as f:
+                f.write('@echo off\n"%s" %s%s %%*\nexit /b %%errorlevel%%\n'
+                        % (zig, subcommand, target_args))
+        return bin_dir
+
     scripts = {
         "cc":  '#!/bin/sh\nexec "%s" cc -target %s "$@"\n' % (zig, triple),
         "gcc": '#!/bin/sh\nexec "%s" cc -target %s "$@"\n' % (zig, triple),

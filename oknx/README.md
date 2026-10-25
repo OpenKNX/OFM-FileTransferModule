@@ -157,6 +157,23 @@ pio run -e oknx-linux-x64  # a single target
 `windows-x64`, `windows-arm64`. A macOS host builds the mac targets natively; Linux/Windows cross-build from
 it via zig.
 
+Linux and Windows hosts can also build the Linux and Windows targets via zig. Select an environment
+explicitly on these hosts: the default matrix includes macOS targets that require macOS.
+
+For Windows x64, from the product repository root in PowerShell:
+
+```powershell
+pio run --project-dir .\lib\OFM-FileTransferModule\oknx -e oknx-windows-x64
+& .\lib\OFM-FileTransferModule\oknx\.pio\build\oknx-windows-x64\oknx.exe --help
+```
+
+The product's release post-hook copies this binary to `release\Tools\oknx\Windows\x64\oknx.exe`
+on the next release build. To bundle it into an existing release without rebuilding firmware:
+
+```powershell
+& .\lib\OFM-FileTransferModule\scripts\release\Post.ps1 -ReleaseRoot (Resolve-Path .\release).Path
+```
+
 ## Status
 
 Feature-complete and driven against real hardware (interface + target on a live bus). The remaining work is
