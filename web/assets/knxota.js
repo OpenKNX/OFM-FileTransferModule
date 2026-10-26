@@ -1208,6 +1208,7 @@ function otaStartJob() {
   otaArm("otaStart", "start", p);
 }
 function otaInit() {
+ if (!_o("ota")) return;
  otaBuild();
   document.querySelectorAll("[data-step]").forEach(t => t.onclick = e => {
     e.preventDefault();
