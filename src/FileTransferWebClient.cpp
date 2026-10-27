@@ -713,7 +713,7 @@ void FileTransferWebClient::handleProgMode(WebRequest &req, WebResponse &res)
 
 void FileTransferWebClient::setup()
 {
-    openknxNetwork.webserver.addMenuItem("knxOTA", "/knxota", 55);
+    openknxNetwork.webserver.addMenuItem("knxOTA", "/knxota", 20);
     openknxNetwork.webserver.addRoute(WEB_GET, "/assets/knxota.css",
                                       Webserver::Asset(WebAssets::knxota_css_mime, WebAssets::knxota_css_gz,
                                                        sizeof(WebAssets::knxota_css_gz)));

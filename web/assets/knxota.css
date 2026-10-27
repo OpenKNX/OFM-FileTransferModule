@@ -93,6 +93,7 @@ details.log > summary:hover { color:#555; }
 .steps .step-q { margin-left:auto; align-self:center; display:inline-flex; width:19px; height:19px; border-radius:50%; background:#888;
                  color:#fff; font-size:.75em; font-weight:700; align-items:center; justify-content:center; text-decoration:none; }
 .steps .step-q[aria-expanded='true'] { background:#449841; }
+@media (max-width:620px){.steps{flex-wrap:wrap}}
 .step-help { margin:0; padding:9px 12px; font-size:.88em; line-height:1.5; color:#444; background:#f7f7f7;
              border:1px solid #e6e6e6; border-top:none; }
 
