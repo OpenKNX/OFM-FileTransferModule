@@ -1,10 +1,12 @@
 # Changes
 
 
-## ec/v0.3.0-beta.2: 2026-10-25
+## ec/v0.3.0-beta.2: 2026-10-29
 
-One build fix of the PC tool on top of `ec/v0.3.0-beta.1`; the device firmware is unchanged.
+A build fix of the PC tool and two fixes of the knxOTA page on top of `ec/v0.3.0-beta.1`; the transfer protocol is unchanged.
 
+* Fix (knxOTA page): `knxota.js` returns from its initialisation on a page without the OTA section instead of building the OTA view there
+* Change (knxOTA page): the menu item has priority 20 (before 55) and follows the IP-Interface and IP-Router pages (10); below 620 px the step bar wraps, so the help button stays visible
 * Fix (oknx build): the Linux and Windows targets of oknx build on a Windows host through zig -- the toolchain gets batch wrappers there, include paths are quoted for project folders with spaces, and `win_compat.h` is found through the include path. The oknx README describes the Windows x64 build and how to add the binary to an existing release with `scripts/release/Post.ps1`
 
 ## ec/v0.3.0-beta.1: 2026-10-25
