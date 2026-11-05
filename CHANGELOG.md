@@ -1,6 +1,12 @@
 # Changes
 
 
+## ec/v0.3.0-beta.3: 2026-11-05
+
+A fix of the knxOTA page on top of `ec/v0.3.0-beta.2`; the transfer protocol is unchanged.
+
+* Fix (knxOTA page): status, file list, start, cancel and login run in the loop task; on ESP32 they raced with the loop over the client state
+
 ## ec/v0.3.0-beta.2: 2026-10-29
 
 A build fix of the PC tool and two fixes of the knxOTA page on top of `ec/v0.3.0-beta.1`; the transfer protocol is unchanged.
