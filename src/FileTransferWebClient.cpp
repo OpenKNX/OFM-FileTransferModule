@@ -724,18 +724,19 @@ void FileTransferWebClient::setup()
     openknxNetwork.webserver.addJavaScript("/assets/knxota.js");
 
     openknxNetwork.webserver.addRoute(WEB_GET, "/knxota", [this](WebRequest &q, WebResponse &r) { handlePage(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_GET, "/knxota/status", [this](WebRequest &q, WebResponse &r) { handleStatus(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_GET, "/knxota/files", [this](WebRequest &q, WebResponse &r) { handleFiles(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/start", [this](WebRequest &q, WebResponse &r) { handleStart(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/cancel", [this](WebRequest &q, WebResponse &r) { handleCancel(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/trigger", [this](WebRequest &q, WebResponse &r) { handleTrigger(q, r); });
+    // the routes below touch the client state: their handlers run in the loop task (ESP32: not in httpd)
+    openknxNetwork.webserver.addLoopRoute(WEB_GET, "/knxota/status", [this](WebRequest &q, WebResponse &r) { handleStatus(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_GET, "/knxota/files", [this](WebRequest &q, WebResponse &r) { handleFiles(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/start", [this](WebRequest &q, WebResponse &r) { handleStart(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/cancel", [this](WebRequest &q, WebResponse &r) { handleCancel(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/trigger", [this](WebRequest &q, WebResponse &r) { handleTrigger(q, r); });
 #ifdef OPENKNX_FTC_SECURITY
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/auth", [this](WebRequest &q, WebResponse &r) { handleAuth(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/auth", [this](WebRequest &q, WebResponse &r) { handleAuth(q, r); });
 #endif
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/scan", [this](WebRequest &q, WebResponse &r) { handleAction(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/feat", [this](WebRequest &q, WebResponse &r) { handleAction(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/ga", [this](WebRequest &q, WebResponse &r) { handleGa(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/drives", [this](WebRequest &q, WebResponse &r) { handleDrives(q, r); });
-    openknxNetwork.webserver.addRoute(WEB_POST, "/knxota/progmode", [this](WebRequest &q, WebResponse &r) { handleProgMode(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/scan", [this](WebRequest &q, WebResponse &r) { handleAction(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/feat", [this](WebRequest &q, WebResponse &r) { handleAction(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/ga", [this](WebRequest &q, WebResponse &r) { handleGa(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/drives", [this](WebRequest &q, WebResponse &r) { handleDrives(q, r); });
+    openknxNetwork.webserver.addLoopRoute(WEB_POST, "/knxota/progmode", [this](WebRequest &q, WebResponse &r) { handleProgMode(q, r); });
 }
 #endif
