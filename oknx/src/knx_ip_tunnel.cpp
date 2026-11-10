@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -874,6 +875,14 @@ bool KnxIpTunnel::connect(const std::string& ip, uint16_t port)
 void KnxIpTunnel::disconnect()
 {
     _reconnectEnabled = false; // an intentional disconnect must NOT trigger an auto-reconnect
+    // Frames still queued go out first: a T_Disconnect left in the queue never reaches the bus, and the device then keeps
+    // the transport connection for another 6-12 s and answers the next client over it (03_03_04 5 p.17, A14 p.20).
+    for (const uint32_t until = nowMs() + 1500; _connected && s.sock != SOCK_INVALID && (s.txInflightBusy || !s.txQueue.empty()) &&
+                                                (int32_t)(until - nowMs()) > 0;)
+    {
+        pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // the socket does not block: no busy core while the ack is due
+    }
     if (s.sock == SOCK_INVALID)
     {
         _connected = false;
