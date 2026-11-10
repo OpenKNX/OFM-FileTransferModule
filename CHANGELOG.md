@@ -1,6 +1,11 @@
 # Changes
 
 
+## ec/v0.3.0-beta.4: not released
+
+* Fix (oknx): a disconnect sends the queued frames first, for up to 1.5 s, then closes the tunnel. A T_Disconnect left in the queue never reached the bus; the device kept the transport connection for 6 to 12 s and answered the next request over it
+
+
 ## ec/v0.3.0-beta.3: 2026-11-05
 
 A fix of the knxOTA page on top of `ec/v0.3.0-beta.2`; the transfer protocol is unchanged.
