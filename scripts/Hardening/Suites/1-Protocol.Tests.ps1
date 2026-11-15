@@ -161,8 +161,13 @@ function Invoke-FtmSuiteProtocol {
         Add-FtmEvidence -Note "$($shapes.Count * 3) malformed commands sent"
         Assert-FtmTrue (Test-FtmConsoleAlive -Console $con) 'console stopped answering after the malformed burst'
         # Still answering is not enough - it must still be able to do real work.
-        $ok = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ping" -TimeoutMs 15000
+        # Wait for the answer or the client's 6 s "no response" line; a silent target must not pass.
+        $ok = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ping" -TimeoutMs 15000 `
+            -UntilMatch '(?i)FTC:\s.*(result=0x[0-9a-f]{2}|no response|no answer)'
         Add-FtmEvidence -Output $ok
-        Assert-FtmNotMatch $ok '(?i)(timeout|no answer|failed)' 'the device answers the console but no longer reaches the FTC target after the burst'
+        $own = Select-FtmOwnLines -Text $ok
+        Assert-FtmNotMatch $own '(?i)(timeout|no answer|no response|failed)' 'the device answers the console but no longer reaches the FTC target after the burst'
+        # A module version answer has 6 octets; a refusal (e.g. 0xA2) has one.
+        Assert-FtmMatch $own '(?i)prop=100 len=6' 'the FTC target did not answer the ping with its module version after the burst'
     }
 }
