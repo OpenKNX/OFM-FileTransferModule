@@ -3,6 +3,8 @@
 
 ## ec/v0.3.0-beta.4: not released
 
+* Hardening: Test-FtmStillWorks, F-A-3 and F-P-10 judge only the FTC lines of the device console, so a log line of another module ("MQTT: connect timeout") no longer fails or passes a case; `Test-FtmStillWorks` passes only on the df table and F-P-10 only on the module version answer, so a silent target no longer reads as alive
+* Fix: the file list of the web client closes the SD and external flash directory also when an entry cannot be added
 * Fix (oknx): a disconnect sends the queued frames first, for up to 1.5 s, then closes the tunnel. A T_Disconnect left in the queue never reached the bus; the device kept the transport connection for 6 to 12 s and answered the next request over it
 
 
