@@ -817,4 +817,27 @@ function Remove-FtmArtefact {
     }
 }
 
+function Select-FtmOwnLines {
+    <#
+    .SYNOPSIS
+        Drops log lines of other modules ("<time>: MQTT: connect timeout") from console output.
+    .DESCRIPTION
+        The device log runs into the same console, so a foreign line can carry "timeout" while
+        the FTC answer is complete, or satisfy a check that expects a refusal. Lines tagged FTC or
+        FileTransfer* (the module loggers) and untagged lines (tables, prompts) stay.
+    #>
+    param([string]$Text)
+    $logLine = '^(?:\s*\$)*\s*(?:(?:\d{4}-\d{2}-\d{2}|\d+d) \d{2}:\d{2}:\d{2}:\s*)?(?<tag>[A-Za-z][A-Za-z0-9_-]*(?:<[^>]*>)?):\s{2,}'
+    # Framework logs: Arduino "[12084831][E][NetworkClient.cpp:278] ..." and ESP-IDF "E (113108) esp.emac: ...".
+    $sysLine = '^(?:\s*\$)*\s*(?:\[\s*\d+\]\[[EWIDV]\]\[|[EWIDV] \(\d+\) )'
+    $kept = foreach ($line in ($Text -split "`n")) {
+        if ($line -cmatch $sysLine) { continue }
+        $m = [regex]::Match($line, $logLine)
+        if (-not $m.Success) { $line; continue }
+        $tag = $m.Groups['tag'].Value
+        if ($tag -like 'FTC*' -or $tag -like 'FileTransfer*') { $line }
+    }
+    return ($kept -join "`n")
+}
+
 Export-ModuleMember -Function *-* -Variable @()

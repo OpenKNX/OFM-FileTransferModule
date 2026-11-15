@@ -139,7 +139,8 @@ function Invoke-FtmSuiteAccess {
             Add-FtmEvidence -Output $s
             $out = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t ll" -TimeoutMs 20000
             Add-FtmEvidence -Output $out
-            Assert-FtmMatch $out '(?i)(0xA2|disabled|denied|refus|not permitted|no answer|timeout)' 'stage Off did not close the read path'
+            # A foreign log line ("MQTT: connect timeout") must not count as the refusal.
+            Assert-FtmMatch (Select-FtmOwnLines -Text $out) '(?i)(0xA2|disabled|denied|refus|not permitted|no answer|timeout)' 'stage Off did not close the read path'
         }
 
         Invoke-FtmTestCase -Suite $SuiteTitle -Id 'F-A-4' -Title 'Stage ProgMode: writes only while the device is in programming mode' -Reference 'FTC-Security: stage ProgMode' -Body {
