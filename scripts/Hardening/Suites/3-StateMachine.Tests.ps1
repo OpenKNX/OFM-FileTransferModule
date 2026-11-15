@@ -32,11 +32,18 @@ function Test-FtmStillWorks {
     <#
     .SYNOPSIS
         Proves the server can still do real work after a case.
+    .DESCRIPTION
+        Passes only on the df table itself ("| Free:" line). Waits for it or for the client's own
+        failure line, so a silent target (no answer after the 6 s client timeout) is not read as alive.
+        Judges only the FTC part of the console output (Select-FtmOwnLines); Output keeps the full text.
     #>
     param($Console, [string]$Target, [int]$TimeoutMs = 20000)
-    $out = Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target df" -TimeoutMs $TimeoutMs
+    $out = Invoke-FtmConsoleCommand -Console $Console -Command "ftc $Target df" -TimeoutMs $TimeoutMs `
+        -UntilMatch '(?im)(\|\s*Free:.*%|FTC:\s.*(no answer|did not report|busy))'
+    $own = Select-FtmOwnLines -Text $out
     return [pscustomobject]@{
-        Ok     = ($out.Trim().Length -gt 0 -and $out -notmatch '(?i)(timeout|no answer|busy|in progress)')
+        # The line may still carry the uptime stamp ("0d 00:01:23: ") when the device has no valid time.
+        Ok     = ($own -match '(?im)^\s*(?:(?:\d{4}-\d{2}-\d{2}|\d+d) \d{2}:\d{2}:\d{2}:\s*)?\|\s*Free:' -and $own -notmatch '(?i)(timeout|no answer|did not report|busy|in progress)')
         Output = $out
     }
 }
@@ -138,8 +145,8 @@ function Invoke-FtmSuiteState {
             # Ten cycles over a source that never opens leak nothing and prove nothing.
             if ($i -eq 1 -and (Test-FtmLocalSourceMissing $started)) { Set-FtmTestSkip 'no state-probe source staged on the client device - see the README' }
             [void](Invoke-FtmConsoleCommand -Console $con -Command "ftc $t cancel" -TimeoutMs 12000)
-            $probe = Invoke-FtmConsoleCommand -Console $con -Command "ftc $t df" -TimeoutMs 15000
-            if ($probe.Trim().Length -eq 0 -or $probe -match '(?i)(busy|in progress|error|timeout)') { $failures += $i }
+            $probe = Test-FtmStillWorks -Console $con -Target $t
+            if (-not $probe.Ok) { $failures += $i }
         }
         Add-FtmEvidence -Note "cycles that failed: $(if ($failures.Count) { $failures -join ', ' } else { 'none' })"
         Assert-FtmTrue ($failures.Count -eq 0) "open/abort cycles started failing at cycle $(if ($failures.Count) { $failures[0] } else { '-' }) - a handle or sink is leaking"
