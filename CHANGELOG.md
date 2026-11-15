@@ -1,7 +1,9 @@
 # Changes
 
 
-## ec/v0.3.0-beta.4: not released
+## ec/v0.3.0-beta.4: 2026-11-15
+
+Two fixes and a hardening of the test suite on top of `ec/v0.3.0-beta.3`; the transfer protocol is unchanged.
 
 * Hardening: Test-FtmStillWorks, F-A-3 and F-P-10 judge only the FTC lines of the device console, so a log line of another module ("MQTT: connect timeout") no longer fails or passes a case; `Test-FtmStillWorks` passes only on the df table and F-P-10 only on the module version answer, so a silent target no longer reads as alive
 * Fix: the file list of the web client closes the SD and external flash directory also when an entry cannot be added
