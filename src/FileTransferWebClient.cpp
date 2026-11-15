@@ -392,11 +392,11 @@ void FileTransferWebClient::handleFiles(WebRequest &req, WebResponse &res)
         char nm[64];
         if (sd::fileStore.dirOpen("/"))
         {
+            struct DirClose { ~DirClose() { sd::fileStore.dirClose(); } } dirClose; // also when add() throws
             int t;
             uint32_t sz = 0;
             while ((t = sd::fileStore.dirNext(nm, sizeof(nm), &sz)) > 0)
                 if (t == 1) add(nm, sz);
-            sd::fileStore.dirClose();
         }
 #endif
     }
@@ -406,11 +406,11 @@ void FileTransferWebClient::handleFiles(WebRequest &req, WebResponse &res)
         char nm[64];
         if (efc::fileStore.dirOpen("/"))
         {
+            struct DirClose { ~DirClose() { efc::fileStore.dirClose(); } } dirClose; // also when add() throws
             int t;
             uint32_t sz = 0;
             while ((t = efc::fileStore.dirNext(nm, sizeof(nm), &sz)) > 0)
                 if (t == 1) add(nm, sz);
-            efc::fileStore.dirClose();
         }
 #endif
     }
